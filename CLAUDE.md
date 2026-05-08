@@ -5,6 +5,22 @@
 
 ---
 
+## ⚠️ Migration Jetson AGX Orin en cours (depuis 2026-05-08)
+
+Le projet est en cours de portage sur **Jetson AGX Orin 32GB** dans Docker. La version Windows reste valide mais figée sur la branche `windows-legacy` (tag `v0.1.0-windows-final`).
+
+**Avant toute modification, lire dans cet ordre** :
+1. [docs/JETSON_SESSION_LOG.md](docs/JETSON_SESSION_LOG.md) — état actuel + dernière session
+2. [docs/JETSON_MIGRATION.md](docs/JETSON_MIGRATION.md) — plan global
+3. [docs/JETSON_ERREURS.md](docs/JETSON_ERREURS.md) — bugs déjà rencontrés
+4. [docker/README.md](docker/README.md) — workflow Docker
+
+**À faire en fin de chaque session** : mettre à jour le bloc "État actuel" + ajouter une nouvelle entrée de session dans `JETSON_SESSION_LOG.md`. Logger toute erreur rencontrée dans `JETSON_ERREURS.md`.
+
+Les pièges Windows ci-dessous restent valides pour `windows-legacy` mais peuvent ne plus s'appliquer au build Jetson Linux.
+
+---
+
 ## Pièges critiques
 
 1. **vcvarsall.bat** → `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...` (PAS `Community`)
