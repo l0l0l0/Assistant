@@ -16,12 +16,12 @@
 ### Phase courante
 **Phase 0 — Conteneurisation** : ✅ code livré, ❌ pas encore testé sur le Jetson.
 **Phase 1a — Portage Linux pur** : ✅ code livré (vcpkg.json + main.cpp signal handler).
-**Tooling** : ✅ journaux + hook PreCompact configurés.
+**Tooling** : ✅ journaux + hook PreCompact + bootstrap one-liner configurés.
 
 ### Branches & tags
 | Ref | Pointe sur | Statut |
 |-----|------------|--------|
-| `main` | `8ae9f2e` (cherry-pick rework README) | actif, dev Jetson |
+| `main` | `7ce8fea` (bootstrap_jetson.sh) | actif, dev Jetson |
 | `windows-legacy` | `3174dad` (last commit Windows) | gelée, pour repli |
 | `v0.1.0-windows-final` (tag) | `3174dad` | archive permanente |
 
@@ -257,7 +257,9 @@ Override possibles : `REPO_DIR`, `L4T_VERSION`, `SKIP_BUILD`, `SKIP_PERFMODE`.
 | `7ca9c89` | docs: add Jetson session and error logs |
 | `34e112e` | docs(claude): mandatory session log discipline |
 | `fb76f64` | docs: update session log with logging discipline + complete commit list |
-| (commit suivant) | feat(linux): Phase 1a portage — vcpkg conditions + POSIX crash handler |
+| `78abe3e` | feat(linux): Phase 1a portage — vcpkg conditions + POSIX crash handler |
+| `7ce8fea` | feat(scripts): bootstrap_jetson.sh — setup Jetson en une commande |
+| (clôture session) | docs: clôture session 2026-05-08 — hashes finaux + état actuel |
 
 ### Notes / observations
 - Le hook PreCompact est configuré côté global utilisateur (`~/.claude/settings.json`), donc actif aussi en dehors de ce projet — comportement souhaité pour la discipline de journal.
