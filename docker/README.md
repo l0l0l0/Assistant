@@ -4,7 +4,32 @@ Stack Docker pour développer et déployer MicroscopeIBOM sur Jetson AGX Orin av
 
 Voir [../docs/JETSON_MIGRATION.md](../docs/JETSON_MIGRATION.md) pour le plan complet.
 
-## Prérequis sur l'hôte Jetson
+## ⚡ Setup en une commande (recommandé)
+
+Sur un Jetson vierge avec JetPack 6.2 installé :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lo26lo/Assistant/main/scripts/bootstrap_jetson.sh | bash
+```
+
+Le script [bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh) fait tout :
+1. Vérifie l'environnement Jetson
+2. Active le mode performance MAXN
+3. Installe Docker + nvidia-container-toolkit (si manquants)
+4. Clone le repo dans `~/Assistant-git`
+5. Configure les règles udev RealSense
+6. Build les images `microscope-ibom:base` et `:dev` (~2h cumulé)
+7. Affiche les instructions pour la suite
+
+Le script est **idempotent** (relançable sans casser l'existant). Log dans `/tmp/microscope-ibom-bootstrap.log`.
+
+Override possibles :
+```bash
+REPO_DIR=/data/Assistant-git L4T_VERSION=r36.4.3 bash bootstrap_jetson.sh
+SKIP_BUILD=1 bash bootstrap_jetson.sh   # juste setup Docker, pas de build
+```
+
+## Prérequis sur l'hôte Jetson (manuel, si tu veux pas le bootstrap)
 
 ```bash
 # Mode performance maximum

@@ -41,9 +41,8 @@
 - Règles strictes de tenue de journaux dans [CLAUDE.md](../CLAUDE.md) (mise à jour avant chaque push obligatoire)
 
 ### Ce qui reste à faire
-- [ ] **Tester `docker compose build base`** sur le Jetson (~90-120 min première fois)
-- [ ] **Tester `docker compose build dev`** + lancer le container interactif
-- [ ] **Tester le build C++** dans le container : `bash scripts/build_jetson.sh`
+- [ ] **Lancer le bootstrap** sur le Jetson : `curl -fsSL https://raw.githubusercontent.com/lo26lo/Assistant/main/scripts/bootstrap_jetson.sh | bash` (~2h cumulé)
+- [ ] **Tester le build C++** dans le container dev : `bash scripts/build_jetson.sh`
 - [ ] Phase 1b : corrections ciblées au cas par cas selon retours du compilateur (notamment ONNX Runtime ARM, voir [JETSON_ERREURS.md](JETSON_ERREURS.md) entrée anticipée)
 - [ ] Phase 2 : refactor `FrameBuffer` pour mémoire unifiée (zero-copy)
 - [ ] Phase 3 (si nécessaire) : DLA + INT8 pour le ComponentDetector
@@ -227,8 +226,25 @@ Modifications minimales pour préparer le build Jetson sans casser le build Wind
 | `#ifdef WIN32` dans C++ | Garder | Branches Linux déjà fonctionnelles, support Windows possible plus tard |
 | Handler POSIX dans main.cpp | Ajouté en Phase 1a | Petite valeur ajoutée immédiate, pas de risque |
 
+### Bootstrap script unique (ajout post-Phase 1a)
+Création de [scripts/bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh) — script tout-en-un pour partir d'un Jetson vierge JP6.2 et arriver à un container dev prêt :
+
+- Vérifs préalables (Jetson, sudo, internet)
+- Mode performance MAXN
+- Setup Docker + nvidia-container-toolkit + test runtime nvidia
+- Clone du repo (idempotent : git pull si déjà cloné)
+- Règles udev RealSense
+- Build des images `:base` puis `:dev`
+- Recap avec instructions pour la suite
+
+Usage one-liner : `curl -fsSL https://raw.githubusercontent.com/lo26lo/Assistant/main/scripts/bootstrap_jetson.sh | bash`
+
+Override possibles : `REPO_DIR`, `L4T_VERSION`, `SKIP_BUILD`, `SKIP_PERFMODE`.
+
+[docker/README.md](../docker/README.md) mis à jour pour mettre le bootstrap en première option.
+
 ### À faire prochaine session
-1. **Sur le Jetson** : `git pull` + `docker compose -f docker/compose.yml build base`
+1. **Sur le Jetson** : lancer le bootstrap (one-liner ci-dessus)
 2. Reporter les erreurs dans [JETSON_ERREURS.md](JETSON_ERREURS.md)
 3. Phase 1b : corrections ciblées selon retours compilateur (probablement ONNX Runtime à régler)
 
