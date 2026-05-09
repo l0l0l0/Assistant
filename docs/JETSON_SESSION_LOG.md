@@ -22,7 +22,7 @@
 ### Branches & tags
 | Ref | Pointe sur | Statut |
 |-----|------------|--------|
-| `main` | (commit Phase 2 à venir) | actif, dev Jetson |
+| `main` | `f73497f` (Phase 2a/b/c UnifiedAllocator) | actif, dev Jetson |
 | `windows-legacy` | `3174dad` (last commit Windows) | gelée, pour repli |
 | `v0.1.0-windows-final` (tag) | `3174dad` | archive permanente |
 
@@ -257,7 +257,8 @@ Avancer la Phase 2 (mémoire unifiée Tegra) côté code C++ pendant que le test
 ### Commits poussés cette session
 | Hash | Message |
 |------|---------|
-| (à venir) | feat(camera): Phase 2a/b/c — UnifiedAllocator UMA + suppression FrameBuffer dead code |
+| `f73497f` | feat(camera): Phase 2a/b/c — UnifiedAllocator UMA + suppression FrameBuffer dead code |
+| (clôture) | docs: clôture session 2026-05-09 — hash final + état actuel |
 
 ## Session 2026-05-08 (suite) — Outillage journaux + Phase 1a
 
