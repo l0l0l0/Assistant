@@ -129,10 +129,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CUDACXX=/usr/local/cuda/bin/nvcc
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build git pkg-config wget ca-certificates \
+    build-essential ninja-build git pkg-config wget ca-certificates \
     python3 python3-dev python3-pip python3-numpy python3-setuptools python3-wheel python3-packaging \
     libssl-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ONNX Runtime v1.19.2 exige CMake 3.26+ (Jammy ne fournit que 3.22.1).
+# pip3 install place cmake dans /usr/local/bin qui passe devant /usr/bin
+# dans PATH — le build.sh d'ORT (qui invoque "cmake" sans chemin absolu)
+# utilisera donc cette version recente.
+RUN pip3 install --no-cache-dir "cmake>=3.28" psutil \
+    && cmake --version
 
 WORKDIR /tmp
 # Clone en 2 etapes pour eviter "HTTP/2 stream was not closed cleanly: CANCEL"
