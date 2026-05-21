@@ -36,16 +36,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-#  vcpkg (utile uniquement si dependance non packagee en apt)
-#  Optionnel : si tout est satisfait par apt, on peut commenter ce bloc
+#  vcpkg (OPT-IN — desactive par defaut sur Jetson)
+#
+#  Sur Jetson, toutes les deps du projet sont satisfaites par les paquets
+#  apt systeme installes dans base.Dockerfile (Qt6, OpenCV CUDA, spdlog, etc.)
+#  donc vcpkg n'est pas necessaire et le bootstrap-vcpkg.sh echoue souvent
+#  sur la cible ARM64 (binaire vcpkg-tool pre-compile pas dispo, fallback
+#  compilation from source qui demande des outils manquants).
+#
+#  Pour activer vcpkg malgre tout :
+#      docker compose build dev --build-arg INSTALL_VCPKG=true
+#
+#  Le scripts/build_jetson.sh detecte automatiquement la presence/absence
+#  de VCPKG_ROOT et active le toolchain en consequence.
 # -----------------------------------------------------------------------------
-ARG INSTALL_VCPKG=true
+ARG INSTALL_VCPKG=false
 RUN if [ "$INSTALL_VCPKG" = "true" ]; then \
         git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg && \
         /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics ; \
     fi
-ENV VCPKG_ROOT=/opt/vcpkg
-ENV PATH="${VCPKG_ROOT}:${PATH}"
+# VCPKG_ROOT n'est exporte QUE si vcpkg a ete installe (sinon
+# build_jetson.sh fallback proprement sur les paquets apt systeme).
 
 # -----------------------------------------------------------------------------
 #  Configuration ccache (accelere les rebuilds)

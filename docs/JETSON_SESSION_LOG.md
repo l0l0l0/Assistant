@@ -251,12 +251,21 @@ tail -f /tmp/bootstrap.out
 
 11. [JETSON_ERREURS.md](JETSON_ERREURS.md) entrée #4 ouverte et fermée en ✅ RÉSOLU dans la même session.
 
+### Suite — vcpkg désactivé par défaut
+
+12. Bootstrap relancé après fix Qt6 → étape **6/8 base ✅ RÉUSSI** (OpenCV 4.10 compilé, "=== Stack OK ==="). Échec étape 7/8 `bootstrap-vcpkg.sh` sur ARM64 (binaire `vcpkg-tool` non dispo pour cette cible, fallback compilation from source qui échoue dans le container).
+
+13. **Décision design** plutôt que fix : vcpkg n'a jamais été pertinent sur Jetson (toutes les deps sont en apt natif ARM64). [dev.Dockerfile](../docker/dev.Dockerfile) — `INSTALL_VCPKG` passe de `true` à `false` par défaut. Activable au cas par cas via `--build-arg INSTALL_VCPKG=true`. `VCPKG_ROOT` et `PATH` retirés du `ENV` inconditionnel pour que `build_jetson.sh` fallback proprement.
+
+14. [JETSON_ERREURS.md](JETSON_ERREURS.md) entrée #5 ouverte et fermée en ✅ RÉSOLU dans la même session.
+
 ### Commits poussés cette session
 | Hash | Message |
 |------|---------|
 | `ddb4c30` | fix(docker): remplace dustynv/l4t-jetpack par nvcr.io/nvidia/l4t-jetpack |
 | `7d16168` | fix(docker): force --network host pour contourner iptable_raw |
-| (à venir) | fix(docker): qt6-virtualkeyboard → qt6-virtualkeyboard-plugin + qml6 module |
+| `7145bf0` | fix(docker): qt6-virtualkeyboard → qt6-virtualkeyboard-plugin + qml6 module |
+| (à venir) | fix(docker): vcpkg desactive par defaut sur Jetson (opt-in via build-arg) |
 
 ---
 

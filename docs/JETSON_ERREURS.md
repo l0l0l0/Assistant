@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 5 | 2026-05-21 | dev.Dockerfile / vcpkg | ✅ RÉSOLU | [`bootstrap-vcpkg.sh` échoue sur ARM64 — vcpkg désactivé par défaut](#erreur-5--bootstrap-vcpkgsh-echoue-sur-arm64--vcpkg-desactive-par-defaut) |
 | 4 | 2026-05-21 | apt / Qt6 base.Dockerfile | ✅ RÉSOLU | [`qt6-virtualkeyboard` n'est qu'un nom de paquet source sur Jammy](#erreur-4--qt6-virtualkeyboard-nest-quun-nom-de-paquet-source-sur-jammy) |
 | 3 | 2026-05-21 | Docker / kernel Tegra | ✅ RÉSOLU | [Docker 29.x sur JP6.2 — `iptable_raw` manquant dans le kernel Tegra](#erreur-3--docker-29x-sur-jp62--iptable_raw-manquant-dans-le-kernel-tegra) |
 | 2 | 2026-05-21 | Docker / image base | ✅ RÉSOLU | [Repo `dustynv/l4t-jetpack` n'existe pas sur Docker Hub](#erreur-2--repo-dustynvl4t-jetpack-nexiste-pas-sur-docker-hub) |
@@ -101,6 +102,50 @@ Ces points sont **anticipés** mais pas encore observés. À convertir en vraie 
 ---
 
 <!-- AJOUTER LES NOUVELLES ERREURS AU-DESSUS DE CETTE LIGNE -->
+
+## ERREUR 5 — `bootstrap-vcpkg.sh` échoue sur ARM64 — vcpkg désactivé par défaut
+
+**Date :** 2026-05-21
+**Composant :** dev.Dockerfile / vcpkg / ARM64
+**Statut :** ✅ RÉSOLU (vcpkg rendu opt-in)
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-05-21
+
+### Symptôme
+À l'étape 7/8 du bootstrap (build dev image), `bootstrap-vcpkg.sh` échoue avec un message générique qui liste les outils à installer pour toutes les distributions (Alpine, FreeBSD, OpenBSD, Solaris, etc.) :
+
+```
+sudo pacman -Syu base-devel git curl zip unzip tar cmake ninja
+On Alpine: apk add build-base cmake ninja zip unzip curl git
+On Solaris and illumos distributions: pkg install web/curl compress/zip compress/unzip
+...
+ERROR: process "...bootstrap-vcpkg.sh -disableMetrics..." exit code: 1
+```
+
+### Cause
+`vcpkg-tool` n'a pas de binaire ARM64 pré-compilé pour tous les systèmes. Le script `bootstrap-vcpkg.sh` fallback alors sur une compilation from source qui requiert un environnement précis. Sur l'image Ubuntu Jammy ARM64 dérivée de `nvcr.io/nvidia/l4t-jetpack`, soit une dépendance manque, soit le binaire n'est juste pas distribué pour cette cible exotique.
+
+### Cause profonde / pourquoi c'est pas grave
+**Sur Jetson, on n'utilise PAS vcpkg de toute façon.** Toutes les dépendances du projet sont déjà fournies par les paquets apt système installés dans `base.Dockerfile` :
+- Qt6 → `qt6-base-dev` + co
+- OpenCV CUDA → compilé from source dans `base.Dockerfile`
+- spdlog, nlohmann_json, libharu, Catch2, ZXing → tous via apt
+- ONNX Runtime → géré séparément (cf. ERREUR 1 anticipée)
+
+Le `scripts/build_jetson.sh` détecte automatiquement la présence/absence de `VCPKG_ROOT` et adapte le toolchain CMake en conséquence.
+
+### Solution appliquée ✅
+[docker/dev.Dockerfile](../docker/dev.Dockerfile) : `ARG INSTALL_VCPKG=true` → `false` par défaut. Le bloc `RUN` est conservé pour permettre l'activation à la demande :
+
+```bash
+# Si on veut vcpkg malgre tout :
+docker compose -f docker/compose.yml build dev --build-arg INSTALL_VCPKG=true
+```
+
+Le `ENV VCPKG_ROOT=/opt/vcpkg` et `ENV PATH=...` ont aussi été retirés inconditionnellement, pour que `build_jetson.sh` fallback proprement sur les paquets apt système quand vcpkg n'est pas là.
+
+### Notes / prévention
+- vcpkg n'a jamais été pertinent côté Jetson. Le code initial dérivait du setup Windows où vcpkg apportait `onnxruntime-gpu`, `opencv4`, `qt6-base`, etc. Sur Jetson on a tous ces paquets en apt natif (ARM64 build) — vcpkg n'apporterait que de la redondance.
+- Si un jour on a besoin d'une dépendance spécifique non packagée en apt, mieux vaut compiler from source dans le `base.Dockerfile` (comme on fait déjà pour OpenCV CUDA, librealsense, ZXing-cpp) qu'introduire vcpkg.
 
 ## ERREUR 4 — `qt6-virtualkeyboard` n'est qu'un nom de paquet source sur Jammy
 
