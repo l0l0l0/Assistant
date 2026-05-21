@@ -3,7 +3,13 @@ cmake_minimum_required(VERSION 3.22)
 # Fix: CMake 4.x + Ninja on Windows — rules.ninja not generated during try_compile
 # Root cause: path normalization issue with short DOS paths (COMMON~1) in CMAKE_MAKE_PROGRAM
 # Solution from: https://cmake.org/cmake/help/latest/variable/CMAKE_TRY_COMPILE_TARGET_TYPE.html
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+#
+# IMPORTANT : Windows-only. Sur Linux, ce flag empeche FindOpenGL (et autres
+# find_package) de tester la liaison effective des libs lors des try_compile,
+# ce qui fait echouer Qt6Gui ("Could NOT find OpenGL").
+if(WIN32)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+endif()
 
 # ============================================================================
 # MicroscopeIBOM — PCB Inspection with AI Overlay
