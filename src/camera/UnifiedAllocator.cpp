@@ -1,5 +1,10 @@
 #include "UnifiedAllocator.h"
 
+// CV_AUTOSTEP est dans cvdef.h — sur OpenCV 4.10 (apt jammy) l'inclusion via
+// <opencv2/core.hpp> n'est pas transitive, il faut l'expliciter sinon le compile
+// echoue avec "CV_AUTOSTEP was not declared in this scope".
+#include <opencv2/core/cvdef.h>
+
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <cstdlib>
