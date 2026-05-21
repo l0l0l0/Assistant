@@ -259,13 +259,22 @@ tail -f /tmp/bootstrap.out
 
 14. [JETSON_ERREURS.md](JETSON_ERREURS.md) entrée #5 ouverte et fermée en ✅ RÉSOLU dans la même session.
 
+### Suite — devices commentés par défaut + bootstrap Phase 0 ✅
+
+15. Bootstrap COMPLETE après le fix vcpkg : étape 6/8 base + 7/8 dev OK, image `microscope-ibom:dev` créée. **Phase 0 conteneurisation = terminée.**
+
+16. Premier `docker compose up -d dev` échoue : `/dev/video0` mapé en hard requirement, caméra USB pas branchée → Docker refuse. Pour le build C++ on n'en a pas besoin. [docker/compose.yml](../docker/compose.yml) — bloc `devices:` commenté par défaut sur `dev` et `runtime`, à décommenter quand matériel présent.
+
+17. [JETSON_ERREURS.md](JETSON_ERREURS.md) entrée #6 ouverte et fermée en ✅ RÉSOLU dans la même session.
+
 ### Commits poussés cette session
 | Hash | Message |
 |------|---------|
 | `ddb4c30` | fix(docker): remplace dustynv/l4t-jetpack par nvcr.io/nvidia/l4t-jetpack |
 | `7d16168` | fix(docker): force --network host pour contourner iptable_raw |
 | `7145bf0` | fix(docker): qt6-virtualkeyboard → qt6-virtualkeyboard-plugin + qml6 module |
-| (à venir) | fix(docker): vcpkg desactive par defaut sur Jetson (opt-in via build-arg) |
+| `847402e` | fix(docker): vcpkg desactive par defaut sur Jetson (opt-in via build-arg) |
+| (à venir) | fix(docker): devices commentes par defaut (camera/USB opt-in pour le runtime) |
 
 ---
 

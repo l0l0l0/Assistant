@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 6 | 2026-05-21 | compose.yml / devices | ✅ RÉSOLU | [`/dev/video0` map empêche le container de démarrer sans caméra branchée](#erreur-6--devvideo0-map-empeche-le-container-de-demarrer-sans-camera-branchee) |
 | 5 | 2026-05-21 | dev.Dockerfile / vcpkg | ✅ RÉSOLU | [`bootstrap-vcpkg.sh` échoue sur ARM64 — vcpkg désactivé par défaut](#erreur-5--bootstrap-vcpkgsh-echoue-sur-arm64--vcpkg-desactive-par-defaut) |
 | 4 | 2026-05-21 | apt / Qt6 base.Dockerfile | ✅ RÉSOLU | [`qt6-virtualkeyboard` n'est qu'un nom de paquet source sur Jammy](#erreur-4--qt6-virtualkeyboard-nest-quun-nom-de-paquet-source-sur-jammy) |
 | 3 | 2026-05-21 | Docker / kernel Tegra | ✅ RÉSOLU | [Docker 29.x sur JP6.2 — `iptable_raw` manquant dans le kernel Tegra](#erreur-3--docker-29x-sur-jp62--iptable_raw-manquant-dans-le-kernel-tegra) |
@@ -102,6 +103,41 @@ Ces points sont **anticipés** mais pas encore observés. À convertir en vraie 
 ---
 
 <!-- AJOUTER LES NOUVELLES ERREURS AU-DESSUS DE CETTE LIGNE -->
+
+## ERREUR 6 — `/dev/video0` map empêche le container de démarrer sans caméra branchée
+
+**Date :** 2026-05-21
+**Composant :** docker/compose.yml / devices
+**Statut :** ✅ RÉSOLU (devices commentés par défaut)
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-05-21
+
+### Symptôme
+`docker compose up -d dev` plante immédiatement :
+```
+Error response from daemon: error gathering device information while adding
+custom device "/dev/video0": no such file or directory
+```
+
+### Cause
+`compose.yml` mapait `/dev/video0:/dev/video0` en hard requirement. Sans caméra USB branchée, ce device n'existe pas sur l'host → Docker refuse de créer le container. Or pour le dev/build C++ (sans test runtime caméra), on n'a pas besoin de ce device.
+
+### Solution appliquée ✅
+[docker/compose.yml](../docker/compose.yml) : bloc `devices:` commenté par défaut sur les services `dev` ET `runtime`, avec un commentaire explicatif. Décommenter quand le matériel est présent et qu'on en a besoin (runtime app, calibration, test caméra).
+
+```diff
+-    devices:
+-      - /dev/video0:/dev/video0
+-      - /dev/bus/usb:/dev/bus/usb
+-      - /dev/input:/dev/input
+-      - /dev/dri:/dev/dri
++    # devices: commentes par defaut, voir compose.yml pour les decommenter
+```
+
+### Notes / prévention
+- Côté `dev` : le build C++ n'a besoin que de CUDA (déjà fourni via `runtime: nvidia`), pas de la caméra/écran. Container démarre tout seul.
+- Côté `runtime` : quand on lancera l'app pour de vrai, il faudra décommenter `/dev/video0` (caméra) et `/dev/dri` (GPU display) au minimum.
+- Solution future plus élégante : un script wrapper qui détecte les devices présents et génère un override compose (`docker-compose.override.yml`). Pas nécessaire pour le scope actuel.
+- Le warning "Le runtime nvidia ne semble pas configure" affiché par `run-dev.sh` quand l'user n'est pas dans le groupe docker est un faux positif lié au même `permission denied` (à corriger plus tard, cosmétique).
 
 ## ERREUR 5 — `bootstrap-vcpkg.sh` échoue sur ARM64 — vcpkg désactivé par défaut
 

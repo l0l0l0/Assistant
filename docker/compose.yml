@@ -51,14 +51,16 @@ services:
     container_name: microscope-ibom-dev
     runtime: nvidia
     network_mode: host
-    devices:
-      - /dev/video0:/dev/video0       # camera microscope USB
-      # decommenter si plusieurs cameras :
-      # - /dev/video1:/dev/video1
-      # - /dev/video2:/dev/video2
-      - /dev/bus/usb:/dev/bus/usb     # hot-plug USB (RealSense, autres)
-      - /dev/input:/dev/input         # clavier, souris, ecran tactile
-      - /dev/dri:/dev/dri             # GPU display
+    # devices: bloc commente par defaut pour ne pas bloquer le demarrage du
+    # container quand la camera/RealSense ne sont pas branchees (workflow dev).
+    # Decommenter les lignes ci-dessous quand le materiel est present.
+    # devices:
+    #   - /dev/video0:/dev/video0     # camera microscope USB
+    #   - /dev/video1:/dev/video1     # RealSense RGB (si presente)
+    #   - /dev/video2:/dev/video2     # RealSense depth (si presente)
+    #   - /dev/bus/usb:/dev/bus/usb   # hot-plug USB
+    #   - /dev/input:/dev/input       # clavier/souris/ecran tactile
+    #   - /dev/dri:/dev/dri           # GPU display
     environment:
       - DISPLAY=${DISPLAY:-:0}
       - XAUTHORITY=/tmp/.docker.xauth
@@ -94,11 +96,14 @@ services:
     container_name: microscope-ibom-runtime
     runtime: nvidia
     network_mode: host
-    devices:
-      - /dev/video0:/dev/video0
-      - /dev/bus/usb:/dev/bus/usb
-      - /dev/input:/dev/input
-      - /dev/dri:/dev/dri
+    # Cote runtime, la camera et l'ecran tactile SONT necessaires : si tu lances
+    # ce service sans materiel branche, decommenter ce qui est present et
+    # commenter le reste, ou utiliser un override compose.
+    # devices:
+    #   - /dev/video0:/dev/video0
+    #   - /dev/bus/usb:/dev/bus/usb
+    #   - /dev/input:/dev/input
+    #   - /dev/dri:/dev/dri
     environment:
       - DISPLAY=${DISPLAY:-:0}
       - XAUTHORITY=/tmp/.docker.xauth
