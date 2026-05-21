@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 2 | 2026-05-21 | Docker / image base | ✅ RÉSOLU | [Repo `dustynv/l4t-jetpack` n'existe pas sur Docker Hub](#erreur-2--repo-dustynvl4t-jetpack-nexiste-pas-sur-docker-hub) |
 | 1 | 2026-05-08 | ONNX Runtime / apt ARM64 | 📝 INFO (anticipé) | [libonnxruntime-dev absent en apt Ubuntu 22.04 ARM64](#erreur-1--libonnxruntime-dev-absent-en-apt-ubuntu-2204-arm64) |
 
 **Statuts possibles** :
@@ -98,6 +99,72 @@ Ces points sont **anticipés** mais pas encore observés. À convertir en vraie 
 ---
 
 <!-- AJOUTER LES NOUVELLES ERREURS AU-DESSUS DE CETTE LIGNE -->
+
+## ERREUR 2 — Repo `dustynv/l4t-jetpack` n'existe pas sur Docker Hub
+
+**Date :** 2026-05-21
+**Composant :** Docker / bootstrap / base.Dockerfile / compose.yml
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-05-21
+
+### Symptôme
+À l'étape 3/8 du bootstrap (test runtime nvidia) :
+
+```
+[bootstrap] Test runtime nvidia (peut declencher un pull d'image, ~quelques minutes)...
+Unable to find image 'dustynv/l4t-jetpack:r36.4.0' locally
+docker: Error response from daemon: pull access denied for dustynv/l4t-jetpack, repository does not exist or may require 'docker login'
+[ERROR] Test runtime nvidia echec
+```
+
+Reproductible en manuel : `sudo docker run --runtime nvidia --rm dustynv/l4t-jetpack:r36.4.0 nvidia-smi` → même erreur.
+
+### Contexte
+- Jetson AGX Orin 32GB Seeed, JetPack 6.2 (L4T R36.4.3)
+- `nvidia-container-toolkit 1.16.2-1` installé, `/etc/docker/daemon.json` configuré correctement (runtime nvidia présent)
+- L'image `dustynv/l4t-jetpack` est référencée dans :
+  - [scripts/bootstrap_jetson.sh:48](../scripts/bootstrap_jetson.sh#L48) : `L4T_VERSION="${L4T_VERSION:-r36.4.0}"`
+  - [scripts/bootstrap_jetson.sh:201](../scripts/bootstrap_jetson.sh#L201) : `dustynv/l4t-jetpack:${L4T_VERSION}`
+  - [docker/base.Dockerfile](../docker/base.Dockerfile) : `FROM dustynv/l4t-jetpack:${L4T_VERSION}`
+  - [docker/compose.yml](../docker/compose.yml) : build args
+- Le piège était **anticipé** dans la liste "Probabilité élevée" en haut de ce document.
+
+### Cause
+Le namespace `dustynv` héberge bien des images Jetson (l4t-pytorch, jetson-inference, etc.) mais **PAS `l4t-jetpack`**. Ce nom de repo a été supposé à tort en se basant sur la convention NVIDIA officielle, qui elle utilise `nvcr.io/nvidia/l4t-jetpack`.
+
+### Solution appliquée ✅
+Tag identifié via `docker manifest inspect` côté Jetson — résultats :
+
+| Tag testé | Existe ? |
+|-----------|----------|
+| `nvcr.io/nvidia/l4t-jetpack:r36.4.0` | ✅ EXISTS |
+| `nvcr.io/nvidia/l4t-jetpack:r36.4.3` | ❌ not found |
+| `nvcr.io/nvidia/l4t-jetpack:r36.3.0` | ✅ EXISTS |
+| `nvcr.io/nvidia/l4t-base:r36.2.0` | ✅ EXISTS |
+| `dustynv/l4t-pytorch:r36.4.0` | ✅ EXISTS |
+
+`r36.4.0` retenu car compatible ABI avec L4T R36.4.3 du Jetson (NVIDIA garantit la compat dans la série mineure).
+
+Patches appliqués (commit à venir) :
+- [docker/base.Dockerfile](../docker/base.Dockerfile) : 3× `FROM dustynv/...` → `FROM nvcr.io/nvidia/...`
+- [scripts/bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh) : commande de test runtime
+- [docker/README.md](../docker/README.md) : exemple `docker run` dans la doc
+- [docs/JETSON_MIGRATION.md](JETSON_MIGRATION.md) : squelettes du plan (cohérence)
+
+`docker/compose.yml` n'avait pas besoin de patch — la `L4T_VERSION` y est juste un build arg passé au Dockerfile, et `r36.4.0` reste valide.
+
+### Pour relancer après le fix (côté Jetson)
+```bash
+cd ~/Assistant-git && git pull
+SKIP_PERFMODE=1 bash scripts/bootstrap_jetson.sh
+```
+`SKIP_PERFMODE=1` parce que MAXN est déjà actif et qu'on évite un re-set inutile. Docker + nvidia-container-toolkit déjà installés ne seront pas refaits.
+
+### Notes / prévention
+- L'image `nvcr.io/nvidia/l4t-jetpack` ne nécessite généralement PAS de NGC login pour pull (elle est publique).
+- Pour vérifier un tag avant pull : `sudo docker manifest inspect nvcr.io/nvidia/l4t-jetpack:rX.Y.Z`
+- Côté bootstrap : le script s'arrête proprement avec un message d'erreur clair, c'est bien — pas de cleanup nécessaire avant de relancer après patch.
+- Pour relancer après fix : `SKIP_PERFMODE=1 bash ~/Assistant-git/scripts/bootstrap_jetson.sh` (Docker + nvidia-toolkit déjà installés, ne sera pas refait).
 
 ## ERREUR 1 — libonnxruntime-dev absent en apt Ubuntu 22.04 ARM64
 

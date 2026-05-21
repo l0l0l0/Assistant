@@ -11,10 +11,10 @@
 
 ---
 
-## État actuel — au 2026-05-09
+## État actuel — au 2026-05-21
 
 ### Phase courante
-**Phase 0 — Conteneurisation** : ✅ code livré, ❌ pas encore testé sur le Jetson.
+**Phase 0 — Conteneurisation** : 🟡 code livré + premier essai bootstrap sur Jetson aujourd'hui. Bloqué étape 3/8 (test runtime nvidia) à cause du mauvais tag image — fix poussé, en attente de relance.
 **Phase 1a — Portage Linux pur** : ✅ code livré (vcpkg.json + main.cpp signal handler).
 **Phase 2a/b/c — Mémoire unifiée (foundation)** : ✅ code livré (FrameBuffer supprimé, UnifiedAllocator + captureLoop branché), ❌ pas encore validé runtime sur Jetson.
 **Tooling** : ✅ journaux + hook PreCompact + bootstrap one-liner configurés.
@@ -162,7 +162,67 @@ Commit `40be3fd feat(docker): Phase 0 conteneurisation Jetson AGX Orin`
 
 <!-- AJOUTER LES NOUVELLES SESSIONS AU-DESSUS DE CETTE LIGNE -->
 
-## Session 2026-05-09 — Phase 2a/b/c : mémoire unifiée (foundation)
+## Session 2026-05-21 — Premier essai bootstrap Jetson + fix tag image
+
+### Objectif
+Lancer le bootstrap (Phase 0) sur le Jetson AGX Orin 32GB Seeed reçu, en MAXN.
+
+### Contexte de départ
+- Jetson en MAXN (reboot effectué)
+- JetPack 6.2 (L4T R36.4.3) confirmé
+- Aucun outil installé (`curl`, `git` absents par défaut)
+- Aucun container présent
+
+### Ce qui s'est passé
+1. Première tentative one-liner `curl | bash` : échec car `curl` non installé sur le Jetson vierge → script jamais téléchargé, faux background process. Fix : installer `curl wget git ca-certificates` via apt + cloner le repo direct + lancer `bash scripts/bootstrap_jetson.sh` en `nohup` avec `stdin /dev/null`.
+
+2. Bootstrap relancé : étapes 1/8 (vérifs) et 2/8 (MAXN) ✅, échec à 3/8 (test runtime nvidia) :
+   ```
+   Unable to find image 'dustynv/l4t-jetpack:r36.4.0' locally
+   docker: Error response from daemon: pull access denied for dustynv/l4t-jetpack,
+   repository does not exist or may require 'docker login'
+   ```
+   Cause : le repo `dustynv/l4t-jetpack` **n'existe pas** sur Docker Hub (piège anticipé dans `JETSON_ERREURS.md`). Le bon nom est `nvcr.io/nvidia/l4t-jetpack` (image NVIDIA officielle publique).
+
+3. Diagnostic via `docker manifest inspect` sur le Jetson — tags valides identifiés :
+   - ✅ `nvcr.io/nvidia/l4t-jetpack:r36.4.0`
+   - ✅ `nvcr.io/nvidia/l4t-jetpack:r36.3.0`
+   - ❌ `nvcr.io/nvidia/l4t-jetpack:r36.4.3` (n'existe pas — NVIDIA n'a publié que `.0` pour la série 36.4)
+
+4. **Fix** : remplacement de `dustynv/l4t-jetpack` par `nvcr.io/nvidia/l4t-jetpack` partout :
+   - [docker/base.Dockerfile](../docker/base.Dockerfile) — 3× `FROM`
+   - [scripts/bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh) — commande de test runtime
+   - [docker/README.md](../docker/README.md) — exemple `docker run`
+   - [docs/JETSON_MIGRATION.md](JETSON_MIGRATION.md) — squelettes du plan (cohérence doc)
+
+   `docker/compose.yml` n'a pas eu besoin de patch (la `L4T_VERSION: r36.4.0` y est valide telle quelle, passée en build arg au Dockerfile).
+
+5. [JETSON_ERREURS.md](JETSON_ERREURS.md) — nouvelle entrée #2 (Docker / image base) ouverte puis fermée en ✅ RÉSOLU dans la même session.
+
+### À faire prochaine étape (côté Jetson après pull)
+```bash
+cd ~/Assistant-git && git pull
+SKIP_PERFMODE=1 bash scripts/bootstrap_jetson.sh > /tmp/bootstrap.out 2>&1 < /dev/null &
+disown
+tail -f /tmp/bootstrap.out
+```
+- `SKIP_PERFMODE=1` car MAXN déjà actif
+- Docker + nvidia-container-toolkit déjà installés (étapes idempotentes)
+- Le test runtime nvidia (3/8) déclenchera maintenant un pull de `nvcr.io/nvidia/l4t-jetpack:r36.4.0` (~quelques minutes)
+- Puis étape 6/8 — build base image (~90 min en MAXN)
+- Puis étape 7/8 — build dev image (~5-10 min)
+
+### Notes
+- Le script bootstrap est bien idempotent — relance sans souci, ne refait pas les étapes déjà OK.
+- Si le pull de l'image NVIDIA est lent ou échoue : vérifier la connectivité à `nvcr.io` (pas de NGC login requis pour cette image publique, mais firewall potentiel).
+
+### Commits poussés cette session
+| Hash | Message |
+|------|---------|
+| (à venir) | fix(docker): remplace dustynv/l4t-jetpack par nvcr.io/nvidia/l4t-jetpack |
+
+---
+
 
 ### Objectif
 Avancer la Phase 2 (mémoire unifiée Tegra) côté code C++ pendant que le test Jetson n'est pas encore lancé. Préparer la fondation du zero-copy pour qu'à la première itération sur le Jetson, la pipeline soit déjà UMA-aware.

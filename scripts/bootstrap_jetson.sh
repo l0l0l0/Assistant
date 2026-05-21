@@ -198,7 +198,7 @@ fi
 
 # Test runtime nvidia
 log "Test runtime nvidia (peut declencher un pull d'image, ~quelques minutes)..."
-if docker_cmd run --runtime nvidia --rm "dustynv/l4t-jetpack:${L4T_VERSION}" nvidia-smi >>"$LOG_FILE" 2>&1; then
+if docker_cmd run --runtime nvidia --rm "nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}" nvidia-smi >>"$LOG_FILE" 2>&1; then
     ok "Runtime nvidia fonctionnel"
 else
     error "Test runtime nvidia echec — voir $LOG_FILE"

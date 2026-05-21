@@ -81,7 +81,7 @@ git checkout v0.1.0-windows-final
 │  + Qt6, OpenCV (CUDA), TensorRT, librealsense2, spdlog, ZXing    │
 │  Reconstruit rarement (1× par version JetPack)                   │
 ├──────────────────────────────────────────────────────────────────┤
-│  FROM dustynv/l4t-jetpack:r36.4.0                                │
+│  FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0                                │
 │  CUDA 12.6, cuDNN 8.9, TensorRT 10.3, L4T R36.4                  │
 │  Géré par jetson-containers (déjà testé NVIDIA)                  │
 └──────────────────────────────────────────────────────────────────┘
@@ -342,7 +342,7 @@ Assistant-git/
 ### 8.1 `docker/base.Dockerfile`
 ```dockerfile
 ARG L4T_VERSION=r36.4.0
-FROM dustynv/l4t-jetpack:${L4T_VERSION}
+FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Europe/Paris
@@ -572,7 +572,7 @@ Quand JP 7.x sera officiellement compatible avec le reComputer Seeed :
   ```
 - [ ] Test GPU dans Docker :
   ```bash
-  docker run --runtime nvidia --rm dustynv/l4t-jetpack:r36.4.0 nvidia-smi
+  docker run --runtime nvidia --rm nvcr.io/nvidia/l4t-jetpack:r36.4.0 nvidia-smi
   ```
 - [ ] `jetson-containers` cloné et testé :
   ```bash

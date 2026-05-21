@@ -46,7 +46,7 @@ newgrp docker
 
 Test que le runtime nvidia fonctionne :
 ```bash
-docker run --runtime nvidia --rm dustynv/l4t-jetpack:r36.4.0 nvidia-smi
+docker run --runtime nvidia --rm nvcr.io/nvidia/l4t-jetpack:r36.4.0 nvidia-smi
 ```
 
 ## Build des images

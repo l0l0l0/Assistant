@@ -22,7 +22,7 @@ ARG CUDA_ARCH_BIN=8.7
 # =============================================================================
 #  STAGE 1 : OpenCV with CUDA (build from source)
 # =============================================================================
-FROM dustynv/l4t-jetpack:${L4T_VERSION} AS opencv-builder
+FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION} AS opencv-builder
 
 ARG OPENCV_VERSION
 ARG CUDA_ARCH_BIN
@@ -84,7 +84,7 @@ RUN cmake -G Ninja \
 # =============================================================================
 #  STAGE 2 : librealsense2 (build from source — paquet Intel non dispo ARM64)
 # =============================================================================
-FROM dustynv/l4t-jetpack:${L4T_VERSION} AS realsense-builder
+FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION} AS realsense-builder
 
 ARG REALSENSE_VERSION
 
@@ -116,7 +116,7 @@ RUN cmake -G Ninja \
 # =============================================================================
 #  STAGE 3 : Image finale
 # =============================================================================
-FROM dustynv/l4t-jetpack:${L4T_VERSION}
+FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Europe/Paris
