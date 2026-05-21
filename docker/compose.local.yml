@@ -1,0 +1,39 @@
+# =============================================================================
+#  compose.local.yml — override pour le workflow local (ecran branche au Jetson)
+#
+#  Active les devices necessaires au rendu GUI sur l'ecran local :
+#    - /dev/dri        : acceleration GPU display (OpenGL via DRM/KMS)
+#    - /dev/input      : clavier, souris, ecran tactile
+#    - /dev/snd        : audio (optionnel)
+#
+#  La camera (/dev/video0) et le bus USB restent commentes ici car ils
+#  dependent du materiel branche. Decommenter manuellement quand la cam et
+#  la RealSense seront prets.
+#
+#  Usage (deja gere par scripts/run_local_gui.sh) :
+#    docker compose -f docker/compose.yml -f docker/compose.local.yml up -d dev
+# =============================================================================
+
+services:
+  dev:
+    devices:
+      - /dev/dri:/dev/dri           # GPU display (Tegra display engine)
+      - /dev/input:/dev/input       # clavier, souris, touch screen
+      # - /dev/video0:/dev/video0   # decommenter quand la camera USB est branchee
+      # - /dev/bus/usb:/dev/bus/usb # decommenter pour USB hot-plug (RealSense)
+      # - /dev/snd:/dev/snd         # decommenter si besoin audio
+    group_add:
+      - video
+      - input
+      - plugdev
+
+  runtime:
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/input:/dev/input
+      # - /dev/video0:/dev/video0
+      # - /dev/bus/usb:/dev/bus/usb
+    group_add:
+      - video
+      - input
+      - plugdev

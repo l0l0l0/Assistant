@@ -48,12 +48,9 @@ fi
 xhost +local:docker > /dev/null 2>&1 || echo "${YEL}[warn] xhost echec (peut etre OK)${NC}"
 
 # -----------------------------------------------------------------------------
-# 3. Verifier que les devices necessaires sont decommentes dans compose.yml
+# 3. Override compose pour activer les devices (GPU display, input)
 # -----------------------------------------------------------------------------
-if grep -q "^[[:space:]]*#.*\/dev\/dri:\/dev\/dri" docker/compose.yml; then
-    echo "${YEL}[warn] Le mount /dev/dri:/dev/dri est commente dans docker/compose.yml${NC}"
-    echo "       Pour l'acceleration GPU display, decommenter le bloc devices: du service dev."
-fi
+COMPOSE_FILES=(-f docker/compose.yml -f docker/compose.local.yml)
 
 # -----------------------------------------------------------------------------
 # 4. Demarrer le container dev s'il ne tourne pas
@@ -65,10 +62,10 @@ fi
 touch /tmp/.docker.xauth 2>/dev/null || sudo touch /tmp/.docker.xauth
 chmod 644 /tmp/.docker.xauth 2>/dev/null || sudo chmod 644 /tmp/.docker.xauth
 
-if ! docker compose -f docker/compose.yml ps --status running -q dev | grep -q .; then
-    echo "${BLU}[run-local]${NC} Demarrage du container dev..."
-    docker compose -f docker/compose.yml up -d dev
-fi
+# Force recreate pour appliquer les nouveaux devices si le container tournait
+# deja avec une autre config
+echo "${BLU}[run-local]${NC} (Re)demarrage du container dev avec devices locaux..."
+docker compose "${COMPOSE_FILES[@]}" up -d --force-recreate dev
 
 # -----------------------------------------------------------------------------
 # 5. Lancer le binaire dans le container avec le DISPLAY local
@@ -90,7 +87,7 @@ echo "${GRN}[run-local]${NC} Fenetre Qt6 devrait apparaitre sur ton ecran."
 echo
 
 # shellcheck disable=SC2086
-docker compose -f docker/compose.yml exec \
+docker compose "${COMPOSE_FILES[@]}" exec \
     -e DISPLAY="$DISPLAY" \
     -e XAUTHORITY=/tmp/.docker.xauth \
     $EXTRA_ENV \
