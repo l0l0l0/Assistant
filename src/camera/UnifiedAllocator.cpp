@@ -1,9 +1,15 @@
 #include "UnifiedAllocator.h"
 
-// CV_AUTOSTEP est dans cvdef.h — sur OpenCV 4.10 (apt jammy) l'inclusion via
-// <opencv2/core.hpp> n'est pas transitive, il faut l'expliciter sinon le compile
-// echoue avec "CV_AUTOSTEP was not declared in this scope".
-#include <opencv2/core/cvdef.h>
+// CV_AUTOSTEP est une sentinelle de l'API C legacy d'OpenCV (valeur 0x7fffffff)
+// utilisee par cv::MatAllocator::allocate pour signaler "step auto-calcule".
+// Definie dans types_c.h, MAIS l'inclusion n'est pas garantie transitive sur
+// OpenCV 4.10 Linux (apt jammy). On l'inclut explicitement + fallback define.
+#include <opencv2/core/types_c.h>
+#include <opencv2/core/mat.hpp>
+
+#ifndef CV_AUTOSTEP
+#define CV_AUTOSTEP ((size_t)0x7fffffff)
+#endif
 
 #include <spdlog/spdlog.h>
 #include <atomic>
