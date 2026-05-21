@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 3 | 2026-05-21 | Docker / kernel Tegra | ✅ RÉSOLU | [Docker 29.x sur JP6.2 — `iptable_raw` manquant dans le kernel Tegra](#erreur-3--docker-29x-sur-jp62--iptable_raw-manquant-dans-le-kernel-tegra) |
 | 2 | 2026-05-21 | Docker / image base | ✅ RÉSOLU | [Repo `dustynv/l4t-jetpack` n'existe pas sur Docker Hub](#erreur-2--repo-dustynvl4t-jetpack-nexiste-pas-sur-docker-hub) |
 | 1 | 2026-05-08 | ONNX Runtime / apt ARM64 | 📝 INFO (anticipé) | [libonnxruntime-dev absent en apt Ubuntu 22.04 ARM64](#erreur-1--libonnxruntime-dev-absent-en-apt-ubuntu-2204-arm64) |
 
@@ -99,6 +100,90 @@ Ces points sont **anticipés** mais pas encore observés. À convertir en vraie 
 ---
 
 <!-- AJOUTER LES NOUVELLES ERREURS AU-DESSUS DE CETTE LIGNE -->
+
+## ERREUR 3 — Docker 29.x sur JP6.2 — `iptable_raw` manquant dans le kernel Tegra
+
+**Date :** 2026-05-21
+**Composant :** Docker / kernel Tegra / réseau bridge
+**Statut :** ✅ RÉSOLU (contournement par `--network host`)
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-05-21
+
+### Symptôme
+N'importe quel `docker run` (avec ou sans `--runtime nvidia`) sur bridge network échoue :
+
+```
+docker: Error response from daemon: failed to set up container networking:
+failed to create endpoint X on network bridge: Unable to enable DIRECT ACCESS FILTERING - DROP rule:
+(iptables failed: iptables --wait -t raw -A PREROUTING -d 172.17.0.2 ! -i docker0 -j DROP:
+iptables v1.8.7 (legacy): can't initialize iptables table `raw': Table does not exist (do you need to insmod?)
+Perhaps iptables or your kernel needs to be upgraded.
+ (exit status 3))
+```
+
+Survient à l'étape 3/8 du bootstrap (test runtime nvidia) mais affecterait aussi tous les `docker compose build` (qui font des `RUN apt-get update` sur bridge).
+
+### Contexte
+- Jetson AGX Orin 32GB Seeed, JetPack 6.2 (L4T R36.4.3)
+- Kernel : `5.15.148-tegra`
+- Docker installé via `apt install docker.io` → version `29.1.3-0ubuntu3~22.04.2` (jammy-updates)
+- `nvidia-container-toolkit 1.16.2-1` correctement configuré
+- L'image `nvcr.io/nvidia/l4t-jetpack:r36.4.0` se pull sans souci — le problème est purement réseau
+
+### Cause
+Docker 28.x+ utilise des règles `iptables -t raw -A PREROUTING ...` pour son bridge networking. La table `raw` nécessite le module kernel `iptable_raw`, **non compilé dans le kernel Tegra de JP6.2** :
+
+```bash
+$ sudo find /lib/modules/$(uname -r) -name "iptable_raw*"
+# (aucun fichier)
+$ sudo modprobe iptable_raw
+modprobe: FATAL: Module iptable_raw not found in directory /lib/modules/5.15.148-tegra
+$ lsmod | grep iptable
+iptable_nat            16384  1
+iptable_filter         16384  1     # ← seulement nat et filter, pas raw
+```
+
+C'est la classe de problème documentée par NVIDIA dans [Error with Nvidia Container Runtime / Docker Integration on AGX Orin JP6.2](https://forums.developer.nvidia.com/t/error-with-nvidia-container-runtime-with-docker-integration-on-agx-orin-with-jp6-2/324558/17) (réponse AastaLLL #17 : "Docker v28.0.0 requires more kernel config which is not enabled on r36.4.3 by default" → `CONFIG_IP_SET`, `iptable_raw`, etc.).
+
+### Solutions évaluées
+| Option | Verdict |
+|--------|---------|
+| Downgrade `docker.io` à 27.5.1 (recommandation officielle NVIDIA) | ❌ Pas dispo dans apt Jammy ; il faudrait passer à `docker-ce` du repo Docker Inc — gros remaniement |
+| Downgrade `docker.io` à 20.10.12 (seule version Jammy pré-28) | ❌ Trop ancien, pas compat nvidia-container-toolkit 1.16 |
+| `modprobe iptable_raw` | ❌ Module absent du kernel Tegra |
+| Recompiler le kernel Jetson avec `CONFIG_IPTABLE_RAW=m` | ❌ Trop invasif pour ce projet |
+| Désactiver iptables dans daemon.json (`"iptables": false`) | ❌ Casse tout le bridge networking, sécurité dégradée |
+| **`--network host` partout** | ✅ **Retenu** : notre stack utilise déjà `network_mode: host` partout en runtime. Cohérent. Aucun changement système. |
+
+### Solution appliquée ✅
+1. **[scripts/bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh)** — ajout de `--network host` au test runtime nvidia (étape 3/8) :
+   ```diff
+   - if docker_cmd run --runtime nvidia --rm "nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}" nvidia-smi
+   + if docker_cmd run --runtime nvidia --network host --rm "nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}" nvidia-smi
+   ```
+2. **[docker/compose.yml](../docker/compose.yml)** — ajout de `build.network: host` aux trois services (`base`, `dev`, `runtime`) pour que `docker compose build` utilise le host networking pendant les `RUN apt-get update` internes :
+   ```yaml
+   base:
+     build:
+       context: ..
+       dockerfile: docker/base.Dockerfile
+       network: host          # ← ajoute
+       args: ...
+   ```
+
+### Validation
+Test manuel après ajout de `--network host` :
+```bash
+$ sudo docker run --rm --network host --runtime nvidia nvcr.io/nvidia/l4t-jetpack:r36.4.0 nvidia-smi
+NVIDIA-SMI 540.4.0     Driver Version: 540.4.0     CUDA Version: 12.6
+| 0  Orin (nvgpu)    N/A                            ...
+```
+GPU accessible, CUDA 12.6 OK.
+
+### Notes / prévention
+- **Tout futur `docker run` ou `docker build` sur ce Jetson doit forcer le host networking** tant que JP6.2 / kernel 5.15.148-tegra reste en place.
+- Sur JP7.x (futur), si le kernel inclut `iptable_raw`, on pourra revenir au bridge. À re-tester au moment de la migration.
+- `nvidia-smi` retourne `N/A` pour la plupart des métriques sur Tegra — c'est NORMAL (l'outil est conçu pour dGPU). Le seul fait qu'il retourne sans erreur + affiche "Orin (nvgpu)" + CUDA version valide le runtime.
+- Le `network: host` au build est une feature de docker compose v2 (spec compose). Ne pas confondre avec `network_mode: host` qui est pour le runtime du service.
 
 ## ERREUR 2 — Repo `dustynv/l4t-jetpack` n'existe pas sur Docker Hub
 

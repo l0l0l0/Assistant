@@ -27,6 +27,9 @@ services:
     build:
       context: ..
       dockerfile: docker/base.Dockerfile
+      # network: host obligatoire sur JP6.2 (kernel Tegra n'a pas iptable_raw,
+      # bridge networking de Docker 29.x casse). Voir JETSON_ERREURS.md #3.
+      network: host
       args:
         L4T_VERSION: r36.4.0
         OPENCV_VERSION: 4.10.0
@@ -42,6 +45,8 @@ services:
     build:
       context: ..
       dockerfile: docker/dev.Dockerfile
+      # Voir commentaire sur le service "base" — meme contrainte JP6.2.
+      network: host
     image: microscope-ibom:dev
     container_name: microscope-ibom-dev
     runtime: nvidia
@@ -83,6 +88,8 @@ services:
     build:
       context: ..
       dockerfile: docker/runtime.Dockerfile
+      # Voir commentaire sur le service "base" — meme contrainte JP6.2.
+      network: host
     image: microscope-ibom:runtime
     container_name: microscope-ibom-runtime
     runtime: nvidia

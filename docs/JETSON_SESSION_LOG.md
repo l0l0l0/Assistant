@@ -216,10 +216,38 @@ tail -f /tmp/bootstrap.out
 - Le script bootstrap est bien idempotent — relance sans souci, ne refait pas les étapes déjà OK.
 - Si le pull de l'image NVIDIA est lent ou échoue : vérifier la connectivité à `nvcr.io` (pas de NGC login requis pour cette image publique, mais firewall potentiel).
 
+### Suite de la session — fix iptable_raw / network host
+
+6. Nouvelle erreur après le fix précédent : pull d'image OK mais le bridge networking de Docker 29.x panique avec `iptables: Table 'raw' does not exist`. Le kernel Tegra 5.15.148 n'a **pas** le module `iptable_raw` compilé (confirmé `modprobe: FATAL: Module iptable_raw not found`).
+
+7. Diagnostic via les forums NVIDIA Developer + tests locaux :
+   - Pas de downgrade simple possible (`docker.io` Jammy n'a que `29.1.3` ou `20.10.12`, pas de version intermédiaire)
+   - Recompiler le kernel est hors scope
+   - **`--network host` contourne** : test `sudo docker run --rm --network host --runtime nvidia nvcr.io/nvidia/l4t-jetpack:r36.4.0 nvidia-smi` → ✅ retourne `Orin (nvgpu)` + CUDA 12.6
+   - Notre stack `compose.yml` utilise déjà `network_mode: host` partout, donc cohérent
+
+8. **Fix appliqué** :
+   - [scripts/bootstrap_jetson.sh](../scripts/bootstrap_jetson.sh) : `--network host` ajouté au test runtime nvidia
+   - [docker/compose.yml](../docker/compose.yml) : `build.network: host` ajouté aux 3 services (`base`/`dev`/`runtime`) pour que les `RUN apt-get update` internes au `docker build` n'utilisent pas le bridge non plus
+   - [docs/JETSON_ERREURS.md](JETSON_ERREURS.md) : nouvelle entrée #3 (Docker / kernel Tegra) ouverte et fermée en ✅ RÉSOLU dans la même session
+   - [CLAUDE.md](../CLAUDE.md) : ajout d'un piège #22 dans la section "Pièges critiques" (sticky rule pour les sessions futures)
+
+### À faire prochaine étape (côté Jetson après pull)
+```bash
+cd ~/Assistant-git && git pull
+SKIP_PERFMODE=1 nohup bash scripts/bootstrap_jetson.sh > /tmp/bootstrap.out 2>&1 < /dev/null &
+disown
+tail -f /tmp/bootstrap.out
+```
+Étape 3/8 doit maintenant passer ✅. L'image `nvcr.io/nvidia/l4t-jetpack:r36.4.0` est déjà pull localement, instantané. Puis :
+- 6/8 build base (~90 min en MAXN, OpenCV CUDA from source) — premier vrai test du `network: host` au build
+- 7/8 build dev (~5-10 min)
+
 ### Commits poussés cette session
 | Hash | Message |
 |------|---------|
-| (à venir) | fix(docker): remplace dustynv/l4t-jetpack par nvcr.io/nvidia/l4t-jetpack |
+| `ddb4c30` | fix(docker): remplace dustynv/l4t-jetpack par nvcr.io/nvidia/l4t-jetpack |
+| (à venir) | fix(docker): force --network host pour contourner iptable_raw manquant sur kernel Tegra JP6.2 |
 
 ---
 

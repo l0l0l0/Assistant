@@ -68,6 +68,7 @@ Les pièges Windows ci-dessous restent valides pour `windows-legacy` mais peuven
 19. **Arrêt QThread** : destructeur `Application::~Application()` doit appeler `m_trackingThread->quit()` + `m_trackingThread->wait()`. Le worker est détruit via `connect(finished, worker, &QObject::deleteLater)`.
 20. **Layer enum** : utiliser `Layer::Front`/`Layer::Back` partout, jamais `== 0` ou `== 1` (BomPanel, PickAndPlace, DataExporter).
 21. **Protobuf patch** : `build\vcpkg_installed\...\google\protobuf\message_lite.h` — `struct Undefined;` → `struct Undefined {};`. Ce patch est dans `vcpkg_installed`, pas dans buildtrees. À réappliquer si vcpkg réinstalle protobuf.
+22. **Docker sur Jetson JP6.2** : le kernel Tegra 5.15.148 n'a **pas** le module `iptable_raw`, donc Docker 28+/29.x (paquet `docker.io` jammy-updates) plante en bridge networking avec `iptables Table 'raw' does not exist`. Tout `docker run` et tout `docker build` doivent forcer `--network host` (ou `build.network: host` côté compose). C'est déjà appliqué dans `docker/compose.yml` + `scripts/bootstrap_jetson.sh`. Détail complet : `docs/JETSON_ERREURS.md` entrée #3. Sera potentiellement résolu en JP7.x.
 
 ---
 
