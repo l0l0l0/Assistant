@@ -17,6 +17,7 @@
 ARG L4T_VERSION=r36.4.0
 ARG OPENCV_VERSION=4.10.0
 ARG REALSENSE_VERSION=v2.55.1
+ARG ONNXRUNTIME_VERSION=v1.19.2
 ARG CUDA_ARCH_BIN=8.7
 
 # =============================================================================
@@ -114,7 +115,48 @@ RUN cmake -G Ninja \
 
 
 # =============================================================================
-#  STAGE 3 : Image finale
+#  STAGE 3 : ONNX Runtime avec CUDA + TensorRT EP (build from source ARM64)
+#  Pas de paquet apt libonnxruntime-dev sur Jammy ARM64, pas de wheel CMake
+#  installable depuis pip. Build from source = seule voie propre pour avoir
+#  un onnxruntimeConfig.cmake compatible avec find_package(onnxruntime CONFIG).
+#  Long (~1-2h sur Jetson AGX Orin 32GB).
+# =============================================================================
+FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION} AS onnxruntime-builder
+
+ARG ONNXRUNTIME_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDACXX=/usr/local/cuda/bin/nvcc
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git pkg-config wget ca-certificates \
+    python3 python3-dev python3-pip python3-numpy python3-setuptools python3-wheel python3-packaging \
+    libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN git clone --depth 1 --branch ${ONNXRUNTIME_VERSION} --recursive https://github.com/microsoft/onnxruntime.git
+
+WORKDIR /tmp/onnxruntime
+RUN ./build.sh \
+        --config Release \
+        --update --build --parallel \
+        --build_shared_lib \
+        --skip_tests \
+        --skip_submodule_sync \
+        --allow_running_as_root \
+        --use_cuda --cuda_home /usr/local/cuda \
+        --cudnn_home /usr/lib/aarch64-linux-gnu \
+        --use_tensorrt --tensorrt_home /usr \
+        --cuda_version 12.6 \
+        --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=87 \
+        --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF \
+    && cd build/Linux/Release \
+    && DESTDIR=/onnxruntime-install cmake --install . --prefix /usr/local
+
+
+# =============================================================================
+#  STAGE 4 : Image finale
 # =============================================================================
 FROM nvcr.io/nvidia/l4t-jetpack:${L4T_VERSION}
 
@@ -173,13 +215,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # -----------------------------------------------------------------------------
 #  Dépendances applicatives (alternative à vcpkg pour les paquets dispo en apt)
+#  ONNX Runtime est copie depuis le stage onnxruntime-builder (pas de paquet apt
+#  ARM64 dispo) — voir COPY plus bas.
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libspdlog-dev libfmt-dev \
     nlohmann-json3-dev \
     libhpdf-dev \
     catch2 \
-    libonnxruntime-dev || true \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
@@ -202,8 +245,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -----------------------------------------------------------------------------
 #  Copie des artefacts compilés des stages précédents
 # -----------------------------------------------------------------------------
-COPY --from=opencv-builder    /opencv-install/usr/local/    /usr/local/
-COPY --from=realsense-builder /realsense-install/usr/local/ /usr/local/
+COPY --from=opencv-builder       /opencv-install/usr/local/       /usr/local/
+COPY --from=realsense-builder    /realsense-install/usr/local/    /usr/local/
+COPY --from=onnxruntime-builder  /onnxruntime-install/usr/local/  /usr/local/
 
 # -----------------------------------------------------------------------------
 #  Règles udev RealSense (au cas où montées en read-only depuis l'hôte)
@@ -233,4 +277,6 @@ RUN echo "=== Verification stack ===" && \
     pkg-config --modversion opencv4 && \
     pkg-config --modversion realsense2 && \
     qmake6 -query QT_VERSION && \
+    ls /usr/local/include/onnxruntime/ 2>/dev/null | head -3 && \
+    ls /usr/local/lib/libonnxruntime* 2>/dev/null | head -3 && \
     echo "=== Stack OK ==="

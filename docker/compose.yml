@@ -34,6 +34,7 @@ services:
         L4T_VERSION: r36.4.0
         OPENCV_VERSION: 4.10.0
         REALSENSE_VERSION: v2.55.1
+        ONNXRUNTIME_VERSION: v1.19.2
         CUDA_ARCH_BIN: "8.7"
     image: microscope-ibom:base
     profiles: ["build-only"]   # ne demarre pas avec "compose up"
