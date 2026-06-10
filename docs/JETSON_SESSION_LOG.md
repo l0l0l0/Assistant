@@ -70,6 +70,42 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 
 ---
 
+## Session 2026-06-10 (suite 4) — Fix caméra (devices container) + décisions dataset
+
+### Contexte (retour utilisateur avec photo)
+- Caméra microscope branchée : `lsusb` OK (`0ac8:3420 Z-Star Venus USB2.0 Camera`) mais app = "No camera detected" → devices commentés dans `compose.local.yml` (pas un bug, cf **erreur #15**)
+- La photo montre l'**ancien** script (`(Re)demarrage...`) → l'utilisateur n'a pas encore pullé les commits des itérations 2-3 ; la validation build reste à faire
+- **Pokemon-Dataset-Creator est désormais public** → analysé : app Python/Tkinter tout-en-un (augmentations imgaug, entraînement YOLOv8 un-clic, bbox_visualization, équilibrage de classes, INSTALL.bat/START.bat Windows)
+
+### Décisions utilisateur
+1. **Plan obligatoire avant toute action** — règle de travail demandée explicitement
+2. GO fix caméra immédiat
+3. **Wizard Windows "PCB Dataset Studio" dans le repo Assistant** (`tools/dataset_studio/`), adapté de Pokemon-Dataset-Creator — réutilise : structure GUI, pipeline imgaug, module entraînement/métriques ; remplace : téléchargement de cartes → import du dataset Jetson, classes Pokémon → classes PCB
+4. Capture + annotation auto = **sur le Jetson** (Phase A du DATASET_CREATOR_PLAN) ; Windows = validation/augmentation/entraînement/export
+5. Machine d'entraînement : **PC fixe RTX 5070 Ti 16 GB** (16 Go VRAM > 8 Go portable)
+
+### Ce qui a été fait
+- `compose.local.yml` : `/dev/video0` + `/dev/video1` mappés (dev + runtime) avec avertissement caméra-débranchée (erreur #6)
+- `docs/JETSON_ERREURS.md` : entrée #15 (✅ RÉSOLU)
+
+### À faire par l'utilisateur sur le Jetson (dans l'ordre)
+```bash
+cd ~/Assistant-git
+git checkout docker/compose.local.yml && git pull
+docker compose -f docker/compose.yml -f docker/compose.local.yml up -d dev   # recree le container (nouveaux devices)
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev bash scripts/build_jetson.sh
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev bash -c "cd build && ctest --output-on-failure"
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev v4l2-ctl -d /dev/video0 --list-formats-ext
+bash scripts/run_local_gui.sh
+```
+Vérifier dans le log : `Camera opened: 1920x1080 @ 30 fps, FOURCC=MJPG`.
+
+### Prochaines étapes (après validation caméra+build)
+1. Phase A DATASET_CREATOR_PLAN (capture in-app) — **plan détaillé à présenter avant**
+2. Wizard Windows `tools/dataset_studio/` — **plan détaillé à présenter avant**
+
+---
+
 ## Session 2026-06-10 (suite 3) — Plan Dataset Creator (capture + annotation auto)
 
 ### Objectif
