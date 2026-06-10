@@ -9,6 +9,10 @@ compose.yml    text eol=lf
 *.yml          text eol=lf
 *.yaml         text eol=lf
 
+# Force CRLF pour les scripts batch Windows (cmd.exe casse avec LF,
+# notamment goto/labels) — PCB Dataset Studio
+*.bat          text eol=crlf
+
 # Default: auto-detect
 * text=auto
 
