@@ -24,12 +24,10 @@ services:
     devices:
       - /dev/dri:/dev/dri           # GPU display (Tegra display engine)
       - /dev/input:/dev/input       # clavier, souris, touch screen
-      # Camera microscope USB (Z-Star 0ac8:3420 "Venus USB2.0 Camera").
-      # Les cameras UVC creent 2 noeuds : video0 = flux, video1 = metadata.
-      # ⚠️ Si la camera est DEBRANCHEE, le container ne demarre pas
-      # ("no such file or directory") — recommenter ces 2 lignes (cf erreur #6).
-      - /dev/video0:/dev/video0
-      - /dev/video1:/dev/video1
+      # Cameras USB (/dev/video*) : NE PAS les mapper en dur ici — un device
+      # declare mais absent empeche le container de demarrer (erreurs #6/#15).
+      # run_local_gui.sh genere un override automatique avec les /dev/video*
+      # reellement presents au lancement.
       # - /dev/bus/usb:/dev/bus/usb # decommenter pour USB hot-plug (RealSense)
       # - /dev/snd:/dev/snd         # decommenter si besoin audio
     group_add:
@@ -39,8 +37,7 @@ services:
     devices:
       - /dev/dri:/dev/dri
       - /dev/input:/dev/input
-      - /dev/video0:/dev/video0
-      - /dev/video1:/dev/video1
+      # Cameras : voir note ci-dessus (override dynamique, pas de mapping en dur)
       # - /dev/bus/usb:/dev/bus/usb
     group_add:
       - input

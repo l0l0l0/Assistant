@@ -85,8 +85,8 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 5. Machine d'entraînement : **PC fixe RTX 5070 Ti 16 GB** (16 Go VRAM > 8 Go portable)
 
 ### Ce qui a été fait
-- `compose.local.yml` : `/dev/video0` + `/dev/video1` mappés (dev + runtime) avec avertissement caméra-débranchée (erreur #6)
-- `docs/JETSON_ERREURS.md` : entrée #15 (✅ RÉSOLU)
+- ~~`compose.local.yml` : `/dev/video0`+`/dev/video1` mappés en dur~~ → **remplacé le jour même** (l'utilisateur refuse qu'une caméra débranchée empêche le démarrage) par un **override dynamique** : `run_local_gui.sh` génère `/tmp/microscope-ibom.cameras.yml` avec les `/dev/video*` présents au lancement. Caméra absente = app démarre sans caméra ; caméra branchée = relancer le script. Hot-plug complet (cgroup rules + /dev monté) gardé en option B future. Détail : erreur #15 v2.
+- `docs/JETSON_ERREURS.md` : entrée #15 (✅ RÉSOLU, v1 puis v2)
 
 ### À faire par l'utilisateur sur le Jetson (dans l'ordre)
 ```bash

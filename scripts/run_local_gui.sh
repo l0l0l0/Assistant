@@ -55,6 +55,32 @@ xhost +local:docker > /dev/null 2>&1 || echo "${YEL}[warn] xhost echec (peut etr
 COMPOSE_FILES=(-f docker/compose.yml -f docker/compose.local.yml)
 
 # -----------------------------------------------------------------------------
+# 3b. Cameras USB : override genere dynamiquement avec les /dev/video* presents.
+#     Un device mappe en dur mais absent empeche le container de demarrer
+#     (erreurs #6/#15) — ici, pas de camera = pas de mapping = l'app demarre
+#     quand meme (liste cameras vide). Brancher la camera puis relancer ce
+#     script suffit (le container est recree avec les nouveaux devices).
+# -----------------------------------------------------------------------------
+CAM_OVERRIDE=/tmp/microscope-ibom.cameras.yml
+if compgen -G "/dev/video*" > /dev/null; then
+    {
+        echo "# Genere par run_local_gui.sh — ne pas editer (regenere a chaque lancement)"
+        echo "services:"
+        echo "  dev:"
+        echo "    devices:"
+        for v in /dev/video*; do
+            echo "      - ${v}:${v}"
+        done
+    } > "$CAM_OVERRIDE"
+    COMPOSE_FILES+=(-f "$CAM_OVERRIDE")
+    echo "${GRN}[run-local]${NC} Cameras detectees: $(echo /dev/video* )"
+else
+    rm -f "$CAM_OVERRIDE"
+    echo "${YEL}[run-local]${NC} Aucune camera detectee (/dev/video*) — demarrage sans camera."
+    echo "             Brancher la camera puis relancer ce script pour l'activer."
+fi
+
+# -----------------------------------------------------------------------------
 # 4. Demarrer le container dev s'il ne tourne pas
 # -----------------------------------------------------------------------------
 # S'assurer que /tmp/.docker.xauth existe en fichier (pas dossier)

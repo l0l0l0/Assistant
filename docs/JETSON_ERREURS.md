@@ -131,9 +131,14 @@ La caméra microscope apparaît côté hôte (`lsusb` : `Bus 001 Device 008: ID 
 Pas un bug : les mappings `/dev/video*` étaient **volontairement commentés** dans `docker/compose.local.yml` ("décommenter quand la caméra USB est branchée") — décision prise quand la caméra n'était pas encore là (cf erreur #6 : un device mappé mais absent empêche le container de démarrer). Le container n'avait donc aucun accès au périphérique vidéo.
 
 ### Solution appliquée ✅
-`/dev/video0` (flux) + `/dev/video1` (métadonnées UVC) décommentés/ajoutés pour `dev` et `runtime` dans `compose.local.yml`. Le container est recréé automatiquement au prochain `compose up -d` (changement de config).
+**v1 (même jour, remplacée)** : `/dev/video0`+`/dev/video1` mappés en dur dans `compose.local.yml` → refusé par l'utilisateur car caméra débranchée = container ne démarre plus (revers de l'erreur #6).
 
-⚠️ Revers de la médaille (erreur #6) : caméra **débranchée** ⇒ le container ne démarre plus (`no such file or directory`) — recommenter les 2 lignes dans ce cas. Commentaire ajouté dans le fichier.
+**v2 (définitive)** : mapping **dynamique** — `run_local_gui.sh` génère `/tmp/microscope-ibom.cameras.yml` avec les `/dev/video*` réellement présents au lancement et l'ajoute aux `-f` compose :
+- caméra absente → pas d'override → l'app démarre **sans** caméra (liste vide, aucun échec)
+- caméra branchée après coup → relancer le script (~10 s, le container est recréé avec les devices)
+- gère N nœuds vidéo (UVC video0+video1, future RealSense video2+)
+
+Plus aucun `/dev/video*` en dur dans `compose.local.yml`. Hot-plug complet (sans relancer le script) = option future via `device_cgroup_rules c 81:* rmw` + montage `/dev` — non retenu pour l'instant (effets de bord à tester).
 
 ### Notes
 - Caméra **USB 2.0** (Z-Star 0ac8:3420) ⇒ MJPG indispensable pour 1080p@30 (la bande passante USB 2.0 ne permet pas le YUYV 1080p) — la demande `CAP_PROP_FOURCC=MJPG` est déjà dans `CameraCapture.cpp` depuis le commit `e174286`. Vérifier le FOURCC réel dans le log au premier lancement.
