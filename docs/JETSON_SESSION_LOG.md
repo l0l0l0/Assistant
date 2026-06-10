@@ -11,7 +11,9 @@
 
 ---
 
-## État actuel — au 2026-05-21 (fin de session)
+## État actuel — au 2026-06-10 (fin de session)
+
+> **Nouveau** : l'app **se lance sur l'écran local du Jetson** (GUI Qt via `run_local_gui.sh`). Audit complet du stack → [docs/JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md) (11 recommandations priorisées). Fix `group_add` dupliqués dans `compose.local.yml` (erreur #14).
 
 ### Phase courante
 **Phase 0 — Conteneurisation** : ✅ **COMPLÈTE** — images `microscope-ibom:base` (avec ONNX Runtime ARM64 compilé from source, CUDA 12.6 + TensorRT 10.3 EP) et `:dev` (avec outils dev) opérationnelles sur Jetson AGX Orin 32GB JP6.2.
@@ -60,6 +62,44 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-10 — App lancée sur écran local + audit améliorations + fix #14
+
+### Objectif
+1. Acter que l'application **démarre sur l'écran local du Jetson** (rapporté par l'utilisateur)
+2. Analyser le projet (Docker, scripts, code C++) et livrer un document de conseils d'amélioration
+3. Corriger proprement le doublon `group_add` que l'utilisateur a dû patcher à la main sur le Jetson
+
+### Contexte de départ
+- L'utilisateur a lancé la GUI via `scripts/run_local_gui.sh` : **ça fonctionne** ✅
+- Il a dû modifier `docker/compose.local.yml` localement : les entrées `video` et `plugdev` étaient en doublon (sémantique de merge compose : les listes sont concaténées entre base et override)
+- ⚠️ Constat process : les commits `1316f33` (scripts run_local_gui/cleanup_vnc) et `a022d46` (compose.local.yml) avaient été pushés **sans entrée de journal** — rétro-documentés ici
+
+### Ce qui a été fait
+1. **Audit complet** (Docker/compose, scripts, src/, CMake, tests) — résultats consolidés dans **[docs/JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md)** (nouveau), avec tableau de priorisation. Points saillants découverts :
+   - 🔴 `runtime.Dockerfile` ne peut pas builder : `COPY build/bin/...` et `COPY docker/entrypoint.sh` sont exclus par `.dockerignore` (build/ et docker/ ignorés)
+   - 🔴 Persistance cassée en Docker : `config.json` → `/root/.config`, `calibration.yml` → `/root/.local/share`, cache TRT → `./trt_cache` relatif — aucun ne correspond aux volumes montés par compose → recommandation `IBOM_DATA_DIR`
+   - 🔴 `CameraCapture` ne demande pas le FOURCC MJPG → risque 5-10 fps en YUYV sur USB 2.0 quand la caméra sera branchée
+   - 🟠 `run_local_gui.sh --force-recreate` tue le container dev (et tout build en cours) à chaque lancement de la GUI
+   - 🟠 `QT_QPA_GENERIC_PLUGINS=evdevtouch:...` sous xcb → risque double événements tactiles avec le Minix SF16T
+2. **Fix erreur #14** : `compose.local.yml` ne déclare plus que `group_add: [input]` (le reste vient déjà de `compose.yml`) + commentaire expliquant la concaténation des listes au merge. Entrée détaillée dans [JETSON_ERREURS.md](JETSON_ERREURS.md#erreur-14--group_add-dupliques-par-le-merge-composeyml--composelocalyml)
+
+### Fichiers modifiés
+- `docs/JETSON_AMELIORATIONS.md` — **nouveau** : rapport d'audit + 11 recommandations priorisées
+- `docker/compose.local.yml` — fix doublons group_add (erreur #14)
+- `docs/JETSON_ERREURS.md` — entrée #14 (✅ RÉSOLU)
+- `docs/JETSON_SESSION_LOG.md` — cette entrée + bloc État actuel
+
+### ⚠️ Action requise sur le Jetson au prochain pull
+`compose.local.yml` a été modifié localement sur le Jetson → faire `git checkout docker/compose.local.yml` **avant** `git pull`, le fix du repo remplace le patch manuel.
+
+### Prochaines étapes suggérées (détail dans JETSON_AMELIORATIONS.md §5)
+1. Unifier la persistance (`IBOM_DATA_DIR`) + aligner les volumes compose
+2. FOURCC MJPG dans `CameraCapture` avant de brancher la caméra microscope
+3. Fix `.dockerignore` vs `runtime.Dockerfile`
+4. Retirer `--force-recreate` de `run_local_gui.sh`
 
 ---
 

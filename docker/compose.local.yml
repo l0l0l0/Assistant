@@ -14,6 +14,11 @@
 #    docker compose -f docker/compose.yml -f docker/compose.local.yml up -d dev
 # =============================================================================
 
+# NOTE merge compose : les listes (group_add, devices, volumes) d'un override
+# sont CONCATENEES a celles de compose.yml, pas remplacees. Ne declarer ici
+# QUE ce qui n'est pas deja dans compose.yml, sinon doublons (erreur #14).
+# compose.yml fournit deja group_add: video, plugdev (+ dialout pour dev).
+
 services:
   dev:
     devices:
@@ -23,9 +28,7 @@ services:
       # - /dev/bus/usb:/dev/bus/usb # decommenter pour USB hot-plug (RealSense)
       # - /dev/snd:/dev/snd         # decommenter si besoin audio
     group_add:
-      - video
       - input
-      - plugdev
 
   runtime:
     devices:
@@ -34,6 +37,4 @@ services:
       # - /dev/video0:/dev/video0
       # - /dev/bus/usb:/dev/bus/usb
     group_add:
-      - video
       - input
-      - plugdev
