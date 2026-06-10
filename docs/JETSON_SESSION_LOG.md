@@ -11,9 +11,11 @@
 
 ---
 
-## État actuel — au 2026-06-10 (fin de session)
+## État actuel — au 2026-06-10 (fin de session, 2e itération)
 
-> **Nouveau** : l'app **se lance sur l'écran local du Jetson** (GUI Qt via `run_local_gui.sh`). Audit complet du stack → [docs/JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md) (11 recommandations priorisées). Fix `group_add` dupliqués dans `compose.local.yml` (erreur #14).
+> **Nouveau** : l'app **se lance sur l'écran local du Jetson** (GUI Qt via `run_local_gui.sh`). Audit complet → [docs/JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md), puis **implémentation de la majorité des recommandations** (persistance unifiée `IBOM_DATA_DIR`, FOURCC MJPG, fixes Docker/compose/scripts, test TrackingWorker, CI shell/compose). Fix `group_add` dupliqués (erreur #14).
+>
+> ⚠️ **À FAIRE en priorité sur le Jetson** : `bash scripts/build_jetson.sh` + `cd build && ctest` pour **valider la compilation** — ces changements n'ont pas pu être compilés dans l'environnement d'analyse (pas de CUDA/Qt/OpenCV). Voir §0 de JETSON_AMELIORATIONS.md.
 
 ### Phase courante
 **Phase 0 — Conteneurisation** : ✅ **COMPLÈTE** — images `microscope-ibom:base` (avec ONNX Runtime ARM64 compilé from source, CUDA 12.6 + TensorRT 10.3 EP) et `:dev` (avec outils dev) opérationnelles sur Jetson AGX Orin 32GB JP6.2.
@@ -62,6 +64,49 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-10 (suite) — Implémentation des améliorations de l'audit
+
+### Objectif
+Implémenter les recommandations de [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md) (l'utilisateur a demandé « lance les améliorations »).
+
+### ⚠️ Limite importante
+Environnement d'analyse **sans toolchain** (pas de CUDA/Qt/OpenCV/ONNX) → le code C++ et le nouveau test **n'ont pas été compilés ici**. Tout a été écrit pour être correct à la relecture, mais **doit être validé sur le Jetson** : `bash scripts/build_jetson.sh` puis `cd build && ctest --output-on-failure`. Validés localement : `bash -n` des scripts, parse YAML de compose + workflow CI.
+
+### Ce qui a été fait
+
+**Persistance unifiée (prio 1 — `IBOM_DATA_DIR`)**
+- Nouveau helper `src/utils/Paths.h/.cpp` : `ibom::utils::dataDir()` honore `$IBOM_DATA_DIR`, sinon `%APPDATA%/MicroscopeIBOM` (Win) ou `~/.local/share/MicroscopeIBOM` (Linux). Ajouté à `SOURCES`/`HEADERS` du CMakeLists.
+- `Config.cpp::defaultConfigPath()` → `dataDir()/config.json` (suppression du `#ifdef` `~/.config`).
+- `Application.cpp` → calibration (load+save) et snapshots passent par `dataDir()` au lieu de `QStandardPaths::AppDataLocation` (3 usages). Exports Documents/Pictures inchangés.
+- `InferenceEngine.cpp` → cache TRT en chemin **absolu** `dataDir()/tensorrt-cache` (string local maintenu vivant jusqu'au `AppendExecutionProvider_TensorRT`).
+- `compose.yml` : `IBOM_DATA_DIR=/opt/microscope-ibom/data` (dev + runtime) + volume unique `../data:/opt/microscope-ibom/data` (remplace `../config` et `../tensorrt-cache`). `runtime.Dockerfile` VOLUME mis à jour. `entrypoint.sh` crée `DATA_DIR`. `data/` ajouté à `.gitignore` + `.dockerignore`.
+
+**Caméra (prio 2)** : `CameraCapture.cpp` demande `CAP_PROP_FOURCC=MJPG` avant la résolution + log du FOURCC réellement obtenu.
+
+**Docker/scripts**
+- `.dockerignore` : exceptions `!build/bin/MicroscopeIBOM` + `!docker/entrypoint.sh` (débloque `build runtime`).
+- `compose.yml` runtime : retrait `QT_QPA_GENERIC_PLUGINS`/evdevtouch (doublons tactile sous xcb) ; `restart: on-failure:3` au lieu de `unless-stopped`.
+- `entrypoint.sh` : check GPU adapté Tegra (`/dev/nvhost-gpu` avant `nvidia-smi`) ; bloc engines TRT réécrit (honnête, plus de faux « 5-15 min » à chaque boot).
+- `run_local_gui.sh` : retrait `--force-recreate` ; cookie xauth réel (`xauth nlist | nmerge`) ; mode debug → `build-debug/bin`.
+
+**CMake** : `cmake/CompilerFlags.cmake` — `IBOM_TARGET_CPU` (défaut `-march=native`, override `-mcpu=cortex-a78ae` pour build reproductible/portable).
+
+**Tests (prio 6)** : `tests/test_tracking_worker.cpp` — recouvre `TrackingWorker` via une homographie de synthèse connue (texture aléatoire déterministe, warp, vérif reprojection < 5 px) + cas « pas de base → pas d'émission ». Cible CMake dédiée avec AUTOMOC + `Qt6::Core` (gardée par `Qt6_FOUND`).
+
+**CI (prio 10, partiel)** : `.github/workflows/ci.yml` — jobs `shell` (`bash -n` + shellcheck informatif) et `compose` (`docker compose config`). Build C++ no-GPU reporté (nécessite `IBOM_ENABLE_ONNX=OFF`, cf §0/§4.2 du doc).
+
+### Fichiers modifiés / créés
+- **Créés** : `src/utils/Paths.h`, `src/utils/Paths.cpp`, `tests/test_tracking_worker.cpp`, `.github/workflows/ci.yml`
+- **Modifiés** : `CMakeLists.txt`, `cmake/CompilerFlags.cmake`, `src/app/Config.cpp`, `src/app/Application.cpp`, `src/ai/InferenceEngine.cpp`, `src/camera/CameraCapture.cpp`, `tests/CMakeLists.txt`, `docker/compose.yml`, `docker/runtime.Dockerfile`, `docker/entrypoint.sh`, `scripts/run_local_gui.sh`, `.dockerignore`, `.gitignore`, `docs/JETSON_AMELIORATIONS.md`
+
+### Reporté (assumé)
+Image runtime réellement minimale (1.3), user non-root + GID numériques (1.5), tags d'images datés (1.8), nettoyage Windows (3.6), CI build C++ no-GPU (4.2). Raisons dans §0 du doc.
+
+### Prochaine étape obligatoire
+Sur le Jetson : `git pull` (après `git checkout docker/compose.local.yml`), puis **rebuild + ctest** pour valider. Si la migration du chemin de calibration gêne, copier l'ancien `calibration.yml` vers `~/.local/share/MicroscopeIBOM/`.
 
 ---
 

@@ -23,6 +23,7 @@
 #include "export/DataExporter.h"
 #include "gui/Theme.h"
 #include "utils/Logger.h"
+#include "utils/Paths.h"
 
 #include <spdlog/spdlog.h>
 #include <QCommandLineParser>
@@ -179,9 +180,10 @@ void Application::createSubsystems()
     // Camera calibration
     spdlog::info("Creating CameraCalibration...");
     m_calibration = std::make_unique<camera::CameraCalibration>();
-    // Try to load existing calibration
-    auto calibPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                     + "/calibration.yml";
+    // Try to load existing calibration. Unified data dir (honors
+    // $IBOM_DATA_DIR) so config + calibration + snapshots share one Docker
+    // volume — see src/utils/Paths.h.
+    auto calibPath = QString::fromStdString((utils::dataDir() / "calibration.yml").string());
     if (m_calibration->load(calibPath.toStdString())) {
         spdlog::info("Loaded camera calibration from {}", calibPath.toStdString());
     }
@@ -222,9 +224,8 @@ void Application::createSubsystems()
     m_snapshotHistory = std::make_unique<features::SnapshotHistory>(this);
     m_dataExporter    = std::make_unique<exports::DataExporter>(this);
 
-    // Configure storage for snapshots — silent saves under AppData
-    QString snapDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                      + "/snapshots";
+    // Configure storage for snapshots — silent saves under the unified data dir.
+    QString snapDir = QString::fromStdString((utils::dataDir() / "snapshots").string());
     m_snapshotHistory->setStorageDir(snapDir);
 
     // Main window (owns GUI widgets)
@@ -1371,10 +1372,10 @@ void Application::runCalibration()
     auto res = m_camera->resolution();
     m_calibration->initUndistortMaps(cv::Size(res.width(), res.height()));
 
-    // Save calibration
-    auto calibPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                     + "/calibration.yml";
-    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    // Save calibration under the unified data dir (utils::dataDir() creates it).
+    QString dataDir = QString::fromStdString(utils::dataDir().string());
+    auto calibPath = dataDir + "/calibration.yml";
+    QDir().mkpath(dataDir);
     m_calibration->save(calibPath.toStdString());
 
     spdlog::info("Calibration succeeded: error={:.4f}, pixels/mm={:.2f}, saved to {}",

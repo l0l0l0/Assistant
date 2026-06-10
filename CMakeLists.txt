@@ -168,6 +168,7 @@ set(SOURCES
     src/utils/Logger.cpp
     src/utils/GpuUtils.cpp
     src/utils/ImageUtils.cpp
+    src/utils/Paths.cpp
 )
 
 set(HEADERS
@@ -228,6 +229,7 @@ set(HEADERS
     src/utils/Logger.h
     src/utils/GpuUtils.h
     src/utils/ImageUtils.h
+    src/utils/Paths.h
 )
 
 # ============================================================================

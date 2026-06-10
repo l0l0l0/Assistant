@@ -35,9 +35,23 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wno-missing-field-initializers
     )
 
-    # Release optimizations
+    # Release optimizations.
+    #
+    # Arch tuning: -march=native (default) detects the build host's ISA — great
+    # when compiling ON the Jetson AGX Orin, but it makes the binary
+    # non-reproducible and non-portable to a different Jetson (Nano/NX, other
+    # cores). To pin the target explicitly (e.g. for the Orin's Cortex-A78AE
+    # cores) configure with:  -DIBOM_TARGET_CPU=cortex-a78ae
+    # which emits -mcpu=<cpu> (sets both arch and tune) instead of -march=native.
+    set(IBOM_TARGET_CPU "" CACHE STRING
+        "Explicit CPU for -mcpu= (e.g. cortex-a78ae for Jetson Orin). Empty = -march=native.")
+    if(IBOM_TARGET_CPU)
+        set(_ibom_arch_flag -mcpu=${IBOM_TARGET_CPU})
+    else()
+        set(_ibom_arch_flag -march=native)
+    endif()
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        target_compile_options(${PROJECT_NAME} PRIVATE -O3 -march=native -flto)
+        target_compile_options(${PROJECT_NAME} PRIVATE -O3 ${_ibom_arch_flag} -flto)
         target_link_options(${PROJECT_NAME} PRIVATE -flto)
     endif()
 

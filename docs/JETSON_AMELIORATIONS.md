@@ -8,6 +8,36 @@
 
 ---
 
+## 0. Statut d'implémentation — session 2026-06-10
+
+La majorité des recommandations ont été **implémentées** dans la foulée de l'audit (commit de cette session). Détail dans `JETSON_SESSION_LOG.md`.
+
+| Réf | Recommandation | Statut |
+|-----|----------------|--------|
+| 1.1 | Doublons `group_add` | ✅ Fait (erreur #14) |
+| 1.2 | `.dockerignore` vs `runtime.Dockerfile` | ✅ Fait |
+| 1.4 | restart `on-failure:3` (runtime) | ✅ Fait |
+| 1.6 | Retrait `QT_QPA_GENERIC_PLUGINS`/evdevtouch | ✅ Fait |
+| 1.7 | entrypoint : check GPU Tegra + bloc engines | ✅ Fait |
+| 2.1 | Retrait `--force-recreate` | ✅ Fait |
+| 2.2 | Cookie xauth réel | ✅ Fait |
+| 2.3 | run_local_gui debug → `build-debug/bin` | ✅ Fait |
+| 3.1 | FOURCC MJPG + log du format réel | ✅ Fait |
+| 3.2 | Persistance unifiée `IBOM_DATA_DIR` | ✅ Fait (`src/utils/Paths.*`, Config/Application/InferenceEngine, compose, entrypoint) |
+| 3.3 | Arch CPU configurable (`IBOM_TARGET_CPU`) | ✅ Fait |
+| 3.5 | `test_tracking_worker.cpp` | ✅ Fait |
+| 4.2 | CI GitHub Actions | 🟡 Partiel — shell + compose verts ; build C++ no-GPU reporté (nécessite ONNX optionnel, cf. ci-dessous) |
+| 1.3 | Image runtime réellement minimale | ⏸ Reporté (refactor multi-stage, non urgent) |
+| 1.5 | User non-root + GID numériques | ⏸ Reporté (à faire avec le mode kiosque) |
+| 1.8 | Tags d'images datés | ⏸ Process (à appliquer au prochain build) |
+| 3.6 | Nettoyage résidus Windows | ⏸ Reporté (Phase 1c) |
+
+> ⚠️ **Important — à valider sur le Jetson** : ces changements (notamment le helper `IBOM_DATA_DIR` et le test Qt/MOC) **n'ont pas pu être compilés** dans l'environnement d'analyse (pas de CUDA/Qt/OpenCV). Faire un `bash scripts/build_jetson.sh` + `ctest` sur le Jetson pour confirmer avant de s'appuyer dessus. La 1ère exécution déplacera la config/calibration vers `~/.local/share/MicroscopeIBOM` (ou `$IBOM_DATA_DIR`) — récupérer manuellement un éventuel `calibration.yml` existant si besoin.
+
+> **CI build no-GPU (4.2, reste à faire)** : bloqué par deux points — (a) le projet `find_package(onnxruntime)` inconditionnel et instancie `ModelManager`/`InferenceEngine` dans `Application` ; (b) `tests/CMakeLists.txt` référence la cible `MicroscopeIBOM`. Pré-requis : introduire une option `IBOM_ENABLE_ONNX=OFF` qui `#ifdef`-garde l'IA, puis un job CI Ubuntu 22.04 + Qt6 apt buildant `-DIBOM_ENABLE_TENSORRT=OFF -DIBOM_ENABLE_UMA=OFF -DIBOM_ENABLE_ONNX=OFF` et exécutant les tests sans GPU.
+
+---
+
 ## 1. Docker & Compose
 
 ### 1.1 ✅ CORRIGÉ — Doublons `group_add` entre `compose.yml` et `compose.local.yml`

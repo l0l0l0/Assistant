@@ -33,10 +33,11 @@ RUN chmod +x /entrypoint.sh
 
 # -----------------------------------------------------------------------------
 #  Volumes attendus (mountes par compose.yml ou docker run)
+#  data/ regroupe config.json + calibration.yml + snapshots + cache TRT
+#  (IBOM_DATA_DIR, cf src/utils/Paths.h).
 # -----------------------------------------------------------------------------
-VOLUME ["/opt/microscope-ibom/config"]
+VOLUME ["/opt/microscope-ibom/data"]
 VOLUME ["/opt/microscope-ibom/logs"]
 VOLUME ["/opt/microscope-ibom/models"]
-VOLUME ["/opt/microscope-ibom/tensorrt-cache"]
 
 ENTRYPOINT ["/entrypoint.sh"]

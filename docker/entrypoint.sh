@@ -7,14 +7,17 @@ set -euo pipefail
 
 APP_DIR=/opt/microscope-ibom
 APP_BIN=${APP_DIR}/MicroscopeIBOM
-TRT_CACHE=${APP_DIR}/tensorrt-cache
+DATA_DIR=${IBOM_DATA_DIR:-${APP_DIR}/data}
+TRT_CACHE=${DATA_DIR}/tensorrt-cache
 MODELS_DIR=${APP_DIR}/models
 LOGS_DIR=${APP_DIR}/logs
 
 # -----------------------------------------------------------------------------
 #  Creation des dossiers de persistance s'ils n'existent pas
+#  (config.json / calibration.yml / snapshots / cache TRT vivent tous sous
+#   DATA_DIR — cf src/utils/Paths.h et IBOM_DATA_DIR dans compose.yml)
 # -----------------------------------------------------------------------------
-mkdir -p "${LOGS_DIR}" "${TRT_CACHE}"
+mkdir -p "${LOGS_DIR}" "${DATA_DIR}" "${TRT_CACHE}"
 
 # -----------------------------------------------------------------------------
 #  Sanity check : binaire present
@@ -42,20 +45,31 @@ fi
 
 # -----------------------------------------------------------------------------
 #  Sanity check : GPU
+#  Sur Jetson/L4T, nvidia-smi est souvent absent ou tres limite (iGPU Tegra).
+#  On teste donc d'abord les noeuds device Tegra, et nvidia-smi seulement s'il
+#  existe — sinon on emettrait un faux warning permanent.
 # -----------------------------------------------------------------------------
-if ! nvidia-smi > /dev/null 2>&1; then
-    echo "[entrypoint] ATTENTION: nvidia-smi echec — runtime nvidia manquant ?"
+if ls /dev/nvhost-gpu /dev/nvgpu* >/dev/null 2>&1; then
+    echo "[entrypoint] GPU Tegra detecte (noeuds /dev/nvhost-gpu)"
+elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    echo "[entrypoint] GPU detecte via nvidia-smi"
+else
+    echo "[entrypoint] ATTENTION: aucun GPU detecte (ni /dev/nvhost-gpu ni nvidia-smi) — runtime nvidia manquant ?"
 fi
 
 # -----------------------------------------------------------------------------
-#  Generation initiale des engines TensorRT (si absents)
+#  Cache TensorRT
+#  Les engines sont compiles paresseusement par ONNX Runtime au 1er appel
+#  d'inference et caches dans TRT_CACHE (chemin absolu cote binaire, cf
+#  InferenceEngine.cpp). Ce dossier etant persiste (volume), la recompilation
+#  (~5-15 min) ne se produit qu'une fois. Rien a generer ici.
 # -----------------------------------------------------------------------------
-if [ -d "${MODELS_DIR}" ] && [ ! -f "${TRT_CACHE}/.engines_built" ]; then
-    echo "[entrypoint] Premier lancement detecte — generation des engines TensorRT"
-    echo "[entrypoint] (peut prendre 5-15 min selon les modeles)"
-    # Le binaire devra gerer l'option --build-engines OU
-    # generer les engines au premier appel d'inference et les cacher dans TRT_CACHE
-    # touch "${TRT_CACHE}/.engines_built"  # decommenter quand --build-engines existe
+if [ -d "${MODELS_DIR}" ] && ls "${MODELS_DIR}"/*.onnx >/dev/null 2>&1; then
+    if [ -z "$(ls -A "${TRT_CACHE}" 2>/dev/null)" ]; then
+        echo "[entrypoint] Cache TRT vide — la 1ere inference compilera les engines (lent une fois)"
+    else
+        echo "[entrypoint] Cache TRT present ($(ls "${TRT_CACHE}" | wc -l) fichiers)"
+    fi
 fi
 
 # -----------------------------------------------------------------------------

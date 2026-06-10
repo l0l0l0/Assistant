@@ -150,16 +150,34 @@ void CameraCapture::captureLoop()
         return;
     }
 
+    // Request MJPG BEFORE the resolution/fps. UVC cameras default to raw YUYV,
+    // whose bandwidth caps USB 2.0 well below 1080p@30 (the driver then silently
+    // falls back to ~5-10 fps). MJPG is compressed on-camera, so full res/fps fit.
+    // Order matters: FOURCC must be set before width/height for most V4L2 drivers.
+    cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+
     // Configure capture properties (best-effort, camera may not support requested res)
     cap.set(cv::CAP_PROP_FRAME_WIDTH, m_width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, m_height);
     cap.set(cv::CAP_PROP_FPS, m_fps);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
 
-    spdlog::info("Camera opened: {}x{} @ {} fps (unified memory: {})",
+    // Decode and log the FOURCC the camera actually settled on — if it isn't
+    // MJPG, expect reduced fps at high resolution (the camera ignored the hint).
+    const int fourcc = static_cast<int>(cap.get(cv::CAP_PROP_FOURCC));
+    const char fourccStr[5] = {
+        static_cast<char>(fourcc & 0xFF),
+        static_cast<char>((fourcc >> 8) & 0xFF),
+        static_cast<char>((fourcc >> 16) & 0xFF),
+        static_cast<char>((fourcc >> 24) & 0xFF),
+        '\0'
+    };
+
+    spdlog::info("Camera opened: {}x{} @ {} fps, FOURCC={} (unified memory: {})",
         static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH)),
         static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT)),
         static_cast<int>(cap.get(cv::CAP_PROP_FPS)),
+        fourccStr,
         unifiedMemoryAvailable() ? "yes" : "no");
 
     cv::MatAllocator* alloc = unifiedAllocator();

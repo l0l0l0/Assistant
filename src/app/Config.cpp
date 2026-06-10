@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "utils/Paths.h"
 
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -12,23 +13,9 @@ Config::Config() = default;
 
 std::string Config::defaultConfigPath() const
 {
-    // Store config next to the executable or in user's appdata
-#ifdef IBOM_PLATFORM_WINDOWS
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata) {
-        fs::path dir = fs::path(appdata) / "MicroscopeIBOM";
-        fs::create_directories(dir);
-        return (dir / "config.json").string();
-    }
-#else
-    const char* home = std::getenv("HOME");
-    if (home) {
-        fs::path dir = fs::path(home) / ".config" / "MicroscopeIBOM";
-        fs::create_directories(dir);
-        return (dir / "config.json").string();
-    }
-#endif
-    return "config.json";
+    // Unified data dir (honors $IBOM_DATA_DIR) — shared with calibration,
+    // snapshots and the TensorRT cache. See src/utils/Paths.h.
+    return (utils::dataDir() / "config.json").string();
 }
 
 bool Config::load(const std::string& path)

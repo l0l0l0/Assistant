@@ -1,0 +1,54 @@
+name: CI
+
+# Filet de securite leger entre deux sessions Jetson. Un build C++ complet
+# n'est pas (encore) faisable sur un runner x86 stock : le projet depend d'ONNX
+# Runtime, absent en apt Ubuntu 22.04 ARM/x86 (cf JETSON_ERREURS.md #1), et
+# tests/CMakeLists.txt reference la cible MicroscopeIBOM. Ces jobs verifient
+# donc ce que la migration touche le plus souvent — scripts shell et stack
+# Docker/compose — la ou les regressions sont frequentes et rapides a attraper.
+# Suite possible (cf JETSON_AMELIORATIONS.md §4.2) : rendre ONNX Runtime
+# optionnel (-DIBOM_ENABLE_ONNX=OFF) pour debloquer un vrai build no-GPU.
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  shell:
+    name: Shell scripts (syntax + shellcheck)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (syntaxe) sur tous les .sh
+        run: |
+          set -e
+          shopt -s globstar nullglob
+          fail=0
+          for f in **/*.sh; do
+            echo "::group::$f"
+            bash -n "$f" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: shellcheck (informatif, ne bloque pas)
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shopt -s globstar nullglob
+          shellcheck -S warning **/*.sh || true
+
+  compose:
+    name: Docker Compose validation
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Valider compose.yml
+        run: docker compose -f docker/compose.yml config --quiet
+
+      - name: Valider compose.yml + override local
+        run: docker compose -f docker/compose.yml -f docker/compose.local.yml config --quiet
