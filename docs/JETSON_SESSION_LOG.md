@@ -15,7 +15,7 @@
 
 > **2026-06-11** : PR #2 mergée dans `main` (`f36895e`) — Dataset Studio Lots 1+2 + Phase 1c + pipeline IA + tous les fixes Docker/scripts. Fix `INSTALL.bat` (PR #3), scripts Linux du Studio (PR #4). **Phase A implémentée** : `DatasetCreator` + `DatasetPanel` + signal qualité tracking + `footprint_classes.json` + tests (voir session "suite" ci-dessous). Le dev continue sur `claude/dreamy-cori-oec93c`.
 >
-> ✅ **Build Jetson validé** (2026-06-11) : `bash scripts/build_jetson.sh` → 31/31, binaire 1.3 MB. `ctest` **en attente**.
+> ✅ **Build + ctest Jetson validés** (2026-06-11) : `bash scripts/build_jetson.sh` → 31/31, binaire 1.3 MB. `ctest` → **7/7 passent**. Branche `claude/dreamy-cori-oec93c` mergée dans `main`.
 
 > **Nouveau aujourd'hui** (3 itérations) :
 > 1. App **lancée sur l'écran local du Jetson** ✅ + audit complet → [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md)
@@ -93,13 +93,15 @@ GO utilisateur sur le plan Phase A de [DATASET_CREATOR_PLAN.md](DATASET_CREATOR_
 - **31/31 steps**, binaire `build/bin/MicroscopeIBOM` (1.3 MB) généré sans erreur
 - Qt 6.2.4 / OpenCV 4.10.0 / CUDA / TensorRT / UMA tous détectés
 - 2 warnings `-Wunused` dans `Application.cpp` (lignes 474 et 520) — corrigés avec `[[maybe_unused]]` dans le commit suivant
-- `ctest --output-on-failure` : **à valider** (à lancer depuis `build/`)
+- `ctest --output-on-failure` : ✅ **7/7 tests passent** (0.48 s total)
+
+### ✅ Branche validée — mergée dans main
+`claude/dreamy-cori-oec93c` → `main` après validation complète sur Jetson.
 
 ### Prochaine étape
-1. `ctest --output-on-failure` dans `build/` → valider les 6 nouveaux tests `test_dataset_creator`
-2. Si ctest OK → merger `claude/dreamy-cori-oec93c` dans `main`
-3. Première session de capture réelle (caméra + carte avec iBOM, onglet Dataset dans l'app)
-4. Phase B (assistant variété : carte de couverture, check-list zoom/éclairage)
+1. Première session de capture réelle (caméra branchée + carte avec iBOM, onglet Dataset dans l'app)
+2. Phase B (assistant variété : carte de couverture, check-list zoom/éclairage, quotas)
+3. Phases C1-C2 (validate_dataset.py, split_dataset.py) si pas déjà faits
 
 ---
 
