@@ -15,7 +15,7 @@
 
 > **2026-06-11** : PR #2 mergée dans `main` (`f36895e`) — Dataset Studio Lots 1+2 + Phase 1c + pipeline IA + tous les fixes Docker/scripts. Fix `INSTALL.bat` (PR #3), scripts Linux du Studio (PR #4). **Phase A implémentée** : `DatasetCreator` + `DatasetPanel` + signal qualité tracking + `footprint_classes.json` + tests (voir session "suite" ci-dessous). Le dev continue sur `claude/dreamy-cori-oec93c`.
 >
-> ⚠️ **Validation Jetson toujours en attente** : `git pull && bash scripts/build_jetson.sh && cd build && ctest` — aucun C++ depuis la Phase 1c n'a été compilé sur la machine.
+> ✅ **Build Jetson validé** (2026-06-11) : `bash scripts/build_jetson.sh` → 31/31, binaire 1.3 MB. `ctest` **en attente**.
 
 > **Nouveau aujourd'hui** (3 itérations) :
 > 1. App **lancée sur l'écran local du Jetson** ✅ + audit complet → [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md)
@@ -88,11 +88,18 @@ GO utilisateur sur le plan Phase A de [DATASET_CREATOR_PLAN.md](DATASET_CREATOR_
 - **Application** : thread + worker + 8 connexions (frames bruts — cohérents avec l'homographie tracking estimée sur frames bruts), `setProject` au chargement iBOM (Layer::Front v1). ⚠ Metatypes : slot `setProject` déclaré avec types **pleinement qualifiés** (piège #17).
 - **`tests/test_dataset_creator.cpp`** : 6 cas — règles ordonnées/insensibles à la casse, rejet sans 'other', géométrie YOLO exacte (scale ×10), shrink, gates (layer/taille/clipping), homographie vide.
 
-### ⚠ Validation requise sur le Jetson
-**Rien compilé ici** (pas de Qt/OpenCV dans l'env). Sur le Jetson : `git pull && bash scripts/build_jetson.sh && cd build && ctest --output-on-failure`. Toute la pile C++ depuis Phase 1c reste à valider d'un coup.
+### ✅ Build Jetson validé (2026-06-11)
+`bash scripts/build_jetson.sh` sur Jetson AGX Orin JP6.2 container dev :
+- **31/31 steps**, binaire `build/bin/MicroscopeIBOM` (1.3 MB) généré sans erreur
+- Qt 6.2.4 / OpenCV 4.10.0 / CUDA / TensorRT / UMA tous détectés
+- 2 warnings `-Wunused` dans `Application.cpp` (lignes 474 et 520) — corrigés avec `[[maybe_unused]]` dans le commit suivant
+- `ctest --output-on-failure` : **à valider** (à lancer depuis `build/`)
 
 ### Prochaine étape
-Validation build Jetson → première session de capture réelle (caméra + carte avec iBOM) → import dans le Studio → entraînement v1. Phase B (assistant variété) ensuite.
+1. `ctest --output-on-failure` dans `build/` → valider les 6 nouveaux tests `test_dataset_creator`
+2. Si ctest OK → merger `claude/dreamy-cori-oec93c` dans `main`
+3. Première session de capture réelle (caméra + carte avec iBOM, onglet Dataset dans l'app)
+4. Phase B (assistant variété : carte de couverture, check-list zoom/éclairage)
 
 ---
 

@@ -471,7 +471,7 @@ void Application::connectSignals()
             // Draw component pads, silkscreen outlines, and labels
             const bool drawPads = m_config->showPads();
             const bool drawSilk = m_config->showSilkscreen();
-            const bool drawFab  = m_config->showFabrication();
+            [[maybe_unused]] const bool drawFab = m_config->showFabrication();
 
             // Resolve per-state base colors from Config (user-customizable via Settings)
             QColor cSelected = QColor(QString::fromStdString(m_config->selectedColorHex()));
@@ -517,7 +517,7 @@ void Application::connectSignals()
                     cv::Point2f padCenter(
                         static_cast<float>(pad.position.x),
                         static_cast<float>(pad.position.y));
-                    cv::Point2f imgPad = m_homography->pcbToImage(padCenter);
+                    [[maybe_unused]] cv::Point2f imgPad = m_homography->pcbToImage(padCenter);
 
                     // Transform pad size: map a rect at pad position
                     auto padCorners = m_homography->transformRect(
