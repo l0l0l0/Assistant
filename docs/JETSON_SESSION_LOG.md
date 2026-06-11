@@ -11,7 +11,14 @@
 
 ---
 
-## État actuel — au 2026-05-21 (fin de session)
+## État actuel — au 2026-06-10 (fin de session, 3e itération)
+
+> **Nouveau aujourd'hui** (3 itérations) :
+> 1. App **lancée sur l'écran local du Jetson** ✅ + audit complet → [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md)
+> 2. Implémentation des recommandations (persistance `IBOM_DATA_DIR`, FOURCC MJPG, fixes Docker/scripts, test TrackingWorker, CI shell/compose)
+> 3. **Phase 1c terminée** (plus aucun code Windows dans le tronc), **pipeline IA câblé** (init auto en arrière-plan si `.onnx` présent — [AI_PIPELINE.md](AI_PIPELINE.md) + `scripts/export_yolov8_onnx.py`), **image runtime minimale** réécrite (multi-stage, jamais buildée).
+>
+> ⚠️ **À FAIRE en priorité sur le Jetson** : `git checkout docker/compose.local.yml && git pull`, puis `bash scripts/build_jetson.sh` + `cd build && ctest` pour **valider la compilation** — rien de tout ça n'a pu être compilé dans l'environnement d'analyse (pas de CUDA/Qt/OpenCV). Décision utilisateur : **ONNX ne sera jamais optionnel** (pas de build no-GPU).
 
 ### Phase courante
 **Phase 0 — Conteneurisation** : ✅ **COMPLÈTE** — images `microscope-ibom:base` (avec ONNX Runtime ARM64 compilé from source, CUDA 12.6 + TensorRT 10.3 EP) et `:dev` (avec outils dev) opérationnelles sur Jetson AGX Orin 32GB JP6.2.
@@ -60,6 +67,270 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-10 (suite 7) — Lot 2 PCB Dataset Studio (split + entraînement)
+
+### Contexte
+GO utilisateur pendant qu'il teste le Lot 1 sur son PC. Périmètre = plan §6 Lot 2.
+
+### Livré
+- `studio/session_split.py` : split **par session** (jamais par image) — greedy plus-petites-sessions-en-val pour approcher le ratio, garde ≥1 session de chaque côté, avertit si une combinaison éclairage|zoom (manifest.jsonl) n'existe qu'en val ; fallback mono-session = split contiguë + warning. Sortie : `train.txt`/`val.txt` (chemins absolus, ultralytics retrouve les labels via `/images/`→`/labels/`) + `data.yaml` commenté
+- `studio/gpu_check.py` : détection torch/CUDA/ultralytics + **piège Blackwell** — vérifie que `sm_120` est dans `torch.cuda.get_arch_list()` (un torch < 2.7 voit le GPU mais plante au premier kernel) ; exécutable en module (`python -m studio.gpu_check`)
+- `studio/vendor/training_manager.py` : vendorisé de Pokemon (adaptations marquées [PCB] : défauts yolov8m/pcb_detector/degrees=180/flipud=0.5 + callback `on_fit_epoch_end` → progression par epoch dans le journal GUI)
+- `app.py` : étapes 3 (ratio val + résumé du split persisté) et 4 (bandeau GPU async, presets rapide/standard/précis depuis defaults.json, overrides epochs/batch, confirmation si CPU, best.pt + métriques persistés dans le projet)
+- `install_training.bat` : torch cu128 + ultralytics + check GPU auto
+
+### Tests effectués (hors GUI, hors vrai GPU)
+✅ py_compile · ✅ split 4 sessions (30/10, zéro intersection train/val, data.yaml valide) · ✅ fallback mono-session (8/2 + warning) · ✅ gpu_check sans torch (message clair) · ✅ TrainingManager avec **ultralytics factice** : kwargs vérifiés (degrees=180, flipud=0.5, data/epochs corrects), métriques remontées, callback epoch enregistré.
+⚠️ Restent à tester par l'utilisateur sur le PC : la GUI des étapes 3-4 et un **vrai** entraînement (install_training.bat → preset rapide sur le dataset factice).
+
+### Prochaine étape
+Retours utilisateur Lots 1-2 → Lot 3 (test visuel, export ONNX via scripts/export_yolov8_onnx.py, import/déploiement scp Jetson)
+
+---
+
+## Session 2026-06-10 (suite 6) — Implémentation Lot 1 PCB Dataset Studio
+
+### Décisions
+- **Langage : Python confirmé** (question Rust posée par l'utilisateur → refusé avec argumentaire : ultralytics/PyTorch est Python-only, l'intérêt = réutiliser training_manager/validator existants ; Rust = tout réécrire + embarquer Python quand même)
+- Test à blanc : **générateur de dataset factice** retenu
+
+### Livré — `tools/dataset_studio/` (Lot 1 complet)
+- `app.py` (~420 l.) : wizard Tkinter 6 étapes (0-2 actives, 3-5 placeholders), thème sombre, journal live (queue + after), opérations en thread (`_run_bg`)
+- `studio/project.py` : config persistée `~/.pcb_dataset_studio/project.json` (workdir, accès Jetson pour Lot 3)
+- `studio/import_manager.py` : scan/copie de sessions (`images/`+`labels/`), anti-écrasement
+- `studio/fake_dataset.py` : générateur factice (faux PCB + composants rectangulaires, labels YOLO exacts par construction, manifest.jsonl avec tags)
+- `studio/validation.py` : orchestre le validator par session, agrège les classes, rapports HTML, **mosaïque d'aperçu avec bboxes dessinées**
+- `studio/vendor/` : `dataset_validator.py` (512 l.) + `safe_print` vendorisés de Pokemon-Dataset-Creator avec en-têtes d'attribution
+- `config/pcb_classes.json` (14 classes, ⚠️ même liste ordonnée que la future Phase A), `config/defaults.json` (presets entraînement pour Lot 2)
+- `INSTALL.bat`/`START.bat` (CRLF) avec avertissement **PyTorch ≥ 2.7/cu128 pour Blackwell sm_120**, `requirements.txt`, `README.md`
+
+### Tests effectués (dans l'environnement d'analyse, hors GUI)
+✅ py_compile de tous les modules · ✅ bout-en-bout : génération 2 sessions × 8 images → scan → import → ré-import ignoré → validation (0 erreur, 16 images, 14 classes) → 2 rapports HTML + mosaïque vérifiée visuellement (boxes alignées).
+⚠️ **La GUI Tkinter n'a pas pu être lancée ici** (pas de display) — premier lancement réel = test utilisateur sur le PC Windows.
+
+### À tester par l'utilisateur (PC fixe Windows)
+1. `git pull` puis ouvrir `tools/dataset_studio/`, double-clic `INSTALL.bat` puis `START.bat`
+2. Étape 0 : choisir le dossier de travail → Enregistrer
+3. Étape 1 : « Générer » (dataset factice) · Étape 2 : « Lancer la validation » → ouvrir rapport + aperçu
+4. Remonter tout problème (la GUI n'a jamais tourné)
+
+### Prochaine étape
+Retours utilisateur sur Lot 1 → **Lot 2** (split par session + entraînement, plan §6 du DATASET_STUDIO_PLAN)
+
+---
+
+## Session 2026-06-10 (suite 5) — Plan PCB Dataset Studio (wizard Windows)
+
+### Objectif
+L'utilisateur choisit de commencer par le **wizard Windows** (avant la Phase A Jetson). Conformément à la règle "plan avant action" : analyse du code réel de Pokemon-Dataset-Creator (désormais public, cloné en lecture) + plan détaillé.
+
+### Analyse Pokemon-Dataset-Creator (code réel, pas le README)
+- `core/` modulaire et largement **générique YOLO** : `training_manager.py` (412 l., TrainingConfig + callback log GUI), `dataset_validator.py` (507 l., rapport HTML), `auto_balancer_optimized.py` (356 l.), `dataset_exporter.py` (COCO/VOC), `utils.py` (safe_print Windows) → **réutilisés quasi tels quels** (vendor + attribution)
+- Écarté : downloader/API cartes, holographic, mosaic (compositing cartes), prix
+- Réécrit : GUI (8 642 lignes, trop spécifique — wizard neuf ~800 l. Tkinter) et **split** (le leur est aléatoire par image → interdit ici, fuite train/val entre frames d'une même session → `session_split.py` par session)
+
+### Plan livré : [DATASET_STUDIO_PLAN.md](DATASET_STUDIO_PLAN.md)
+- Wizard 6 étapes : Projet → Import (scp Jetson ou dossier) → Validation → Split/équilibrage → Entraînement (presets) → Test/Export ONNX/Déploiement Jetson
+- Emplacement : `tools/dataset_studio/` ; 3 lots d'implémentation testables séparément
+- ⚠️ Piège anticipé : **RTX 5070 Ti = Blackwell sm_120 → PyTorch ≥ 2.7 / CUDA 12.8** obligatoire (INSTALL.bat + check au démarrage)
+- Indépendant de la Phase A (fonctionne sur tout dataset YOLO) → développable dès maintenant
+
+### Fichiers
+- **Créé** : `docs/DATASET_STUDIO_PLAN.md`
+
+### Prochaine étape
+GO utilisateur sur le plan → implémentation Lot 1 (squelette + import local + validation)
+
+---
+
+## Session 2026-06-10 (suite 4) — Fix caméra (devices container) + décisions dataset
+
+### Contexte (retour utilisateur avec photo)
+- Caméra microscope branchée : `lsusb` OK (`0ac8:3420 Z-Star Venus USB2.0 Camera`) mais app = "No camera detected" → devices commentés dans `compose.local.yml` (pas un bug, cf **erreur #15**)
+- La photo montre l'**ancien** script (`(Re)demarrage...`) → l'utilisateur n'a pas encore pullé les commits des itérations 2-3 ; la validation build reste à faire
+- **Pokemon-Dataset-Creator est désormais public** → analysé : app Python/Tkinter tout-en-un (augmentations imgaug, entraînement YOLOv8 un-clic, bbox_visualization, équilibrage de classes, INSTALL.bat/START.bat Windows)
+
+### Décisions utilisateur
+1. **Plan obligatoire avant toute action** — règle de travail demandée explicitement
+2. GO fix caméra immédiat
+3. **Wizard Windows "PCB Dataset Studio" dans le repo Assistant** (`tools/dataset_studio/`), adapté de Pokemon-Dataset-Creator — réutilise : structure GUI, pipeline imgaug, module entraînement/métriques ; remplace : téléchargement de cartes → import du dataset Jetson, classes Pokémon → classes PCB
+4. Capture + annotation auto = **sur le Jetson** (Phase A du DATASET_CREATOR_PLAN) ; Windows = validation/augmentation/entraînement/export
+5. Machine d'entraînement : **PC fixe RTX 5070 Ti 16 GB** (16 Go VRAM > 8 Go portable)
+
+### Ce qui a été fait
+- ~~`compose.local.yml` : `/dev/video0`+`/dev/video1` mappés en dur~~ → **remplacé le jour même** (l'utilisateur refuse qu'une caméra débranchée empêche le démarrage) par un **override dynamique** : `run_local_gui.sh` génère `/tmp/microscope-ibom.cameras.yml` avec les `/dev/video*` présents au lancement. Caméra absente = app démarre sans caméra ; caméra branchée = relancer le script. Hot-plug complet (cgroup rules + /dev monté) gardé en option B future. Détail : erreur #15 v2.
+- `docs/JETSON_ERREURS.md` : entrée #15 (✅ RÉSOLU, v1 puis v2)
+
+### À faire par l'utilisateur sur le Jetson (dans l'ordre)
+```bash
+cd ~/Assistant-git
+git checkout docker/compose.local.yml && git pull
+docker compose -f docker/compose.yml -f docker/compose.local.yml up -d dev   # recree le container (nouveaux devices)
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev bash scripts/build_jetson.sh
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev bash -c "cd build && ctest --output-on-failure"
+docker compose -f docker/compose.yml -f docker/compose.local.yml exec dev v4l2-ctl -d /dev/video0 --list-formats-ext
+bash scripts/run_local_gui.sh
+```
+Vérifier dans le log : `Camera opened: 1920x1080 @ 30 fps, FOURCC=MJPG`.
+
+### Prochaines étapes (après validation caméra+build)
+1. Phase A DATASET_CREATOR_PLAN (capture in-app) — **plan détaillé à présenter avant**
+2. Wizard Windows `tools/dataset_studio/` — **plan détaillé à présenter avant**
+
+---
+
+## Session 2026-06-10 (suite 3) — Plan Dataset Creator (capture + annotation auto)
+
+### Objectif
+L'utilisateur veut un outil de constitution de dataset rapide (capture variée automatique + annotation automatique des composants, ~800 images), en réutilisant l'esprit de son projet `Pokemon-Dataset-Creator`. Livrable demandé : un plan exhaustif.
+
+### Ce qui a été fait
+- **Nouveau document : [DATASET_CREATOR_PLAN.md](DATASET_CREATOR_PLAN.md)** — plan complet en 4 phases :
+  - **Idée centrale** : l'iBOM + l'homographie live = vérité terrain gratuite. Chaque frame où le tracking est verrouillé donne les bboxes de tous les composants projetées dans l'image (via `Homography::transformRect` + `ComponentMap::allComponents()`) → labels YOLO sans annotation manuelle.
+  - **Phase A** (cœur) : mode capture intégré à l'app (`features/DatasetCreator` + `gui/DatasetPanel`) — gates qualité (inliers RANSAC ≥ 25, reproj ≤ 3 px, netteté Laplacien, exposition, fraîcheur homographie), anti-doublon de pose, projection + clipping + mapping footprint→classe (`footprint_classes.json`), writer YOLO, aperçu live des boxes.
+  - **Phase B** : assistant de variété (carte de couverture via HeatmapRenderer, quotas zoom×éclairage, manifest.jsonl).
+  - **Phase C** : outillage Python (validation visuelle, **split train/val par session** — jamais par image, review 5-10 % via Label Studio, augmentation offline optionnelle).
+  - **Phase D** : boucle d'amélioration (hard-example mining = divergence modèle vs projection iBOM ; pré-annotation des cartes sans iBOM).
+  - Risques/parades, ordre d'exécution chiffré, questions ouvertes (OBB, JPEG, résolution).
+- **Préalable technique identifié** : `TrackingWorker::homographyUpdated` ne publie pas inliers/erreur de reprojection (log debug seulement) — signal à étendre en Phase A.
+
+### Bloqueur d'analyse
+`Pokemon-Dataset-Creator` est **privé** et hors du scope GitHub de la session (limité à `lo26lo/assistant`, outil d'ajout de repo indisponible) → section §8 du plan = hypothèses de réutilisation à confirmer quand l'utilisateur donnera accès au repo.
+
+### Fichiers
+- **Créé** : `docs/DATASET_CREATOR_PLAN.md`
+- **Modifié** : `docs/JETSON_SESSION_LOG.md` (cette entrée)
+
+### Prochaines étapes
+1. (toujours en attente) **Valider le build Jetson** des itérations 2-3 (`build_jetson.sh` + ctest)
+2. Décisions utilisateur sur §10 du plan (OBB ? JPEG ? résolution ?)
+3. Implémenter la Phase A
+
+---
+
+## Session 2026-06-10 (suite 2) — Phase 1c + pipeline IA + runtime minimal
+
+### Objectif
+Suite au choix utilisateur (« ONNX ne sera jamais enlevé, que proposes-tu ? » → sélection : pipeline IA, Phase 1c, image runtime minimale) : implémenter ces trois chantiers.
+
+### Décision actée
+**ONNX Runtime ne sera jamais optionnel** — pas de build CI no-GPU. Pour une vraie CI C++, la voie retenue (non implémentée) est un runner GitHub Actions self-hosted sur le Jetson (build dans le container dev + ctest avec le stack complet).
+
+### 1. Phase 1c — suppression du code Windows ✅
+Plus **aucune** référence `_WIN32`/`Q_OS_WIN`/`IBOM_PLATFORM_WINDOWS`/MSVC dans `src/`, `cmake/`, `CMakeLists.txt` (repli = branche `windows-legacy`) :
+- `main.cpp` : crash handler POSIX uniquement (SetUnhandledExceptionFilter supprimé)
+- `CameraCapture.cpp` : backends V4L2+Auto uniquement (MSMF/DSHOW supprimés, 2 endroits)
+- `InferenceEngine.cpp` : suppression de la conversion wstring Windows
+- `SettingsDialog.cpp` : suppression init COM (3 blocs `Q_OS_WIN`)
+- `utils/Paths.{h,cpp}` : branche `%APPDATA%` supprimée
+- `CMakeLists.txt` : bloc `CMAKE_TRY_COMPILE_TARGET_TYPE` (piège Windows) supprimé ; bloc platform → `IBOM_PLATFORM_LINUX` inconditionnel
+- `cmake/CompilerFlags.cmake` : branche MSVC supprimée
+- Supprimés : `build_windows.bat`, `scripts/install_prerequisites.bat` (+ refs `.dockerignore`)
+
+### 2. Pipeline IA câblé ✅ (nouveau doc : [AI_PIPELINE.md](AI_PIPELINE.md))
+- `Config` : `ai.enabled` (défaut true) + `ai.detector_model` (défaut `component_detector`) — load/save JSON
+- `Application::initializeAI()` (appelé depuis `initialize()`) : si un `.onnx` est trouvé par `ModelManager`, init ONNX Runtime + chargement modèle + création `ComponentDetector` **sur un `std::thread` dédié** (la compilation de l'engine TRT au 1er lancement prend des minutes — la GUI n'est pas bloquée). Sans modèle : log info, app 100 % fonctionnelle.
+- Publication thread-safe : `m_aiReady` atomic ; accesseur `componentDetector()` (nullptr tant que pas prêt) ; signal `aiStatusChanged(bool, QString)` (à consommer par la GUI plus tard — pas encore affiché)
+- Thread joiné dans `~Application()`
+- `scripts/export_yolov8_onnx.py` : export YOLOv8 .pt → ONNX aligné sur le contrat de `InferenceEngine::preprocess` (640×640 FP32 statique, opset 17, FP16 délégué au TRT EP) + génération du `.txt` de classes
+- `docs/AI_PIPELINE.md` : dataset (snapshots), annotation, entraînement YOLOv8m, export, déploiement, critères d'acceptation
+
+### 3. Image runtime minimale ✅ (⚠️ jamais buildée)
+`runtime.Dockerfile` réécrit : `FROM l4t-jetpack` (plus `FROM base`) + paquets **runtime uniquement** (libqt6*, gstreamer, libtbb12, OpenGL runtime…) + `COPY --from=microscope-ibom:base /usr/local/lib` (OpenCV CUDA, ORT, realsense, ZXing) + check `ldd | grep "not found"` qui **fail le build** si une dépendance manque. Les noms de paquets Jammy arm64 sont à valider au premier build (noté en tête du Dockerfile — logger tout écart dans JETSON_ERREURS.md).
+
+### Fichiers (cette itération)
+- **Créés** : `docs/AI_PIPELINE.md`, `scripts/export_yolov8_onnx.py`
+- **Supprimés** : `build_windows.bat`, `scripts/install_prerequisites.bat`
+- **Modifiés** : `src/main.cpp`, `src/camera/CameraCapture.cpp`, `src/ai/InferenceEngine.cpp`, `src/gui/SettingsDialog.cpp`, `src/utils/Paths.{h,cpp}`, `src/app/{Config.h,Config.cpp,Application.h,Application.cpp}`, `CMakeLists.txt`, `cmake/CompilerFlags.cmake`, `docker/runtime.Dockerfile`, `.dockerignore`, `CLAUDE.md` (statut ai/), `docs/JETSON_AMELIORATIONS.md` (§0)
+
+### À valider sur le Jetson (rien compilé ici)
+1. `git checkout docker/compose.local.yml && git pull`
+2. `bash scripts/build_jetson.sh` puis `cd build && ctest --output-on-failure`
+3. Optionnel : `docker compose -f docker/compose.yml build runtime` (première vraie tentative — s'attendre à devoir ajuster 1-2 noms de paquets)
+
+---
+
+## Session 2026-06-10 (suite) — Implémentation des améliorations de l'audit
+
+### Objectif
+Implémenter les recommandations de [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md) (l'utilisateur a demandé « lance les améliorations »).
+
+### ⚠️ Limite importante
+Environnement d'analyse **sans toolchain** (pas de CUDA/Qt/OpenCV/ONNX) → le code C++ et le nouveau test **n'ont pas été compilés ici**. Tout a été écrit pour être correct à la relecture, mais **doit être validé sur le Jetson** : `bash scripts/build_jetson.sh` puis `cd build && ctest --output-on-failure`. Validés localement : `bash -n` des scripts, parse YAML de compose + workflow CI.
+
+### Ce qui a été fait
+
+**Persistance unifiée (prio 1 — `IBOM_DATA_DIR`)**
+- Nouveau helper `src/utils/Paths.h/.cpp` : `ibom::utils::dataDir()` honore `$IBOM_DATA_DIR`, sinon `%APPDATA%/MicroscopeIBOM` (Win) ou `~/.local/share/MicroscopeIBOM` (Linux). Ajouté à `SOURCES`/`HEADERS` du CMakeLists.
+- `Config.cpp::defaultConfigPath()` → `dataDir()/config.json` (suppression du `#ifdef` `~/.config`).
+- `Application.cpp` → calibration (load+save) et snapshots passent par `dataDir()` au lieu de `QStandardPaths::AppDataLocation` (3 usages). Exports Documents/Pictures inchangés.
+- `InferenceEngine.cpp` → cache TRT en chemin **absolu** `dataDir()/tensorrt-cache` (string local maintenu vivant jusqu'au `AppendExecutionProvider_TensorRT`).
+- `compose.yml` : `IBOM_DATA_DIR=/opt/microscope-ibom/data` (dev + runtime) + volume unique `../data:/opt/microscope-ibom/data` (remplace `../config` et `../tensorrt-cache`). `runtime.Dockerfile` VOLUME mis à jour. `entrypoint.sh` crée `DATA_DIR`. `data/` ajouté à `.gitignore` + `.dockerignore`.
+
+**Caméra (prio 2)** : `CameraCapture.cpp` demande `CAP_PROP_FOURCC=MJPG` avant la résolution + log du FOURCC réellement obtenu.
+
+**Docker/scripts**
+- `.dockerignore` : exceptions `!build/bin/MicroscopeIBOM` + `!docker/entrypoint.sh` (débloque `build runtime`).
+- `compose.yml` runtime : retrait `QT_QPA_GENERIC_PLUGINS`/evdevtouch (doublons tactile sous xcb) ; `restart: on-failure:3` au lieu de `unless-stopped`.
+- `entrypoint.sh` : check GPU adapté Tegra (`/dev/nvhost-gpu` avant `nvidia-smi`) ; bloc engines TRT réécrit (honnête, plus de faux « 5-15 min » à chaque boot).
+- `run_local_gui.sh` : retrait `--force-recreate` ; cookie xauth réel (`xauth nlist | nmerge`) ; mode debug → `build-debug/bin`.
+
+**CMake** : `cmake/CompilerFlags.cmake` — `IBOM_TARGET_CPU` (défaut `-march=native`, override `-mcpu=cortex-a78ae` pour build reproductible/portable).
+
+**Tests (prio 6)** : `tests/test_tracking_worker.cpp` — recouvre `TrackingWorker` via une homographie de synthèse connue (texture aléatoire déterministe, warp, vérif reprojection < 5 px) + cas « pas de base → pas d'émission ». Cible CMake dédiée avec AUTOMOC + `Qt6::Core` (gardée par `Qt6_FOUND`).
+
+**CI (prio 10, partiel)** : `.github/workflows/ci.yml` — jobs `shell` (`bash -n` + shellcheck informatif) et `compose` (`docker compose config`). Build C++ no-GPU reporté (nécessite `IBOM_ENABLE_ONNX=OFF`, cf §0/§4.2 du doc).
+
+### Fichiers modifiés / créés
+- **Créés** : `src/utils/Paths.h`, `src/utils/Paths.cpp`, `tests/test_tracking_worker.cpp`, `.github/workflows/ci.yml`
+- **Modifiés** : `CMakeLists.txt`, `cmake/CompilerFlags.cmake`, `src/app/Config.cpp`, `src/app/Application.cpp`, `src/ai/InferenceEngine.cpp`, `src/camera/CameraCapture.cpp`, `tests/CMakeLists.txt`, `docker/compose.yml`, `docker/runtime.Dockerfile`, `docker/entrypoint.sh`, `scripts/run_local_gui.sh`, `.dockerignore`, `.gitignore`, `docs/JETSON_AMELIORATIONS.md`
+
+### Reporté (assumé)
+Image runtime réellement minimale (1.3), user non-root + GID numériques (1.5), tags d'images datés (1.8), nettoyage Windows (3.6), CI build C++ no-GPU (4.2). Raisons dans §0 du doc.
+
+### Prochaine étape obligatoire
+Sur le Jetson : `git pull` (après `git checkout docker/compose.local.yml`), puis **rebuild + ctest** pour valider. Si la migration du chemin de calibration gêne, copier l'ancien `calibration.yml` vers `~/.local/share/MicroscopeIBOM/`.
+
+---
+
+## Session 2026-06-10 — App lancée sur écran local + audit améliorations + fix #14
+
+### Objectif
+1. Acter que l'application **démarre sur l'écran local du Jetson** (rapporté par l'utilisateur)
+2. Analyser le projet (Docker, scripts, code C++) et livrer un document de conseils d'amélioration
+3. Corriger proprement le doublon `group_add` que l'utilisateur a dû patcher à la main sur le Jetson
+
+### Contexte de départ
+- L'utilisateur a lancé la GUI via `scripts/run_local_gui.sh` : **ça fonctionne** ✅
+- Il a dû modifier `docker/compose.local.yml` localement : les entrées `video` et `plugdev` étaient en doublon (sémantique de merge compose : les listes sont concaténées entre base et override)
+- ⚠️ Constat process : les commits `1316f33` (scripts run_local_gui/cleanup_vnc) et `a022d46` (compose.local.yml) avaient été pushés **sans entrée de journal** — rétro-documentés ici
+
+### Ce qui a été fait
+1. **Audit complet** (Docker/compose, scripts, src/, CMake, tests) — résultats consolidés dans **[docs/JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md)** (nouveau), avec tableau de priorisation. Points saillants découverts :
+   - 🔴 `runtime.Dockerfile` ne peut pas builder : `COPY build/bin/...` et `COPY docker/entrypoint.sh` sont exclus par `.dockerignore` (build/ et docker/ ignorés)
+   - 🔴 Persistance cassée en Docker : `config.json` → `/root/.config`, `calibration.yml` → `/root/.local/share`, cache TRT → `./trt_cache` relatif — aucun ne correspond aux volumes montés par compose → recommandation `IBOM_DATA_DIR`
+   - 🔴 `CameraCapture` ne demande pas le FOURCC MJPG → risque 5-10 fps en YUYV sur USB 2.0 quand la caméra sera branchée
+   - 🟠 `run_local_gui.sh --force-recreate` tue le container dev (et tout build en cours) à chaque lancement de la GUI
+   - 🟠 `QT_QPA_GENERIC_PLUGINS=evdevtouch:...` sous xcb → risque double événements tactiles avec le Minix SF16T
+2. **Fix erreur #14** : `compose.local.yml` ne déclare plus que `group_add: [input]` (le reste vient déjà de `compose.yml`) + commentaire expliquant la concaténation des listes au merge. Entrée détaillée dans [JETSON_ERREURS.md](JETSON_ERREURS.md#erreur-14--group_add-dupliques-par-le-merge-composeyml--composelocalyml)
+
+### Fichiers modifiés
+- `docs/JETSON_AMELIORATIONS.md` — **nouveau** : rapport d'audit + 11 recommandations priorisées
+- `docker/compose.local.yml` — fix doublons group_add (erreur #14)
+- `docs/JETSON_ERREURS.md` — entrée #14 (✅ RÉSOLU)
+- `docs/JETSON_SESSION_LOG.md` — cette entrée + bloc État actuel
+
+### ⚠️ Action requise sur le Jetson au prochain pull
+`compose.local.yml` a été modifié localement sur le Jetson → faire `git checkout docker/compose.local.yml` **avant** `git pull`, le fix du repo remplace le patch manuel.
+
+### Prochaines étapes suggérées (détail dans JETSON_AMELIORATIONS.md §5)
+1. Unifier la persistance (`IBOM_DATA_DIR`) + aligner les volumes compose
+2. FOURCC MJPG dans `CameraCapture` avant de brancher la caméra microscope
+3. Fix `.dockerignore` vs `runtime.Dockerfile`
+4. Retirer `--force-recreate` de `run_local_gui.sh`
 
 ---
 

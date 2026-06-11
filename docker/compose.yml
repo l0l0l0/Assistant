@@ -67,6 +67,10 @@ services:
       - XAUTHORITY=/tmp/.docker.xauth
       - QT_QPA_PLATFORM=xcb
       - QT_X11_NO_MITSHM=1
+      # Persistance unifiee : config.json, calibration.yml, snapshots et le cache
+      # TensorRT atterrissent tous sous ce dossier (monte depuis le repo, donc
+      # survivent a un recreate du container). Voir src/utils/Paths.h.
+      - IBOM_DATA_DIR=/opt/microscope-ibom/data
       - NVIDIA_DRIVER_CAPABILITIES=all
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
@@ -109,21 +113,27 @@ services:
       - DISPLAY=${DISPLAY:-:0}
       - XAUTHORITY=/tmp/.docker.xauth
       - QT_QPA_PLATFORM=xcb
-      - QT_QPA_GENERIC_PLUGINS=evdevtouch:/dev/input/touch0
-      - QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=0
+      - QT_X11_NO_MITSHM=1
+      # NB: sous xcb, le serveur X gere deja le tactile. On NE charge PAS le
+      # plugin evdevtouch (doublons d'evenements + /dev/input/touch0 n'existe pas
+      # en general). Il ne servirait qu'en QT_QPA_PLATFORM=eglfs (kiosque sans X).
+      # Persistance unifiee — voir service dev / src/utils/Paths.h.
+      - IBOM_DATA_DIR=/opt/microscope-ibom/data
       - NVIDIA_DRIVER_CAPABILITIES=all
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
-      - ../config:/opt/microscope-ibom/config:rw
+      - ../data:/opt/microscope-ibom/data:rw   # config + calibration + snapshots + cache TRT
       - ../logs:/opt/microscope-ibom/logs:rw
       - ../models:/opt/microscope-ibom/models:ro
-      - ../tensorrt-cache:/opt/microscope-ibom/tensorrt-cache:rw
     group_add:
       - video
       - plugdev
-    restart: unless-stopped
+    # on-failure (pas unless-stopped) : si X n'est pas pret ou la camera manque,
+    # l'app sort en erreur — on retente 3 fois puis on s'arrete au lieu de
+    # boucler indefiniment sans backoff visible.
+    restart: on-failure:3
 
 volumes:
   dev-cache:

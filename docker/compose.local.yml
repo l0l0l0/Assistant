@@ -14,26 +14,30 @@
 #    docker compose -f docker/compose.yml -f docker/compose.local.yml up -d dev
 # =============================================================================
 
+# NOTE merge compose : les listes (group_add, devices, volumes) d'un override
+# sont CONCATENEES a celles de compose.yml, pas remplacees. Ne declarer ici
+# QUE ce qui n'est pas deja dans compose.yml, sinon doublons (erreur #14).
+# compose.yml fournit deja group_add: video, plugdev (+ dialout pour dev).
+
 services:
   dev:
     devices:
       - /dev/dri:/dev/dri           # GPU display (Tegra display engine)
       - /dev/input:/dev/input       # clavier, souris, touch screen
-      # - /dev/video0:/dev/video0   # decommenter quand la camera USB est branchee
+      # Cameras USB (/dev/video*) : NE PAS les mapper en dur ici — un device
+      # declare mais absent empeche le container de demarrer (erreurs #6/#15).
+      # run_local_gui.sh genere un override automatique avec les /dev/video*
+      # reellement presents au lancement.
       # - /dev/bus/usb:/dev/bus/usb # decommenter pour USB hot-plug (RealSense)
       # - /dev/snd:/dev/snd         # decommenter si besoin audio
     group_add:
-      - video
       - input
-      - plugdev
 
   runtime:
     devices:
       - /dev/dri:/dev/dri
       - /dev/input:/dev/input
-      # - /dev/video0:/dev/video0
+      # Cameras : voir note ci-dessus (override dynamique, pas de mapping en dur)
       # - /dev/bus/usb:/dev/bus/usb
     group_add:
-      - video
       - input
-      - plugdev

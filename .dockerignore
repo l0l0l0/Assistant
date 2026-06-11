@@ -59,12 +59,21 @@ docs/
 *.md
 README.md
 
-# Tests (rebuild dans le container)
-build_windows.bat
-test_configure.bat
-
 # vcpkg local
 build/vcpkg_installed/
 
 # Cache TensorRT (regénéré au runtime)
 tensorrt-cache/
+
+# Données runtime persistées (montées en volume, hors contexte de build)
+data/
+
+# -----------------------------------------------------------------------------
+# Exceptions : runtime.Dockerfile COPYe ces chemins depuis le contexte de build.
+# Sans ces "un-ignore", `docker compose build runtime` echoue (COPY not found)
+# car build/ et docker/ sont exclus plus haut. Le binaire doit avoir ete compile
+# dans le container dev au prealable (bash scripts/build_jetson.sh).
+# -----------------------------------------------------------------------------
+!build/bin
+!build/bin/MicroscopeIBOM
+!docker/entrypoint.sh

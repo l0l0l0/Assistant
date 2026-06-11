@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "utils/Paths.h"
 
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -12,23 +13,9 @@ Config::Config() = default;
 
 std::string Config::defaultConfigPath() const
 {
-    // Store config next to the executable or in user's appdata
-#ifdef IBOM_PLATFORM_WINDOWS
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata) {
-        fs::path dir = fs::path(appdata) / "MicroscopeIBOM";
-        fs::create_directories(dir);
-        return (dir / "config.json").string();
-    }
-#else
-    const char* home = std::getenv("HOME");
-    if (home) {
-        fs::path dir = fs::path(home) / ".config" / "MicroscopeIBOM";
-        fs::create_directories(dir);
-        return (dir / "config.json").string();
-    }
-#endif
-    return "config.json";
+    // Unified data dir (honors $IBOM_DATA_DIR) — shared with calibration,
+    // snapshots and the TensorRT cache. See src/utils/Paths.h.
+    return (utils::dataDir() / "config.json").string();
 }
 
 bool Config::load(const std::string& path)
@@ -61,6 +48,8 @@ bool Config::load(const std::string& path)
         if (j.contains("ai")) {
             auto& ai = j["ai"];
             m_modelsPath          = ai.value("models_path", m_modelsPath);
+            m_aiEnabled           = ai.value("enabled", m_aiEnabled);
+            m_detectorModel       = ai.value("detector_model", m_detectorModel);
             m_useTensorRT         = ai.value("use_tensorrt", m_useTensorRT);
             m_detectionConfidence = ai.value("confidence", m_detectionConfidence);
         }
@@ -160,9 +149,11 @@ bool Config::save(const std::string& path) const
 
         // AI
         j["ai"] = {
-            {"models_path",  m_modelsPath},
-            {"use_tensorrt", m_useTensorRT},
-            {"confidence",   m_detectionConfidence}
+            {"models_path",    m_modelsPath},
+            {"enabled",        m_aiEnabled},
+            {"detector_model", m_detectorModel},
+            {"use_tensorrt",   m_useTensorRT},
+            {"confidence",     m_detectionConfidence}
         };
 
         // UI

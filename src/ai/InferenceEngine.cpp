@@ -1,11 +1,13 @@
 #include "InferenceEngine.h"
 #include "ModelManager.h"
+#include "utils/Paths.h"
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/dnn.hpp>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <numeric>
+#include <string>
 
 namespace ibom::ai {
 
@@ -27,15 +29,24 @@ bool InferenceEngine::initialize(bool useTensorRT, int gpuDeviceId)
 
 #ifdef IBOM_HAS_TENSORRT
         if (useTensorRT) {
+            // Absolute cache path under the unified data dir so compiled engines
+            // survive container recreates (Docker mounts $IBOM_DATA_DIR as a
+            // volume) instead of landing in a throwaway $CWD/trt_cache. Must
+            // outlive the AppendExecutionProvider_TensorRT() call below, which
+            // reads trtOptions.trt_engine_cache_path as a borrowed const char*.
+            const std::string trtCachePath =
+                (ibom::utils::dataDir() / "tensorrt-cache").string();
+
             OrtTensorRTProviderOptions trtOptions{};
             trtOptions.device_id = gpuDeviceId;
             trtOptions.trt_max_workspace_size = 1ULL << 30; // 1 GB
             trtOptions.trt_fp16_enable = 1;                  // FP16 for speed
             trtOptions.trt_engine_cache_enable = 1;          // Cache compiled engines
-            trtOptions.trt_engine_cache_path = "trt_cache";
+            trtOptions.trt_engine_cache_path = trtCachePath.c_str();
 
             m_sessionOptions->AppendExecutionProvider_TensorRT(trtOptions);
-            spdlog::info("TensorRT execution provider enabled (device {})", gpuDeviceId);
+            spdlog::info("TensorRT execution provider enabled (device {}), engine cache: {}",
+                         gpuDeviceId, trtCachePath);
         }
 #endif
 
@@ -65,13 +76,7 @@ bool InferenceEngine::loadModel(const std::string& modelPath)
     try {
         spdlog::info("Loading model: {}", modelPath);
 
-#ifdef _WIN32
-        // ONNX Runtime on Windows needs wide strings
-        std::wstring wpath(modelPath.begin(), modelPath.end());
-        m_session = std::make_unique<Ort::Session>(*m_env, wpath.c_str(), *m_sessionOptions);
-#else
         m_session = std::make_unique<Ort::Session>(*m_env, modelPath.c_str(), *m_sessionOptions);
-#endif
 
         Ort::AllocatorWithDefaultOptions allocator;
 

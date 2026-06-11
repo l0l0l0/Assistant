@@ -11,6 +11,7 @@
 #include "camera/CameraCalibration.h"
 #include "ai/InferenceEngine.h"
 #include "ai/ModelManager.h"
+#include "ai/ComponentDetector.h"
 #include "ibom/IBomParser.h"
 #include "ibom/IBomData.h"
 #include "overlay/OverlayRenderer.h"
@@ -23,6 +24,7 @@
 #include "export/DataExporter.h"
 #include "gui/Theme.h"
 #include "utils/Logger.h"
+#include "utils/Paths.h"
 
 #include <spdlog/spdlog.h>
 #include <QCommandLineParser>
@@ -54,6 +56,11 @@ Application::Application(QApplication& qapp)
 
 Application::~Application()
 {
+    // The AI init thread owns no Qt objects; joining is safe and bounded by
+    // the ONNX session creation (cannot be cancelled mid-flight anyway).
+    if (m_aiInitThread.joinable())
+        m_aiInitThread.join();
+
     if (m_trackingThread) {
         m_trackingThread->quit();
         m_trackingThread->wait();
@@ -91,6 +98,10 @@ bool Application::initialize()
 
     // Wire signals between subsystems
     connectSignals();
+
+    // AI pipeline — off the GUI thread: first launch with TensorRT compiles
+    // the engine (minutes); the app is fully usable without it meanwhile.
+    initializeAI();
 
     // Enumerate cameras and populate ControlPanel
     {
@@ -179,9 +190,10 @@ void Application::createSubsystems()
     // Camera calibration
     spdlog::info("Creating CameraCalibration...");
     m_calibration = std::make_unique<camera::CameraCalibration>();
-    // Try to load existing calibration
-    auto calibPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                     + "/calibration.yml";
+    // Try to load existing calibration. Unified data dir (honors
+    // $IBOM_DATA_DIR) so config + calibration + snapshots share one Docker
+    // volume — see src/utils/Paths.h.
+    auto calibPath = QString::fromStdString((utils::dataDir() / "calibration.yml").string());
     if (m_calibration->load(calibPath.toStdString())) {
         spdlog::info("Loaded camera calibration from {}", calibPath.toStdString());
     }
@@ -222,15 +234,73 @@ void Application::createSubsystems()
     m_snapshotHistory = std::make_unique<features::SnapshotHistory>(this);
     m_dataExporter    = std::make_unique<exports::DataExporter>(this);
 
-    // Configure storage for snapshots — silent saves under AppData
-    QString snapDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                      + "/snapshots";
+    // Configure storage for snapshots — silent saves under the unified data dir.
+    QString snapDir = QString::fromStdString((utils::dataDir() / "snapshots").string());
     m_snapshotHistory->setStorageDir(snapDir);
 
     // Main window (owns GUI widgets)
     spdlog::info("Creating MainWindow...");
     m_mainWindow = std::make_unique<gui::MainWindow>(this);
     spdlog::info("All subsystems created.");
+}
+
+void Application::initializeAI()
+{
+    if (!m_config->aiEnabled()) {
+        spdlog::info("AI pipeline disabled in config (ai.enabled=false)");
+        return;
+    }
+
+    const auto models = m_modelManager->availableModels();
+    if (models.empty()) {
+        spdlog::info("AI pipeline idle: no .onnx model in '{}' — drop a model "
+                     "there and restart to enable detection (see docs/AI_PIPELINE.md)",
+                     m_modelManager->modelsDirectory());
+        return;
+    }
+
+    // Preferred model from config, else first model found by the scan.
+    std::string name = m_config->detectorModel();
+    if (m_modelManager->modelPath(name).empty()) {
+        spdlog::warn("AI: detector model '{}' not found, falling back to '{}'",
+                     name, models.front());
+        name = models.front();
+    }
+    const std::string path   = m_modelManager->modelPath(name);
+    const bool        useTrt = m_config->useTensorRT();
+    const float       conf   = m_config->detectionConfidence();
+
+    spdlog::info("AI pipeline: initializing in background (model '{}', TensorRT={})",
+                 name, useTrt);
+    emit aiStatusChanged(false, tr("Loading AI model %1…")
+                                    .arg(QString::fromStdString(name)));
+
+    // Session creation + first TensorRT engine compilation can take minutes on
+    // first launch — run it off the GUI thread. Emitting signals from here is
+    // safe: cross-thread connections are queued by Qt. m_componentDetector is
+    // only published to the GUI through the m_aiReady flag.
+    m_aiInitThread = std::thread([this, path, name, useTrt, conf]() {
+        if (!m_inferenceEngine->initialize(useTrt)) {
+            spdlog::error("AI pipeline: inference engine initialization failed");
+            emit aiStatusChanged(false, tr("AI engine initialization failed"));
+            return;
+        }
+
+        auto detector = std::make_unique<ai::ComponentDetector>(*m_inferenceEngine);
+        if (!detector->loadModel(path)) {
+            spdlog::error("AI pipeline: failed to load model '{}'", path);
+            emit aiStatusChanged(false, tr("Failed to load AI model %1")
+                                            .arg(QString::fromStdString(name)));
+            return;
+        }
+        detector->setConfidenceThreshold(conf);
+
+        m_componentDetector = std::move(detector);
+        m_aiReady.store(true);
+        spdlog::info("AI pipeline ready: model '{}' loaded (TensorRT={})", name, useTrt);
+        emit aiStatusChanged(true, tr("AI ready: %1")
+                                       .arg(QString::fromStdString(name)));
+    });
 }
 
 void Application::connectSignals()
@@ -1371,10 +1441,10 @@ void Application::runCalibration()
     auto res = m_camera->resolution();
     m_calibration->initUndistortMaps(cv::Size(res.width(), res.height()));
 
-    // Save calibration
-    auto calibPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                     + "/calibration.yml";
-    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    // Save calibration under the unified data dir (utils::dataDir() creates it).
+    QString dataDir = QString::fromStdString(utils::dataDir().string());
+    auto calibPath = dataDir + "/calibration.yml";
+    QDir().mkpath(dataDir);
     m_calibration->save(calibPath.toStdString());
 
     spdlog::info("Calibration succeeded: error={:.4f}, pixels/mm={:.2f}, saved to {}",

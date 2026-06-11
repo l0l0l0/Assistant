@@ -62,3 +62,27 @@ if(_ibom_defs)
         endif()
     endforeach()
 endif()
+
+# Tracking worker test — TrackingWorker is a QObject (needs MOC) and uses ORB +
+# BFMatcher + RANSAC from opencv features2d/calib3d. Built as its own target
+# with AUTOMOC + Qt6::Core (CameraCapture.h, pulled in for FrameRef, only needs
+# Core: QObject/QMetaType/QSize). Guarded so a Qt-less host just skips it.
+find_package(Qt6 QUIET COMPONENTS Core)
+if(Qt6_FOUND)
+    add_executable(test_tracking_worker
+        test_tracking_worker.cpp
+        ${CMAKE_SOURCE_DIR}/src/overlay/TrackingWorker.cpp
+    )
+    set_target_properties(test_tracking_worker PROPERTIES AUTOMOC ON)
+    target_include_directories(test_tracking_worker PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(test_tracking_worker PRIVATE cxx_std_20)
+    target_link_libraries(test_tracking_worker PRIVATE
+        Catch2::Catch2WithMain
+        Qt6::Core
+        opencv_core opencv_imgproc opencv_calib3d opencv_features2d
+        spdlog::spdlog
+    )
+    add_test(NAME test_tracking_worker COMMAND test_tracking_worker)
+else()
+    message(STATUS "Qt6 Core not found — skipping test_tracking_worker")
+endif()

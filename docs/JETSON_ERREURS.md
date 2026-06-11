@@ -15,6 +15,8 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 15 | 2026-06-10 | compose.local.yml / camera | ✅ RÉSOLU | [Caméra USB vue par lsusb mais "No camera detected" dans l'app — /dev/video* non mappés](#erreur-15--caméra-usb-vue-par-lsusb-mais-no-camera-detected-dans-lapp--devvideo-non-mappés) |
+| 14 | 2026-06-10 | compose.local.yml | ✅ RÉSOLU | [`group_add` dupliqués par le merge compose.yml + compose.local.yml](#erreur-14--group_add-dupliques-par-le-merge-composeyml--composelocalyml) |
 | 13 | 2026-05-21 | OpenCV 4.10 / camera | ✅ RÉSOLU | [`CV_AUTOSTEP` pas exposé transitivement sur OpenCV 4.10 Linux](#erreur-13--cv_autostep-pas-expose-transitivement-sur-opencv-410-linux) |
 | 12 | 2026-05-21 | apt / Catch2 | ✅ RÉSOLU | [Catch2 v3 requis mais apt Jammy fournit v2.13 — compile from source](#erreur-12--catch2-v3-requis-mais-apt-jammy-fournit-v213--compile-from-source) |
 | 11 | 2026-05-21 | CMakeLists.txt / Linux | ✅ RÉSOLU | [`CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY` casse `FindOpenGL` sur Linux](#erreur-11--cmake_try_compile_target_type-static_library-casse-findopengl-sur-linux) |
@@ -110,6 +112,72 @@ Ces points sont **anticipés** mais pas encore observés. À convertir en vraie 
 ---
 
 <!-- AJOUTER LES NOUVELLES ERREURS AU-DESSUS DE CETTE LIGNE -->
+
+## ERREUR 15 — Caméra USB vue par lsusb mais "No camera detected" dans l'app — /dev/video* non mappés
+
+**Date :** 2026-06-10
+**Composant :** compose.local.yml / caméra USB
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-06-10 (suite 4)
+
+### Symptôme
+La caméra microscope apparaît côté hôte (`lsusb` : `Bus 001 Device 008: ID 0ac8:3420 Z-Star Microelectronics Corp. Venus USB2.0 Camera`) mais l'application dans le container affiche "No camera detected" (Settings → Camera).
+
+### Contexte
+- App lancée via `scripts/run_local_gui.sh` (container dev)
+- Reproductible : oui
+
+### Cause
+Pas un bug : les mappings `/dev/video*` étaient **volontairement commentés** dans `docker/compose.local.yml` ("décommenter quand la caméra USB est branchée") — décision prise quand la caméra n'était pas encore là (cf erreur #6 : un device mappé mais absent empêche le container de démarrer). Le container n'avait donc aucun accès au périphérique vidéo.
+
+### Solution appliquée ✅
+**v1 (même jour, remplacée)** : `/dev/video0`+`/dev/video1` mappés en dur dans `compose.local.yml` → refusé par l'utilisateur car caméra débranchée = container ne démarre plus (revers de l'erreur #6).
+
+**v2 (définitive)** : mapping **dynamique** — `run_local_gui.sh` génère `/tmp/microscope-ibom.cameras.yml` avec les `/dev/video*` réellement présents au lancement et l'ajoute aux `-f` compose :
+- caméra absente → pas d'override → l'app démarre **sans** caméra (liste vide, aucun échec)
+- caméra branchée après coup → relancer le script (~10 s, le container est recréé avec les devices)
+- gère N nœuds vidéo (UVC video0+video1, future RealSense video2+)
+
+Plus aucun `/dev/video*` en dur dans `compose.local.yml`. Hot-plug complet (sans relancer le script) = option future via `device_cgroup_rules c 81:* rmw` + montage `/dev` — non retenu pour l'instant (effets de bord à tester).
+
+### Notes
+- Caméra **USB 2.0** (Z-Star 0ac8:3420) ⇒ MJPG indispensable pour 1080p@30 (la bande passante USB 2.0 ne permet pas le YUYV 1080p) — la demande `CAP_PROP_FOURCC=MJPG` est déjà dans `CameraCapture.cpp` depuis le commit `e174286`. Vérifier le FOURCC réel dans le log au premier lancement.
+- Si la **liste** de caméras de l'app reste vide alors que la capture par index marche : l'énumération passe par `QMediaDevices` (Qt/GStreamer), plus fragile en container que le probing V4L2 d'OpenCV — patch d'énumération à prévoir le cas échéant.
+
+---
+
+## ERREUR 14 — `group_add` dupliqués par le merge compose.yml + compose.local.yml
+
+**Date :** 2026-06-10
+**Composant :** Docker Compose / compose.local.yml
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-06-10
+
+### Symptôme
+Au lancement via `scripts/run_local_gui.sh` (qui empile `-f docker/compose.yml -f docker/compose.local.yml`), les groupes `video` et `plugdev` apparaissent en double dans la config du service — l'utilisateur a dû éditer `compose.local.yml` à la main sur le Jetson pour démarrer.
+
+### Contexte
+- Commande lancée : `docker compose -f docker/compose.yml -f docker/compose.local.yml up -d --force-recreate dev`
+- Reproductible : oui (déterministe, vient de la sémantique de merge compose)
+
+### Cause
+Docker Compose **concatène** les listes (`group_add`, `devices`, `volumes`, …) entre le fichier de base et l'override — il ne les remplace pas et ne déduplique pas. `compose.yml` déclare déjà `group_add: [video, plugdev, dialout]` pour `dev` (et `[video, plugdev]` pour `runtime`) ; `compose.local.yml` re-déclarait `[video, input, plugdev]` → doublons `video` + `plugdev` dans la config fusionnée.
+
+### Solution appliquée ✅
+`compose.local.yml` ne déclare plus que ce qui est réellement **ajouté** par le workflow local, c'est-à-dire `input` :
+
+```diff
+     group_add:
+-      - video
+       - input
+-      - plugdev
+```
+
+(appliqué aux services `dev` et `runtime` + commentaire en tête de fichier expliquant la sémantique de merge).
+
+⚠️ Sur le Jetson, le fichier avait été modifié localement : faire `git checkout docker/compose.local.yml` avant le `git pull` qui ramène ce fix.
+
+---
 
 ## ERREUR 13 — `CV_AUTOSTEP` pas exposé transitivement sur OpenCV 4.10 Linux
 
