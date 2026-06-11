@@ -126,7 +126,8 @@ TEST_CASE("projectLabels: shrink reduces the box around its center", "[dataset]"
 
     cv::Mat H = (cv::Mat_<double>(3, 3) << 10, 0, 0,  0, 10, 0,  0, 0, 1);
     LabelParams p;
-    p.shrink = 0.5;
+    p.shrink    = 0.5;
+    p.minBoxPx  = 1;   // disable min-size gate — this test checks shrink geometry only
 
     std::vector<Component> comps = {
         makeComponent("R1", "x", "R_0402", 94, 53, 98, 55)};
