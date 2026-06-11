@@ -1,20 +1,38 @@
 # PCB Dataset Studio
 
-Wizard Windows de préparation de dataset + entraînement du détecteur de
-composants pour MicroscopeIBOM. Basé sur les modules génériques YOLO de
+Wizard de préparation de dataset + entraînement du détecteur de composants
+pour MicroscopeIBOM. Fonctionne sur **Windows et Linux (Ubuntu)**. Basé sur
+les modules génériques YOLO de
 [Pokemon-Dataset-Creator](https://github.com/lo26lo/Pokemon-Dataset-Creator)
 (vendorisés dans `studio/vendor/`).
 
 > Plan complet : [docs/DATASET_STUDIO_PLAN.md](../../docs/DATASET_STUDIO_PLAN.md)
 
-## Installation (Windows, PC fixe RTX 5070 Ti)
+## Installation
 
-1. Python 3.10–3.12 installé avec "Add to PATH"
+### Windows (PC RTX 5070 Ti)
+
+1. Python 3.10+ installé depuis python.org (cocher "Add to PATH" **ou** laisser le launcher `py`)
 2. Double-clic `INSTALL.bat` (crée `.venv` + dépendances de base)
 3. Double-clic `START.bat`
 
+### Linux / Ubuntu (PC RTX 5070 Ti)
+
+```bash
+sudo apt install python3 python3-venv python3-tk   # tkinter requis pour la GUI
+cd tools/dataset_studio
+chmod +x install.sh start.sh install_training.sh
+./install.sh
+./start.sh
+```
+
 ⚠️ Pour l'entraînement (Lot 2) : la RTX 5070 Ti (Blackwell, sm_120) exige
-**PyTorch ≥ 2.7 en CUDA 12.8** — voir les instructions affichées par INSTALL.bat.
+**PyTorch ≥ 2.7 en CUDA 12.8** :
+
+| OS | Commande |
+|----|---------|
+| Windows | `install_training.bat` |
+| Linux | `./install_training.sh` |
 
 ## État — Lots 1+2 (actuels)
 
@@ -26,9 +44,6 @@ composants pour MicroscopeIBOM. Basé sur les modules génériques YOLO de
 | 3 · Split **par session** (train.txt/val.txt/data.yaml) | ✅ |
 | 4 · Entraînement (presets rapide/standard/précis, check GPU Blackwell, log par epoch) | ✅ |
 | 5 · Test, export ONNX, déploiement Jetson | 🚧 Lot 3 |
-
-Pour l'étape 4, installer d'abord les dépendances lourdes : **install_training.bat**
-(PyTorch CUDA 12.8 ~3 Go + ultralytics, puis vérifie le GPU automatiquement).
 
 ## Test rapide sans vraies données
 

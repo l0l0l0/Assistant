@@ -88,8 +88,15 @@ PR #2 (Lots 1+2 Dataset Studio + tout le travail Jetson de la branche `claude/dr
 - Codes d'erreur vérifiés sur `venv` et `pip install`
 - Le venv reste créé automatiquement (une seule fois) — c'est voulu, START.bat le réutilise
 
+### Ajout scripts Linux
+L'utilisateur a un Ubuntu avec RTX 5070 Ti. Le code Python est 100% cross-platform (pathlib, tkinter, webbrowser). Ajoutés :
+- `install.sh` : détection Python 3.10+ (python3.12/11/10/3), check tkinter, venv, pip
+- `start.sh` : activate venv + python app.py
+- `install_training.sh` : torch cu128 + ultralytics + gpu_check
+- README.md mis à jour (Windows + Linux)
+
 ### Prochaine étape
-Re-test utilisateur : `git pull origin main` → `INSTALL.bat` → `START.bat`.
+Re-test utilisateur : `git pull origin main` → `INSTALL.bat` (Windows) ou `./install.sh` (Ubuntu) → lancer le wizard.
 
 ---
 
