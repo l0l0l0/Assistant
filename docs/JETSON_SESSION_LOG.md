@@ -13,6 +13,8 @@
 
 ## État actuel — au 2026-06-12
 
+> **2026-06-12 (suite 3)** : **restauration de session d'inspection** (`session_state.json` clé = chemin iBOM, sauvegarde à chaque « Placed », reprise au chargement + au Start Inspection, Reset efface) + **boutons Report HTML/PDF** (InspectionPanel + menu File → Export Report, via `ReportGenerator` enfin instancié — stats/yield/checklist + snapshot caméra). Nouveau : `PickAndPlace::restorePlaced()`. ⚠️ Toujours rien compilé ici — valider sur Jetson.
+>
 > **2026-06-12 (suite 2)** : **items 4-6 du backlog implémentés** — focus assist (netteté Laplacien live dans StatsPanel), fichiers récents + auto-reload iBOM (File → Open Recent), **RemoteView câblé** (viewer HTML écrit dans `$IBOM_DATA_DIR/remote_view.html`) + nouvel onglet **Settings → Features**. ⚠️ Toujours rien compilé ici — valider sur Jetson.
 >
 > **2026-06-12 (suite)** : **quick wins 1.1–1.3 d'IDEES_AMELIORATIONS.md implémentés** (garde-fou anti zip-bomb décompression LZString + test, statut IA dans la status bar, slider confiance câblé Config+détecteur, bonus : `Config::save()` à l'arrêt). ⚠️ **Non compilé** (pas de toolchain ici) — valider sur Jetson : `bash scripts/build_jetson.sh` + `ctest`. Voir l'entrée de session ci-dessous.
@@ -77,6 +79,37 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-12 (suite 3) — Restauration session d'inspection + rapports HTML/PDF
+
+### Contexte
+GO utilisateur (« go 1 et 2 ») sur les deux items recommandés du backlog restant.
+
+### Livré
+1. **Restauration de session d'inspection (item 3.3)** :
+   - `Application::saveInspectionState()` / `loadSavedPlacedRefs()` : fichier `$IBOM_DATA_DIR/session_state.json`, objet JSON clé = **chemin iBOM** → `{placed: [...], saved_at: ISO}`. Set vide = entrée supprimée. Lecture tolérante (JSON corrompu → repart de zéro).
+   - Sauvegarde à **chaque clic « Placed »** (fichier minuscule, robuste aux coupures) et au **Reset** (qui efface l'entrée).
+   - Reprise à deux niveaux : au **chargement de l'iBOM** (overlay + BomPanel montrent immédiatement les composants déjà posés) et au **Start Inspection** — nouveau `PickAndPlace::restorePlaced(unordered_set)` : marque les steps, se positionne sur le premier non-placé, émet progress/currentStep/allPlaced une seule fois. Statut « Inspection resumed: N/M already placed ».
+   - Si les refs sauvées ne matchent rien (autre carte au même chemin) → départ propre.
+2. **Rapports HTML/PDF (item 2.2)** :
+   - `Application::onExport()` : nouveaux formats `report-html` / `report-pdf` — construit les `InspectionResult` depuis les mêmes records que les exports CSV (statut placed/pending), config rapport depuis `boardInfo` (titre + révision), snapshot caméra via `CameraView::captureView()`, puis `ReportGenerator::generateHTML/generatePDF` (libharu, guard `__has_include`).
+   - `InspectionPanel` : 2 boutons « Report HTML » / « Report PDF » (ligne 3 de la grille d'export).
+   - `MainWindow::onExportReport` (action **File → Export Report**, Ctrl+E) génère maintenant le **vrai rapport** HTML au lieu d'un simple CSV.
+
+### Fichiers modifiés
+`src/app/{Application.h,Application.cpp}`, `src/features/{PickAndPlace.h,PickAndPlace.cpp}`, `src/gui/{InspectionPanel.h,InspectionPanel.cpp,MainWindow.cpp}`, `docs/IDEES_AMELIORATIONS.md`, `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici)
+```bash
+bash scripts/build_jetson.sh && cd build && ctest --output-on-failure
+```
+Tests manuels : inspecter quelques composants → fermer l'app → relancer (auto-reload iBOM) → Start Inspection doit reprendre au bon endroit ; bouton Report HTML doit produire un rapport ouvrable ; Report PDF dépend de libharu (présent dans l'image base).
+
+### Prochaine étape
+1. Build + ctest Jetson (toute la série de commits du jour)
+2. Backlog restant : BarcodeScanner + assoc iBOM (2.3), fin onglet Features (dropdown modèle, dark mode), cheat-sheet raccourcis, InferenceWorker async (dès modèle v1)
 
 ---
 

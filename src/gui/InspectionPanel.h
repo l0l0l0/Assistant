@@ -81,6 +81,8 @@ private:
     QPushButton*  m_btnExportJSON      = nullptr;
     QPushButton*  m_btnExportPlacement = nullptr;
     QPushButton*  m_btnExportBOM       = nullptr;
+    QPushButton*  m_btnReportHTML      = nullptr;
+    QPushButton*  m_btnReportPDF       = nullptr;
 
     int m_snapshotTotal = 0;
 };

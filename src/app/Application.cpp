@@ -25,6 +25,7 @@
 #include "features/RemoteView.h"
 #include "gui/DatasetPanel.h"
 #include "export/DataExporter.h"
+#include "export/ReportGenerator.h"
 #include "gui/Theme.h"
 #include "utils/Logger.h"
 #include "utils/Paths.h"
@@ -46,6 +47,8 @@
 #include <QUrl>
 #include <QDateTime>
 #include <QFile>
+#include <nlohmann/json.hpp>
+#include <fstream>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -175,6 +178,61 @@ void Application::refreshRecentFilesMenu()
     for (const auto& f : m_config->recentIbomFiles())
         files << QString::fromStdString(f);
     m_mainWindow->setRecentFiles(files);
+}
+
+void Application::saveInspectionState()
+{
+    const std::string key = m_config->ibomFilePath();
+    if (key.empty()) return;
+
+    const auto statePath = utils::dataDir() / "session_state.json";
+
+    nlohmann::json root = nlohmann::json::object();
+    {
+        std::ifstream ifs(statePath);
+        if (ifs.good()) {
+            try { root = nlohmann::json::parse(ifs); } catch (...) {}
+            if (!root.is_object()) root = nlohmann::json::object();
+        }
+    }
+
+    if (m_placedRefs.empty()) {
+        root.erase(key);
+    } else {
+        nlohmann::json entry;
+        entry["placed"]   = std::vector<std::string>(m_placedRefs.begin(),
+                                                     m_placedRefs.end());
+        entry["saved_at"] = QDateTime::currentDateTime()
+                                .toString(Qt::ISODate).toStdString();
+        root[key] = entry;
+    }
+
+    std::ofstream ofs(statePath);
+    if (!ofs.good()) {
+        spdlog::warn("Could not write inspection state to {}", statePath.string());
+        return;
+    }
+    ofs << root.dump(2);
+}
+
+std::unordered_set<std::string> Application::loadSavedPlacedRefs() const
+{
+    std::unordered_set<std::string> refs;
+    const std::string key = m_config->ibomFilePath();
+    if (key.empty()) return refs;
+
+    std::ifstream ifs(utils::dataDir() / "session_state.json");
+    if (!ifs.good()) return refs;
+
+    nlohmann::json root;
+    try { root = nlohmann::json::parse(ifs); } catch (...) { return refs; }
+
+    auto it = root.find(key);
+    if (it == root.end() || !it->is_object() || !it->contains("placed"))
+        return refs;
+    for (const auto& r : (*it)["placed"])
+        if (r.is_string()) refs.insert(r.get<std::string>());
+    return refs;
 }
 
 void Application::applyRemoteViewConfig()
@@ -1315,6 +1373,9 @@ void Application::connectSignals()
             this, [this, bomPanel](const std::string& ref) {
         m_placedRefs.insert(ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
+        // Persist on every placement: a restart (app or device) resumes
+        // exactly where the inspection stopped.
+        saveInspectionState();
     });
 
     connect(m_pickAndPlace.get(), &features::PickAndPlace::allPlaced,
@@ -1334,7 +1395,10 @@ void Application::connectSignals()
     connect(inspPanel, &gui::InspectionPanel::backClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::goBack);
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
-            this, [this]() { m_placedRefs.clear(); });
+            this, [this]() {
+        m_placedRefs.clear();
+        saveInspectionState();  // empty set removes the saved entry
+    });
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::reset);
 
@@ -1447,6 +1511,17 @@ void Application::loadIBomFile(const QString& path)
     m_config->addRecentIbomFile(path.toStdString());
     refreshRecentFilesMenu();
 
+    // Restore the placed state of a previous inspection of this board so the
+    // overlay and BOM panel show progress immediately (full resume happens
+    // in startInspection).
+    m_placedRefs = loadSavedPlacedRefs();
+    if (!m_placedRefs.empty()) {
+        for (const auto& ref : m_placedRefs)
+            m_mainWindow->bomPanel()->setComponentState(ref, tr("Placed"));
+        spdlog::info("Restored {} placed components from a previous session",
+                     m_placedRefs.size());
+    }
+
     // Auto-compute a basic homography based on board bounding box
     if (!m_homography->isValid()) {
         auto& bb = m_ibomProject->boardInfo.boardBBox;
@@ -1510,6 +1585,20 @@ void Application::startInspection()
     case SortMethod::ValueAlphabetic: m_pickAndPlace->sortByValueGroup();      break;
     case SortMethod::Position:        m_pickAndPlace->sortByPosition();        break;
     case SortMethod::FootprintSize:   m_pickAndPlace->sortByFootprintSize();   break;
+    }
+
+    // Resume a previous session of this board, if one was saved (state is
+    // written on every "Placed" click). The Reset button starts over.
+    m_placedRefs = loadSavedPlacedRefs();
+    if (!m_placedRefs.empty()) {
+        const int restored = m_pickAndPlace->restorePlaced(m_placedRefs);
+        if (restored > 0) {
+            m_mainWindow->updateStatusMessage(
+                tr("Inspection resumed: %1/%2 already placed")
+                    .arg(restored).arg(m_pickAndPlace->totalSteps()));
+            return;
+        }
+        m_placedRefs.clear();  // saved refs match nothing in this board
     }
 
     // Re-emit current step so InspectionPanel shows the first item of the new order
@@ -1601,6 +1690,12 @@ void Application::onExport(const QString& format)
     } else if (format == "defects") {
         ext = "csv";  filter = tr("Defects CSV (*.csv)");
         defaultName = "defects.csv";
+    } else if (format == "report-html") {
+        ext = "html"; filter = tr("HTML report (*.html)");
+        defaultName = "inspection_report.html";
+    } else if (format == "report-pdf") {
+        ext = "pdf";  filter = tr("PDF report (*.pdf)");
+        defaultName = "inspection_report.pdf";
     } else {
         spdlog::warn("Unknown export format: {}", format.toStdString());
         return;
@@ -1620,6 +1715,31 @@ void Application::onExport(const QString& format)
     else if (format == "placement") ok = m_dataExporter->exportPlacement(path);
     else if (format == "bom")       ok = m_dataExporter->exportBOM(path);
     else if (format == "defects")   ok = m_dataExporter->exportDefectsCSV(path);
+    else if (format.startsWith("report-")) {
+        exports::ReportGenerator gen;
+
+        exports::ReportGenerator::ReportConfig rc;
+        rc.projectName      = QString::fromStdString(m_ibomProject->boardInfo.title);
+        rc.boardRevision    = QString::fromStdString(m_ibomProject->boardInfo.revision);
+        rc.includeSnapshots = false;  // per-component snapshots not collected yet
+        gen.setConfig(rc);
+
+        std::vector<exports::ReportGenerator::InspectionResult> results;
+        results.reserve(records.size());
+        for (const auto& r : records) {
+            exports::ReportGenerator::InspectionResult ir;
+            ir.reference = r.reference;
+            ir.value     = r.value;
+            ir.footprint = r.footprint;
+            ir.status    = r.status;
+            results.push_back(std::move(ir));
+        }
+        gen.setResults(results);
+        gen.setBoardImage(m_mainWindow->cameraView()->captureView());
+
+        ok = (format == "report-pdf") ? gen.generatePDF(path)
+                                      : gen.generateHTML(path);
+    }
 
     if (ok) {
         m_mainWindow->updateStatusMessage(

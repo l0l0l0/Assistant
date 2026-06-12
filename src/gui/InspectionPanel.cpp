@@ -127,11 +127,18 @@ void InspectionPanel::buildUI()
     m_btnExportJSON      = new QPushButton(tr("JSON"),        exportGroup);
     m_btnExportPlacement = new QPushButton(tr("KiCad .pos"),  exportGroup);
     m_btnExportBOM       = new QPushButton(tr("BOM"),         exportGroup);
+    m_btnReportHTML      = new QPushButton(tr("Report HTML"), exportGroup);
+    m_btnReportPDF       = new QPushButton(tr("Report PDF"),  exportGroup);
+    m_btnReportHTML->setToolTip(tr("Full inspection report: statistics, yield, "
+                                   "BOM checklist, board snapshot"));
+    m_btnReportPDF->setToolTip(m_btnReportHTML->toolTip());
 
     exportGrid->addWidget(m_btnExportCSV,       0, 0);
     exportGrid->addWidget(m_btnExportJSON,      0, 1);
     exportGrid->addWidget(m_btnExportPlacement, 1, 0);
     exportGrid->addWidget(m_btnExportBOM,       1, 1);
+    exportGrid->addWidget(m_btnReportHTML,      2, 0);
+    exportGrid->addWidget(m_btnReportPDF,       2, 1);
 
     main->addWidget(exportGroup);
     main->addStretch();
@@ -157,6 +164,8 @@ void InspectionPanel::buildUI()
     connect(m_btnExportJSON,      &QPushButton::clicked, this, [this](){ emit exportRequested("json");      });
     connect(m_btnExportPlacement, &QPushButton::clicked, this, [this](){ emit exportRequested("placement"); });
     connect(m_btnExportBOM,       &QPushButton::clicked, this, [this](){ emit exportRequested("bom");       });
+    connect(m_btnReportHTML,      &QPushButton::clicked, this, [this](){ emit exportRequested("report-html"); });
+    connect(m_btnReportPDF,       &QPushButton::clicked, this, [this](){ emit exportRequested("report-pdf");  });
 }
 
 // ── Slots ─────────────────────────────────────────────────────────

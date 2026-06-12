@@ -401,9 +401,10 @@ void MainWindow::onStartInspection()
 
 void MainWindow::onExportReport()
 {
-    // Default to CSV via the inspection panel's export pipeline.
+    // Full report (stats, yield, BOM checklist) via the export pipeline;
+    // the inspection panel also offers CSV/JSON/.pos/BOM and Report PDF.
     if (m_inspectionPanel)
-        emit m_inspectionPanel->exportRequested("csv");
+        emit m_inspectionPanel->exportRequested("report-html");
 }
 
 void MainWindow::onGenerateCheckerboard()

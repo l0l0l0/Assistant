@@ -4,6 +4,7 @@
 #include <QString>
 #include <vector>
 #include <string>
+#include <unordered_set>
 #include "../ibom/IBomData.h"
 
 namespace ibom {
@@ -60,6 +61,12 @@ public:
 
     /// Reset all placements
     void reset();
+
+    /// Restore a previous session: mark the given references as placed and
+    /// position on the first unplaced step. Emits progressChanged and
+    /// currentStepChanged (or allPlaced) once.
+    /// @return number of steps actually matched and marked placed.
+    int restorePlaced(const std::unordered_set<std::string>& placedRefs);
 
     /// Get all steps
     const std::vector<PlacementStep>& steps() const { return m_steps; }

@@ -101,6 +101,11 @@ private:
     void loadIBomFile(const QString& path);
     void refreshRecentFilesMenu();
     void applyRemoteViewConfig();
+    /// Persist m_placedRefs for the current iBOM (session_state.json,
+    /// keyed by iBOM path). An empty set removes the entry.
+    void saveInspectionState();
+    /// Read back the placed refs saved for the current iBOM, if any.
+    std::unordered_set<std::string> loadSavedPlacedRefs() const;
     void runCalibration();
     void takeScreenshot();
     void updateDynamicScale();
