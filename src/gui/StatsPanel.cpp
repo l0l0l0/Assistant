@@ -96,6 +96,13 @@ void StatsPanel::buildUI()
     m_scaleLabel = new QLabel("-- px/mm");
     perfGrid->addWidget(m_scaleLabel, 3, 1);
 
+    perfGrid->addWidget(new QLabel(tr("Focus:")),          4, 0);
+    m_focusLabel = new QLabel("--");
+    m_focusLabel->setToolTip(tr("Image sharpness (Laplacian variance). "
+                                "Turn the focus ring until the value peaks; "
+                                "green = sharp enough for dataset capture."));
+    perfGrid->addWidget(m_focusLabel, 4, 1);
+
     perfLayout->addLayout(perfGrid);
     perfLayout->addStretch();
     mainLayout->addWidget(perfGroup);
@@ -181,6 +188,12 @@ void StatsPanel::setScale(double pixelsPerMm)
         m_scaleLabel->setText(QString("%1 px/mm").arg(pixelsPerMm, 0, 'f', 1));
     else
         m_scaleLabel->setText("-- px/mm");
+}
+
+void StatsPanel::setSharpness(double variance, bool good)
+{
+    m_focusLabel->setText(QString::number(variance, 'f', 0));
+    m_focusLabel->setStyleSheet(good ? theme::placedCSS() : theme::defectCSS());
 }
 
 void StatsPanel::addDefectEntry(const std::string& reference, const std::string& type)

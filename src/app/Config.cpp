@@ -2,6 +2,7 @@
 #include "utils/Paths.h"
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
 
@@ -10,6 +11,17 @@ namespace ibom {
 namespace fs = std::filesystem;
 
 Config::Config() = default;
+
+void Config::addRecentIbomFile(const std::string& path)
+{
+    if (path.empty()) return;
+    auto it = std::find(m_recentIbomFiles.begin(), m_recentIbomFiles.end(), path);
+    if (it != m_recentIbomFiles.end())
+        m_recentIbomFiles.erase(it);
+    m_recentIbomFiles.insert(m_recentIbomFiles.begin(), path);
+    if (m_recentIbomFiles.size() > 5)
+        m_recentIbomFiles.resize(5);
+}
 
 std::string Config::defaultConfigPath() const
 {
@@ -42,7 +54,13 @@ bool Config::load(const std::string& path)
         }
 
         // iBOM
-        m_ibomFilePath = j.value("ibom_file", m_ibomFilePath);
+        m_ibomFilePath   = j.value("ibom_file", m_ibomFilePath);
+        m_autoReloadIbom = j.value("ibom_auto_reload", m_autoReloadIbom);
+        if (j.contains("ibom_recent") && j["ibom_recent"].is_array()) {
+            m_recentIbomFiles.clear();
+            for (const auto& e : j["ibom_recent"])
+                if (e.is_string()) m_recentIbomFiles.push_back(e.get<std::string>());
+        }
 
         // AI
         if (j.contains("ai")) {
@@ -160,7 +178,9 @@ bool Config::save(const std::string& path) const
         };
 
         // iBOM
-        j["ibom_file"] = m_ibomFilePath;
+        j["ibom_file"]        = m_ibomFilePath;
+        j["ibom_recent"]      = m_recentIbomFiles;
+        j["ibom_auto_reload"] = m_autoReloadIbom;
 
         // AI
         j["ai"] = {

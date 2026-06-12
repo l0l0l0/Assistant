@@ -13,6 +13,8 @@
 
 ## État actuel — au 2026-06-12
 
+> **2026-06-12 (suite 2)** : **items 4-6 du backlog implémentés** — focus assist (netteté Laplacien live dans StatsPanel), fichiers récents + auto-reload iBOM (File → Open Recent), **RemoteView câblé** (viewer HTML écrit dans `$IBOM_DATA_DIR/remote_view.html`) + nouvel onglet **Settings → Features**. ⚠️ Toujours rien compilé ici — valider sur Jetson.
+>
 > **2026-06-12 (suite)** : **quick wins 1.1–1.3 d'IDEES_AMELIORATIONS.md implémentés** (garde-fou anti zip-bomb décompression LZString + test, statut IA dans la status bar, slider confiance câblé Config+détecteur, bonus : `Config::save()` à l'arrêt). ⚠️ **Non compilé** (pas de toolchain ici) — valider sur Jetson : `bash scripts/build_jetson.sh` + `ctest`. Voir l'entrée de session ci-dessous.
 >
 > **2026-06-12** : analyse complète du code à la demande de l'utilisateur (« trouve des améliorations et des nouvelles features ») → nouveau document **[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** : 3 quick wins (garde-fou décompression iBOM, slider confiance non câblé, statut IA invisible), 7 features dormantes à câbler (RemoteView, ReportGenerator, BarcodeScanner…), 7 nouvelles features (focus assist, fichiers récents, restauration session, InferenceWorker async…), priorisation en §5. Branche `claude/focused-fermi-if21mm`.
@@ -75,6 +77,41 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-12 (suite 2) — Items 4-6 : focus assist, fichiers récents, RemoteView
+
+### Contexte
+Suite du GO utilisateur (« oui continue ») → items 🟠 4-6 de la priorisation d'[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md), plus l'essentiel de l'item 7 (onglet Features).
+
+### Livré
+1. **Focus assist (item 3.1)** :
+   - `StatsPanel::setSharpness(double, bool)` + ligne « Focus: » dans la grille Performance (vert = au-dessus du seuil `dataset.min_sharpness`, orange sinon ; tooltip mode d'emploi).
+   - `Application` : calcul dans le handler `frameReady`, **throttlé 300 ms**, variance Laplacien via `ImageUtils::computeSharpness` sur downscale 0.25× (même échelle que le gate du DatasetCreator → la valeur affichée est directement comparable au seuil 100).
+2. **Fichiers récents + auto-reload (item 3.2)** :
+   - `Config` : `recentIbomFiles()` (max 5, dédup, plus récent en tête), `addRecentIbomFile()`, `autoReloadIbom` (défaut **true**) — clés JSON `ibom_recent` / `ibom_auto_reload`.
+   - `MainWindow` : sous-menu **File → Open Recent** (chemins complets — les iBOM s'appellent souvent tous `ibom.html`), désactivé si vide.
+   - `Application` : `refreshRecentFilesMenu()` ; succès de `loadIBomFile` → push dans la config + refresh ; au démarrage → auto-reload du dernier iBOM si le fichier existe.
+3. **RemoteView câblé (item 2.1)** :
+   - Préalable viewer : le serveur ne parle que WebSocket (pas HTTP) et le HTML généré utilisait `location.host` (inutilisable en `file://`). Fix dans `RemoteView` : hôte/port lus depuis l'URL (`remote_view.html?host=<ip>&port=<p>`), fallback port injecté via placeholder `__WS_PORT__` ; `generateHTMLViewer()` passé en public.
+   - `Application::applyRemoteViewConfig()` : start/stop/restart selon `features.remote_view`(+port), écrit le viewer dans `$IBOM_DATA_DIR/remote_view.html`, log le mode d'emploi. Appelé à l'init **et** sur `settingsChanged`.
+   - Push des frames dans le handler `frameReady` **seulement si des clients sont connectés** (throttle 15 fps côté RemoteView). ⚠ La frame envoyée = image caméra sans overlay (overlay composé séparément dans CameraView) — composition remote = amélioration future.
+   - Au passage : la copie `qimg.copy()` est maintenant partagée (COW) entre CameraView et RemoteView — pas de 2ᵉ copie.
+4. **Onglet Settings → Features (item 3.4 partiel)** : case remote view + port (1024-65535) + case « Reload last iBOM at startup ». `settingsChanged` applique aussi maintenant la confiance IA au détecteur et resynchronise le spinner du ControlPanel. *Restent pour plus tard : dropdown detector model, dark mode, checkbox columns.*
+
+### Fichiers modifiés
+`src/app/{Application.h,Application.cpp,Config.h,Config.cpp}`, `src/gui/{MainWindow.h,MainWindow.cpp,StatsPanel.h,StatsPanel.cpp,SettingsDialog.h,SettingsDialog.cpp}`, `src/features/{RemoteView.h,RemoteView.cpp}`, `docs/IDEES_AMELIORATIONS.md`, `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici)
+```bash
+bash scripts/build_jetson.sh && cd build && ctest --output-on-failure
+```
+Tests manuels : ligne « Focus » réagit à la molette de mise au point ; File → Open Recent après un premier chargement ; Settings → Features → cocher remote view → ouvrir `~/ibom-data/remote_view.html?host=<ip-jetson>` depuis le PC (port 8080 accessible direct grâce à `network_mode: host`).
+
+### Prochaine étape
+1. Build + ctest Jetson
+2. Reste du backlog : restauration session d'inspection (3.3), InferenceWorker async (3.5, dès le modèle v1), bouton rapport (2.2), BarcodeScanner+assoc iBOM (2.3)
 
 ---
 

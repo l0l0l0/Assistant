@@ -14,6 +14,8 @@
 
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QMenu>
+#include <QDir>
 #include <QDockWidget>
 #include <QKeyEvent>
 #include <QCloseEvent>
@@ -99,6 +101,19 @@ void MainWindow::updateAiStatus(bool ready, const QString& message)
     m_aiLabel->setStyleSheet(ready ? theme::placedCSS() : theme::defectCSS());
 }
 
+void MainWindow::setRecentFiles(const QStringList& files)
+{
+    m_recentMenu->clear();
+    for (const QString& path : files) {
+        // Full path as text: iBOM files are often all named "ibom.html",
+        // only the directory disambiguates the board.
+        QAction* act = m_recentMenu->addAction(QDir::toNativeSeparators(path));
+        connect(act, &QAction::triggered, this,
+                [this, path]() { emit ibomFileRequested(path); });
+    }
+    m_recentMenu->setEnabled(!files.isEmpty());
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 void MainWindow::createActions()
@@ -148,6 +163,8 @@ void MainWindow::createMenuBar()
 {
     auto* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(m_actOpenIBom);
+    m_recentMenu = fileMenu->addMenu(tr("Open &Recent"));
+    m_recentMenu->setEnabled(false);
     fileMenu->addSeparator();
     fileMenu->addAction(m_actScreenshot);
     fileMenu->addAction(m_actExport);

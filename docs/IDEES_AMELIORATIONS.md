@@ -7,7 +7,7 @@
 
 ---
 
-> **Statut 2026-06-12 (même jour)** : les items **1.1, 1.2, 1.3 sont implémentés** (+ bonus découvert en route : `Config::save()` n'était appelé que par le SettingsDialog → les réglages du ControlPanel sont maintenant persistés à la fermeture de l'app). Détail dans [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md). ⚠️ Non compilé ici (pas de toolchain) — à valider sur le Jetson : `bash scripts/build_jetson.sh` + `ctest`.
+> **Statut 2026-06-12 (même jour)** : items **1.1, 1.2, 1.3 implémentés** (+ bonus : `Config::save()` à l'arrêt — les réglages ControlPanel n'étaient jamais persistés), puis **3.1 (focus assist), 3.2 (fichiers récents + auto-reload), 2.1 (RemoteView câblé)** et l'essentiel de **3.4** (onglet Settings « Features » : remote view + port + auto-reload ; manquent encore detector model dropdown / dark mode / checkbox columns). Détail dans [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md). ⚠️ Non compilé ici (pas de toolchain) — à valider sur le Jetson : `bash scripts/build_jetson.sh` + `ctest`.
 
 ## 1. 🔴 Corrections / risques découverts (quick wins)
 

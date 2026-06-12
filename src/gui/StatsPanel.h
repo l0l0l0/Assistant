@@ -26,6 +26,10 @@ public:
     void setInferenceTime(double ms);
     void setGpuMemory(size_t usedMB, size_t totalMB);
     void setScale(double pixelsPerMm);
+    /// Live focus assist: Laplacian variance of the current frame.
+    /// `good` = above the sharpness threshold (same metric/scale as the
+    /// dataset capture gate) — turn the focus ring until the value peaks.
+    void setSharpness(double variance, bool good);
     void addDefectEntry(const std::string& reference, const std::string& type);
 
 signals:
@@ -51,6 +55,7 @@ private:
     QLabel* m_inferenceLabel    = nullptr;
     QLabel* m_gpuMemLabel       = nullptr;
     QLabel* m_scaleLabel        = nullptr;
+    QLabel* m_focusLabel        = nullptr;
 
     // Defect log
     QTableWidget* m_defectTable = nullptr;

@@ -28,6 +28,7 @@ SettingsDialog::SettingsDialog(ibom::Config& config, QWidget* parent)
     createTrackingTab(tabs);
     createInspectionTab(tabs);
     createAiTab(tabs);
+    createFeaturesTab(tabs);
 
     layout->addWidget(tabs);
 
@@ -297,6 +298,28 @@ void SettingsDialog::createAiTab(QTabWidget* tabs)
     tabs->addTab(page, tr("AI"));
 }
 
+void SettingsDialog::createFeaturesTab(QTabWidget* tabs)
+{
+    auto* page = new QWidget;
+    auto* form = new QFormLayout(page);
+
+    m_remoteViewEnabled = new QCheckBox(tr("Enable remote view (browser stream)"));
+    m_remoteViewEnabled->setToolTip(
+        tr("Streams the camera image over WebSocket. The viewer page is "
+           "written to the data directory (remote_view.html) — open it in a "
+           "browser with ?host=<device-ip> from another machine."));
+    form->addRow(m_remoteViewEnabled);
+
+    m_remoteViewPort = new QSpinBox;
+    m_remoteViewPort->setRange(1024, 65535);
+    form->addRow(tr("Remote view port:"), m_remoteViewPort);
+
+    m_autoReloadIbom = new QCheckBox(tr("Reload last iBOM at startup"));
+    form->addRow(m_autoReloadIbom);
+
+    tabs->addTab(page, tr("Features"));
+}
+
 // ---------------------------------------------------------------------------
 // Load / Save
 // ---------------------------------------------------------------------------
@@ -338,6 +361,11 @@ void SettingsDialog::loadFromConfig()
     m_modelsPath->setText(QString::fromStdString(m_config.modelsPath()));
     m_useTensorRT->setChecked(m_config.useTensorRT());
     m_aiConfidence->setValue(static_cast<double>(m_config.detectionConfidence()));
+
+    // Features
+    m_remoteViewEnabled->setChecked(m_config.remoteViewEnabled());
+    m_remoteViewPort->setValue(m_config.remoteViewPort());
+    m_autoReloadIbom->setChecked(m_config.autoReloadIbom());
 
     // Inspection
     m_sortMethod->setCurrentIndex(
@@ -392,6 +420,11 @@ void SettingsDialog::accept()
     m_config.setModelsPath(m_modelsPath->text().toStdString());
     m_config.setUseTensorRT(m_useTensorRT->isChecked());
     m_config.setDetectionConfidence(static_cast<float>(m_aiConfidence->value()));
+
+    // Features
+    m_config.setRemoteViewEnabled(m_remoteViewEnabled->isChecked());
+    m_config.setRemoteViewPort(m_remoteViewPort->value());
+    m_config.setAutoReloadIbom(m_autoReloadIbom->isChecked());
 
     // Inspection
     m_config.setSortMethod(

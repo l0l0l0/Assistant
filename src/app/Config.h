@@ -55,6 +55,15 @@ public:
     const std::string& ibomFilePath() const { return m_ibomFilePath; }
     void setIBomFilePath(const std::string& path) { m_ibomFilePath = path; }
 
+    /// Recently opened iBOM files, most recent first (capped at 5).
+    const std::vector<std::string>& recentIbomFiles() const { return m_recentIbomFiles; }
+    /// Move (or insert) a path to the front of the recent list.
+    void addRecentIbomFile(const std::string& path);
+
+    /// Reload the last opened iBOM automatically at startup.
+    bool autoReloadIbom() const { return m_autoReloadIbom; }
+    void setAutoReloadIbom(bool e) { m_autoReloadIbom = e; }
+
     // --- AI Models ---
     const std::string& modelsPath() const { return m_modelsPath; }
     void setModelsPath(const std::string& path) { m_modelsPath = path; }
@@ -194,6 +203,8 @@ private:
 
     // iBOM
     std::string m_ibomFilePath;
+    std::vector<std::string> m_recentIbomFiles;
+    bool m_autoReloadIbom = true;
 
     // AI
     std::string m_modelsPath = "models";

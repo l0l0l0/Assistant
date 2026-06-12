@@ -5,6 +5,7 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QMenuBar>
+#include <QMenu>
 #include <QTimer>
 #include <QLabel>
 #include <memory>
@@ -42,6 +43,8 @@ public:
     void updateFpsDisplay(double fps);
     void updateStatusMessage(const QString& msg);
     void updateAiStatus(bool ready, const QString& message);
+    /// Rebuild the File → Open Recent submenu (most recent first).
+    void setRecentFiles(const QStringList& files);
 
 signals:
     void ibomFileRequested(const QString& path);
@@ -93,6 +96,9 @@ private:
     InspectionPanel*  m_inspectionPanel  = nullptr;
     StatsPanel*       m_statsPanel       = nullptr;
     DatasetPanel*     m_datasetPanel     = nullptr;
+
+    // Menus
+    QMenu* m_recentMenu = nullptr;
 
     // Toolbar & actions
     QToolBar* m_mainToolBar   = nullptr;

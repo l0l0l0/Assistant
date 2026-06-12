@@ -191,7 +191,7 @@ QByteArray RemoteView::compressFrame(const QImage& frame) const
 
 QString RemoteView::generateHTMLViewer() const
 {
-    return R"(<!DOCTYPE html>
+    QString html = R"(<!DOCTYPE html>
 <html>
 <head>
     <title>PCB Inspector — Remote View</title>
@@ -208,7 +208,13 @@ QString RemoteView::generateHTMLViewer() const
         const canvas = document.getElementById('view');
         const ctx = canvas.getContext('2d');
         const status = document.getElementById('status');
-        const ws = new WebSocket('ws://' + location.host);
+        // The page is opened as a local file (the server speaks WebSocket
+        // only): target host/port come from the URL query, e.g.
+        //   remote_view.html?host=192.168.1.42
+        const params = new URLSearchParams(location.search);
+        const host = params.get('host') || location.hostname || 'localhost';
+        const port = params.get('port') || '__WS_PORT__';
+        const ws = new WebSocket('ws://' + host + ':' + port);
         ws.binaryType = 'arraybuffer';
         let frames = 0;
         setInterval(() => { status.textContent = frames + ' FPS'; frames = 0; }, 1000);
@@ -233,6 +239,8 @@ QString RemoteView::generateHTMLViewer() const
     </script>
 </body>
 </html>)";
+    html.replace(QStringLiteral("__WS_PORT__"), QString::number(m_port));
+    return html;
 }
 
 } // namespace ibom::features

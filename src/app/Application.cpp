@@ -22,11 +22,13 @@
 #include "features/Measurement.h"
 #include "features/SnapshotHistory.h"
 #include "features/DatasetCreator.h"
+#include "features/RemoteView.h"
 #include "gui/DatasetPanel.h"
 #include "export/DataExporter.h"
 #include "gui/Theme.h"
 #include "utils/Logger.h"
 #include "utils/Paths.h"
+#include "utils/ImageUtils.h"
 
 #include <spdlog/spdlog.h>
 #include <QCommandLineParser>
@@ -42,6 +44,8 @@
 #include <QCameraDevice>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QDateTime>
+#include <QFile>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -148,8 +152,69 @@ bool Application::initialize()
     // Show main window
     m_mainWindow->show();
 
+    // Remote browser view, if enabled in config.
+    applyRemoteViewConfig();
+
+    // Recent iBOM files menu + optional auto-reload of the last board.
+    refreshRecentFilesMenu();
+    if (m_config->autoReloadIbom() && !m_config->ibomFilePath().empty()) {
+        const QString last = QString::fromStdString(m_config->ibomFilePath());
+        if (QFileInfo::exists(last)) {
+            spdlog::info("Auto-reloading last iBOM: {}", last.toStdString());
+            loadIBomFile(last);
+        }
+    }
+
     spdlog::info("Application initialized successfully.");
     return true;
+}
+
+void Application::refreshRecentFilesMenu()
+{
+    QStringList files;
+    for (const auto& f : m_config->recentIbomFiles())
+        files << QString::fromStdString(f);
+    m_mainWindow->setRecentFiles(files);
+}
+
+void Application::applyRemoteViewConfig()
+{
+    const bool    enabled = m_config->remoteViewEnabled();
+    const quint16 port    = static_cast<quint16>(m_config->remoteViewPort());
+
+    if (!enabled) {
+        if (m_remoteView && m_remoteView->isRunning()) {
+            m_remoteView->stop();
+            spdlog::info("RemoteView: disabled");
+        }
+        return;
+    }
+
+    if (m_remoteView && m_remoteView->isRunning() && m_remoteView->port() == port)
+        return;  // already running with the requested settings
+
+    if (!m_remoteView)
+        m_remoteView = std::make_unique<features::RemoteView>();
+    else if (m_remoteView->isRunning())
+        m_remoteView->stop();
+
+    if (!m_remoteView->start(port))
+        return;
+
+    // The server speaks WebSocket only (no HTTP), so the viewer page is
+    // written to disk; open it in any browser, with ?host=<jetson-ip> when
+    // viewing from another machine.
+    const auto viewerPath = utils::dataDir() / "remote_view.html";
+    QFile f(QString::fromStdString(viewerPath.string()));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(m_remoteView->generateHTMLViewer().toUtf8());
+        spdlog::info("RemoteView: streaming on ws://0.0.0.0:{} — viewer page: {} "
+                     "(open with ?host=<jetson-ip> from another machine)",
+                     port, viewerPath.string());
+    } else {
+        spdlog::warn("RemoteView: could not write viewer page to {}",
+                     viewerPath.string());
+    }
 }
 
 Config& Application::config()
@@ -451,6 +516,19 @@ void Application::connectSignals()
                 Q_ARG(ibom::camera::FrameRef, frameRef));
         }
 
+        // ── Focus assist: Laplacian variance, throttled (~1 ms at 0.25×) ──
+        // Same downscale as the dataset capture gate so the displayed value
+        // is directly comparable to the dataset.min_sharpness threshold.
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - m_lastSharpnessMs >= 300) {
+            m_lastSharpnessMs = nowMs;
+            cv::Mat small;
+            cv::resize(frame, small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+            const double sharpness = utils::ImageUtils::computeSharpness(small);
+            m_mainWindow->statsPanel()->setSharpness(
+                sharpness, sharpness >= m_config->datasetMinSharpness());
+        }
+
         // Apply undistortion if calibrated (allocates a new Mat; unavoidable).
         cv::Mat processed;
         if (m_calibration && m_calibration->isCalibrated()) {
@@ -470,7 +548,15 @@ void Application::connectSignals()
 
         QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
                     QImage::Format_RGB888);
-        m_mainWindow->cameraView()->updateFrame(qimg.copy());
+        // Deep copy: qimg only wraps rgb's pixel buffer, which dies with this
+        // scope. The copy is shared (COW) between the camera view and the
+        // remote stream.
+        const QImage display = qimg.copy();
+        m_mainWindow->cameraView()->updateFrame(display);
+
+        // Mirror to remote browser clients (RemoteView throttles internally).
+        if (m_remoteView && m_remoteView->isRunning() && m_remoteView->clientCount() > 0)
+            m_remoteView->pushFrame(display);
 
         // Render iBOM overlay if data is loaded and homography is set
         if (m_ibomProject && m_homography && m_homography->isValid()) {
@@ -891,6 +977,16 @@ void Application::connectSignals()
         auto* cp = m_mainWindow->controlPanel();
         if (cp && newIdx >= 0)
             cp->findChild<QComboBox*>()->setCurrentIndex(newIdx);
+
+        // AI confidence may have changed in the dialog — sync the control
+        // panel spinner and the live detector.
+        m_mainWindow->controlPanel()->setConfidenceThreshold(
+            m_config->detectionConfidence());
+        if (auto* detector = componentDetector())
+            detector->setConfidenceThreshold(m_config->detectionConfidence());
+
+        // Remote view may have been toggled or moved to another port.
+        applyRemoteViewConfig();
 
         // Apply optical multiplier change to pixels-per-mm
         float mult = m_config->opticalMultiplier();
@@ -1345,6 +1441,11 @@ void Application::loadIBomFile(const QString& path)
 
     // Feed to BOM panel
     m_mainWindow->bomPanel()->loadBomData(m_ibomProject->bomGroups, m_ibomProject->components);
+
+    // Remember for the File → Open Recent menu and startup auto-reload.
+    m_config->setIBomFilePath(path.toStdString());
+    m_config->addRecentIbomFile(path.toStdString());
+    refreshRecentFilesMenu();
 
     // Auto-compute a basic homography based on board bounding box
     if (!m_homography->isValid()) {
