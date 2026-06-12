@@ -11,8 +11,10 @@
 
 ---
 
-## État actuel — au 2026-06-11
+## État actuel — au 2026-06-12
 
+> **2026-06-12** : analyse complète du code à la demande de l'utilisateur (« trouve des améliorations et des nouvelles features ») → nouveau document **[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** : 3 quick wins (garde-fou décompression iBOM, slider confiance non câblé, statut IA invisible), 7 features dormantes à câbler (RemoteView, ReportGenerator, BarcodeScanner…), 7 nouvelles features (focus assist, fichiers récents, restauration session, InferenceWorker async…), priorisation en §5. **Aucun code modifié** — propositions uniquement. Branche `claude/focused-fermi-if21mm`.
+>
 > **2026-06-11** : PR #2 mergée dans `main` (`f36895e`) — Dataset Studio Lots 1+2 + Phase 1c + pipeline IA + tous les fixes Docker/scripts. Fix `INSTALL.bat` (PR #3), scripts Linux du Studio (PR #4). **Phase A implémentée** : `DatasetCreator` + `DatasetPanel` + signal qualité tracking + `footprint_classes.json` + tests (voir session "suite" ci-dessous). Le dev continue sur `claude/dreamy-cori-oec93c`.
 >
 > ✅ **Build + ctest Jetson validés** (2026-06-11) : `bash scripts/build_jetson.sh` → 31/31, binaire 1.3 MB. `ctest` → **7/7 passent**. Branche `claude/dreamy-cori-oec93c` mergée dans `main`.
@@ -71,6 +73,32 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-12 — Analyse améliorations & nouvelles features (IDEES_AMELIORATIONS.md)
+
+### Contexte
+Demande utilisateur : « trouve des améliorations et des nouvelles features que je pourrais ajouter, fais-moi un journal ». Session d'**analyse pure** (environnement sans toolchain — rien compilé, rien modifié dans le code).
+
+### Méthode
+Exploration complète de `src/`, `tools/`, `tests/`, `Config.h` vs `SettingsDialog`, modules instanciés vs dormants dans `Application.cpp` — en excluant tout ce qui est déjà planifié (Phases B/C/D dataset, Phase 2d/2.5/3, audit [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md), roadmap [PROCHAINE_SESSION.md](PROCHAINE_SESSION.md)).
+
+### Livré
+- **Créé : [docs/IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** — propositions priorisées en 4 catégories :
+  1. **Quick wins/risques** : `while(true)` sans garde dans la décompression LZ-String (`IBomParser.cpp:389` — freeze/OOM possible sur HTML corrompu), slider de confiance `ControlPanel` jamais connecté au détecteur, signal `aiStatusChanged` jamais affiché en GUI, micro-perfs (`qimg.copy()` par frame, `SetIntraOpNumThreads(4)` hardcodé).
+  2. **Features dormantes** (code ~complet, jamais instancié) : RemoteView (WebSocket MJPEG — idéal atelier Jetson), ReportGenerator, BarcodeScanner (+ idée combo : association code-barres → iBOM auto-chargé), StencilAlign, OCR/SolderInspector (attendent des modèles), VoiceControl (squelette).
+  3. **Nouvelles features** : focus assist (netteté Laplacien live — métrique déjà calculée par DatasetCreator), fichiers récents + auto-reload iBOM, restauration de session d'inspection (`m_placedRefs` perdus au restart), onglet Settings pour les 6 clés config sans UI, **InferenceWorker async** (prérequis du point F roadmap — `detect()` n'est invoqué nulle part et bloquerait le thread GUI), cheat-sheet raccourcis, i18n FR.
+  4. **Hygiène** : test round-trip `Config` manquant, code mort `estimateOrientation()`, TODO arcs silkscreen (`OverlayRenderer.cpp:206`), `TODO.md` racine obsolète (2026-03-20, ère Windows).
+- Recommandation : faire les 3 quick wins (~1 h 30) **avant** la première session de capture dataset ; la priorité produit reste calibration → capture → entraînement v1.
+
+### Fichiers
+- **Créé** : `docs/IDEES_AMELIORATIONS.md`
+- **Modifié** : `docs/JETSON_SESSION_LOG.md` (cette entrée + bloc État actuel)
+
+### Prochaine étape
+1. Décision utilisateur sur la priorisation (§5 du doc) — quels items implémenter en premier
+2. Inchangé côté produit : calibration caméra + première capture dataset ([PROCHAINE_SESSION.md](PROCHAINE_SESSION.md))
 
 ---
 
