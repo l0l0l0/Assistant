@@ -5,6 +5,7 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QScrollArea>
+#include <QSignalBlocker>
 
 namespace ibom::gui {
 
@@ -211,6 +212,12 @@ void ControlPanel::setCameraDevices(const QStringList& devices)
     for (const auto& dev : devices) {
         m_cameraDevice->addItem(dev);
     }
+}
+
+void ControlPanel::setConfidenceThreshold(float conf)
+{
+    QSignalBlocker blocker(m_confidenceSpin);
+    m_confidenceSpin->setValue(static_cast<double>(conf));
 }
 
 } // namespace ibom::gui

@@ -385,6 +385,11 @@ std::optional<std::string> IBomParser::decompressLZString(const std::string& enc
 
     result += w;
 
+    // LZ78-style decompression can expand quadratically on corrupted or
+    // malicious input ("zip bomb"). Legitimate iBOM payloads compress
+    // roughly 5-10x, so this bound leaves ample headroom.
+    const size_t maxOutputChars = encoded.size() * size_t{1000} + (size_t{1} << 20);
+
     // Main decompression loop
     while (true) {
         if (data.index > length) {
@@ -466,6 +471,12 @@ std::optional<std::string> IBomParser::decompressLZString(const std::string& enc
         }
 
         result += entry;
+        if (result.size() > maxOutputChars) {
+            spdlog::error("LZString: output exceeds {} chars for {} chars of input "
+                          "— corrupted or malicious data, aborting",
+                          maxOutputChars, encoded.size());
+            return std::nullopt;
+        }
 
         // Add w + entry[0] to dictionary
         dictionary.push_back(w + entry[0]);

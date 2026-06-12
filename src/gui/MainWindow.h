@@ -41,6 +41,7 @@ public:
     void setDarkMode(bool dark);
     void updateFpsDisplay(double fps);
     void updateStatusMessage(const QString& msg);
+    void updateAiStatus(bool ready, const QString& message);
 
 signals:
     void ibomFileRequested(const QString& path);
@@ -109,6 +110,7 @@ private:
     QLabel* m_fpsLabel    = nullptr;
     QLabel* m_statusLabel = nullptr;
     QLabel* m_gpuLabel    = nullptr;
+    QLabel* m_aiLabel     = nullptr;
 
     bool m_darkMode = true;
     bool m_cameraFullscreen = false;

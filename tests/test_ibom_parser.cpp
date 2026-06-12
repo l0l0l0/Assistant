@@ -35,6 +35,44 @@ TEST_CASE("IBomParser — extract JSON from script", "[ibom][parser]")
     }
 }
 
+TEST_CASE("IBomParser — LZString decompression terminates on corrupted input",
+          "[ibom][parser][lzstring]")
+{
+    IBomParser parser;
+
+    SECTION("empty input") {
+        REQUIRE_FALSE(parser.decompressLZString("").has_value());
+    }
+
+    SECTION("garbage base64 returns without hanging") {
+        // Deterministic pseudo-random base64 alphabet stream — simulates a
+        // truncated/corrupted compressed block inside an iBOM HTML.
+        static const std::string alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string garbage;
+        unsigned seed = 12345;
+        for (int i = 0; i < 50000; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            garbage.push_back(alphabet[(seed >> 16) % alphabet.size()]);
+        }
+
+        // Must terminate (bad-code error, end-of-data, or output-size guard)
+        // — any outcome is fine as long as it returns instead of spinning
+        // or exhausting memory.
+        auto result = parser.decompressLZString(garbage);
+        if (result) {
+            // The guard caps expansion at 1000x input + 1 MiB (in UTF-16
+            // chars); the returned UTF-8 string is at most 3 bytes per char.
+            CHECK(result->size() <= (garbage.size() * 1000 + (1 << 20)) * 3);
+        }
+    }
+
+    SECTION("non-base64 characters do not crash") {
+        auto result = parser.decompressLZString("!!!###$$$%%%");
+        (void)result; // termination without crash is the assertion
+    }
+}
+
 TEST_CASE("IBomData — Component default construction", "[ibom][data]")
 {
     Component comp;

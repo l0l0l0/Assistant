@@ -13,7 +13,9 @@
 
 ## État actuel — au 2026-06-12
 
-> **2026-06-12** : analyse complète du code à la demande de l'utilisateur (« trouve des améliorations et des nouvelles features ») → nouveau document **[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** : 3 quick wins (garde-fou décompression iBOM, slider confiance non câblé, statut IA invisible), 7 features dormantes à câbler (RemoteView, ReportGenerator, BarcodeScanner…), 7 nouvelles features (focus assist, fichiers récents, restauration session, InferenceWorker async…), priorisation en §5. **Aucun code modifié** — propositions uniquement. Branche `claude/focused-fermi-if21mm`.
+> **2026-06-12 (suite)** : **quick wins 1.1–1.3 d'IDEES_AMELIORATIONS.md implémentés** (garde-fou anti zip-bomb décompression LZString + test, statut IA dans la status bar, slider confiance câblé Config+détecteur, bonus : `Config::save()` à l'arrêt). ⚠️ **Non compilé** (pas de toolchain ici) — valider sur Jetson : `bash scripts/build_jetson.sh` + `ctest`. Voir l'entrée de session ci-dessous.
+>
+> **2026-06-12** : analyse complète du code à la demande de l'utilisateur (« trouve des améliorations et des nouvelles features ») → nouveau document **[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** : 3 quick wins (garde-fou décompression iBOM, slider confiance non câblé, statut IA invisible), 7 features dormantes à câbler (RemoteView, ReportGenerator, BarcodeScanner…), 7 nouvelles features (focus assist, fichiers récents, restauration session, InferenceWorker async…), priorisation en §5. Branche `claude/focused-fermi-if21mm`.
 >
 > **2026-06-11** : PR #2 mergée dans `main` (`f36895e`) — Dataset Studio Lots 1+2 + Phase 1c + pipeline IA + tous les fixes Docker/scripts. Fix `INSTALL.bat` (PR #3), scripts Linux du Studio (PR #4). **Phase A implémentée** : `DatasetCreator` + `DatasetPanel` + signal qualité tracking + `footprint_classes.json` + tests (voir session "suite" ci-dessous). Le dev continue sur `claude/dreamy-cori-oec93c`.
 >
@@ -73,6 +75,45 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-12 (suite) — Implémentation des 3 quick wins
+
+### Contexte
+GO utilisateur (« tu peux commencer à faire les modifications ») → implémentation des priorités 🔴 1-3 de [IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md).
+
+### Livré
+1. **Statut IA visible (item 1.3)** :
+   - `MainWindow` : nouveau label permanent `m_aiLabel` dans la status bar (« AI: -- » au départ), méthode `updateAiStatus(bool ready, QString)` — vert (`placedCSS`) quand prêt, orange (`defectCSS`) sinon, tooltip = message complet.
+   - `Application::connectSignals()` : `aiStatusChanged` → `MainWindow::updateAiStatus` (connexion **avant** `initializeAI()`, donc le premier « Loading AI model… » est capté ; les émissions du thread d'init arrivent en queued automatiquement).
+   - `initializeAI()` : les retours anticipés émettent maintenant aussi le statut (« AI: disabled », « AI: no model ») au lieu de laisser le label muet.
+2. **Garde-fou décompression LZString (item 1.1)** — `IBomParser.cpp` :
+   - Nuance vs l'analyse : la boucle `while(true)` a déjà une sortie (`data.index > length`), le vrai risque est l'**expansion quadratique** (zip-bomb LZ78) sur données corrompues → OOM avant la fin du flux.
+   - Fix : borne `maxOutputChars = 1000 × taille_entrée + 1 MiB` vérifiée après chaque `result += entry` → `spdlog::error` + `nullopt`.
+   - `decompressLZString` passé en **public** dans `IBomParser.h` pour test direct.
+   - `tests/test_ibom_parser.cpp` : nouveau TEST_CASE (entrée vide, 50 000 chars de base64 pseudo-aléatoire déterministe → doit terminer, caractères non-base64 → pas de crash). Borne du test ×3 (sortie UTF-8 vs garde UTF-16).
+3. **Slider de confiance câblé (item 1.2)** :
+   - `Application::connectSignals()` : `ControlPanel::confidenceChanged` → `m_config->setDetectionConfidence()` + `setConfidenceThreshold()` sur le détecteur s'il est prêt (`componentDetector()` null-safe).
+   - `ControlPanel::setConfidenceThreshold(float)` (nouveau, avec `QSignalBlocker`) ; appelé dans `Application::initialize()` pour refléter la valeur persistée au démarrage (spinner borné 0.1–1.0).
+4. **Bonus découvert en route** : `Config::save()` n'était appelé **que** par le SettingsDialog — tous les réglages faits via le ControlPanel (opacité, caméra, confiance…) étaient perdus à la fermeture. Fix : `m_config->save()` en tête de `~Application()`.
+
+### Fichiers modifiés
+`src/gui/MainWindow.{h,cpp}`, `src/gui/ControlPanel.{h,cpp}`, `src/app/Application.cpp`, `src/ibom/IBomParser.{h,cpp}`, `tests/test_ibom_parser.cpp`, `docs/IDEES_AMELIORATIONS.md` (statut), `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici — pas de toolchain)
+```bash
+bash scripts/build_jetson.sh
+cd build && ctest --output-on-failure
+```
+Vérifier au lancement : label « AI: no model » (orange) dans la status bar tant que `models/` est vide.
+
+### Note infra (session)
+Le push git direct via le proxy de session renvoie 403 (token lecture seule) — contourné avec un PAT fourni par l'utilisateur. **Le PAT a transité en clair dans la conversation : à révoquer après la session** (Settings GitHub → Developer settings → Tokens).
+
+### Prochaine étape
+1. Build + ctest sur le Jetson (8 suites attendues : les 7 existantes + le test LZString étendu dans test_ibom_parser)
+2. Puis items 🟠 4-7 du backlog (focus assist, fichiers récents, RemoteView, onglet Settings « Features ») selon priorité utilisateur
 
 ---
 

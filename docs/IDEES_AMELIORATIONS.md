@@ -7,6 +7,8 @@
 
 ---
 
+> **Statut 2026-06-12 (même jour)** : les items **1.1, 1.2, 1.3 sont implémentés** (+ bonus découvert en route : `Config::save()` n'était appelé que par le SettingsDialog → les réglages du ControlPanel sont maintenant persistés à la fermeture de l'app). Détail dans [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md). ⚠️ Non compilé ici (pas de toolchain) — à valider sur le Jetson : `bash scripts/build_jetson.sh` + `ctest`.
+
 ## 1. 🔴 Corrections / risques découverts (quick wins)
 
 ### 1.1 `IBomParser` : boucle `while(true)` sans garde-fou (`src/ibom/IBomParser.cpp:389`)

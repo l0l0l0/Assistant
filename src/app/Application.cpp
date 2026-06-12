@@ -61,6 +61,12 @@ Application::Application(QApplication& qapp)
 
 Application::~Application()
 {
+    // Persist runtime tweaks made outside the settings dialog (control panel
+    // sliders update Config in memory only — SettingsDialog is the only other
+    // call site of save()).
+    if (m_config)
+        m_config->save();
+
     // The AI init thread owns no Qt objects; joining is safe and bounded by
     // the ONNX session creation (cannot be cancelled mid-flight anyway).
     if (m_aiInitThread.joinable())
@@ -112,6 +118,10 @@ bool Application::initialize()
 
     // Wire signals between subsystems
     connectSignals();
+
+    // Reflect persisted AI settings in the control panel (before initializeAI
+    // so the spinner already shows the threshold the detector will use).
+    m_mainWindow->controlPanel()->setConfidenceThreshold(m_config->detectionConfidence());
 
     // AI pipeline — off the GUI thread: first launch with TensorRT compiles
     // the engine (minutes); the app is fully usable without it meanwhile.
@@ -295,6 +305,7 @@ void Application::initializeAI()
 {
     if (!m_config->aiEnabled()) {
         spdlog::info("AI pipeline disabled in config (ai.enabled=false)");
+        emit aiStatusChanged(false, tr("AI: disabled"));
         return;
     }
 
@@ -303,6 +314,7 @@ void Application::initializeAI()
         spdlog::info("AI pipeline idle: no .onnx model in '{}' — drop a model "
                      "there and restart to enable detection (see docs/AI_PIPELINE.md)",
                      m_modelManager->modelsDirectory());
+        emit aiStatusChanged(false, tr("AI: no model"));
         return;
     }
 
@@ -681,6 +693,19 @@ void Application::connectSignals()
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showFabricationChanged,
             this, [this](bool show) {
         m_config->setShowFabrication(show);
+    });
+
+    // ── AI: status bar indicator + detection confidence ─────────
+    // aiStatusChanged is also emitted from the AI init thread; the queued
+    // cross-thread delivery to the GUI is handled by Qt automatically.
+    connect(this, &Application::aiStatusChanged,
+            m_mainWindow.get(), &gui::MainWindow::updateAiStatus);
+
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::confidenceChanged,
+            this, [this](float conf) {
+        m_config->setDetectionConfidence(conf);
+        if (auto* detector = componentDetector())
+            detector->setConfidenceThreshold(conf);
     });
 
     // ── iBOM file loading ───────────────────────────────────────

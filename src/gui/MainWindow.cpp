@@ -92,6 +92,13 @@ void MainWindow::updateStatusMessage(const QString& msg)
     m_statusLabel->setText(msg);
 }
 
+void MainWindow::updateAiStatus(bool ready, const QString& message)
+{
+    m_aiLabel->setText(message);
+    m_aiLabel->setToolTip(message);
+    m_aiLabel->setStyleSheet(ready ? theme::placedCSS() : theme::defectCSS());
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 void MainWindow::createActions()
@@ -222,12 +229,15 @@ void MainWindow::createStatusBar()
     m_fpsLabel    = new QLabel("FPS: --");
     m_statusLabel = new QLabel(tr("Ready"));
     m_gpuLabel    = new QLabel("GPU: --");
+    m_aiLabel     = new QLabel(tr("AI: --"));
 
     // Add spacing between permanent widgets
     m_fpsLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
     m_gpuLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
+    m_aiLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
 
     statusBar()->addWidget(m_statusLabel, 1);
+    statusBar()->addPermanentWidget(m_aiLabel);
     statusBar()->addPermanentWidget(m_gpuLabel);
     statusBar()->addPermanentWidget(m_fpsLabel);
 }
