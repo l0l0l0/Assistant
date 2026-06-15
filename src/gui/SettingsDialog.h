@@ -29,6 +29,7 @@ private:
     void createTrackingTab(QTabWidget* tabs);
     void createInspectionTab(QTabWidget* tabs);
     void createAiTab(QTabWidget* tabs);
+    void createFeaturesTab(QTabWidget* tabs);
 
     void loadFromConfig();
     void enumerateCameras();
@@ -41,6 +42,7 @@ private:
     QSpinBox*     m_cameraWidth    = nullptr;
     QSpinBox*     m_cameraHeight   = nullptr;
     QSpinBox*     m_cameraFps      = nullptr;
+    QCheckBox*    m_cameraHwDecode = nullptr;
 
     // Calibration
     QSpinBox*       m_calibBoardCols  = nullptr;
@@ -68,6 +70,11 @@ private:
     QLineEdit*      m_modelsPath     = nullptr;
     QCheckBox*      m_useTensorRT    = nullptr;
     QDoubleSpinBox* m_aiConfidence   = nullptr;
+
+    // Features
+    QCheckBox* m_remoteViewEnabled = nullptr;
+    QSpinBox*  m_remoteViewPort    = nullptr;
+    QCheckBox* m_autoReloadIbom    = nullptr;
 
     // Inspection
     QComboBox*      m_sortMethod              = nullptr;

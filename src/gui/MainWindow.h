@@ -5,6 +5,7 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QMenuBar>
+#include <QMenu>
 #include <QTimer>
 #include <QLabel>
 #include <memory>
@@ -41,6 +42,9 @@ public:
     void setDarkMode(bool dark);
     void updateFpsDisplay(double fps);
     void updateStatusMessage(const QString& msg);
+    void updateAiStatus(bool ready, const QString& message);
+    /// Rebuild the File → Open Recent submenu (most recent first).
+    void setRecentFiles(const QStringList& files);
 
 signals:
     void ibomFileRequested(const QString& path);
@@ -93,6 +97,9 @@ private:
     StatsPanel*       m_statsPanel       = nullptr;
     DatasetPanel*     m_datasetPanel     = nullptr;
 
+    // Menus
+    QMenu* m_recentMenu = nullptr;
+
     // Toolbar & actions
     QToolBar* m_mainToolBar   = nullptr;
     QAction*  m_actOpenIBom   = nullptr;
@@ -109,6 +116,7 @@ private:
     QLabel* m_fpsLabel    = nullptr;
     QLabel* m_statusLabel = nullptr;
     QLabel* m_gpuLabel    = nullptr;
+    QLabel* m_aiLabel     = nullptr;
 
     bool m_darkMode = true;
     bool m_cameraFullscreen = false;

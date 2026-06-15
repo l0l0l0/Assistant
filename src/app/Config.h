@@ -51,9 +51,23 @@ public:
     int  cameraFps() const { return m_cameraFps; }
     void setCameraFps(int fps) { m_cameraFps = fps; }
 
+    /// Use NVIDIA hardware MJPG decode (GStreamer nvv4l2decoder) on Jetson.
+    /// Falls back to CPU V4L2 automatically if the pipeline fails to open.
+    bool cameraHwDecode() const { return m_cameraHwDecode; }
+    void setCameraHwDecode(bool enabled) { m_cameraHwDecode = enabled; }
+
     // --- iBOM ---
     const std::string& ibomFilePath() const { return m_ibomFilePath; }
     void setIBomFilePath(const std::string& path) { m_ibomFilePath = path; }
+
+    /// Recently opened iBOM files, most recent first (capped at 5).
+    const std::vector<std::string>& recentIbomFiles() const { return m_recentIbomFiles; }
+    /// Move (or insert) a path to the front of the recent list.
+    void addRecentIbomFile(const std::string& path);
+
+    /// Reload the last opened iBOM automatically at startup.
+    bool autoReloadIbom() const { return m_autoReloadIbom; }
+    void setAutoReloadIbom(bool e) { m_autoReloadIbom = e; }
 
     // --- AI Models ---
     const std::string& modelsPath() const { return m_modelsPath; }
@@ -191,9 +205,12 @@ private:
     int m_cameraWidth    = 1920;
     int m_cameraHeight   = 1080;
     int m_cameraFps      = 30;
+    bool m_cameraHwDecode = true;   // NVIDIA HW MJPG decode (Jetson), auto-fallback to V4L2
 
     // iBOM
     std::string m_ibomFilePath;
+    std::vector<std::string> m_recentIbomFiles;
+    bool m_autoReloadIbom = true;
 
     // AI
     std::string m_modelsPath = "models";

@@ -1,5 +1,6 @@
 #include "SettingsDialog.h"
 #include "../app/Config.h"
+#include "../camera/CameraCapture.h"
 
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -28,6 +29,7 @@ SettingsDialog::SettingsDialog(ibom::Config& config, QWidget* parent)
     createTrackingTab(tabs);
     createInspectionTab(tabs);
     createAiTab(tabs);
+    createFeaturesTab(tabs);
 
     layout->addWidget(tabs);
 
@@ -76,6 +78,12 @@ void SettingsDialog::createCameraTab(QTabWidget* tabs)
     m_cameraFps = new QSpinBox;
     m_cameraFps->setRange(1, 120);
     form->addRow(tr("FPS:"), m_cameraFps);
+
+    m_cameraHwDecode = new QCheckBox(tr("NVIDIA hardware MJPG decode (Jetson)"));
+    m_cameraHwDecode->setToolTip(tr("Decode MJPG on the NVDEC/VIC blocks via GStreamer "
+                                    "(nvv4l2decoder) instead of the CPU. Falls back to "
+                                    "V4L2 automatically if unavailable. Restart camera to apply."));
+    form->addRow(QString(), m_cameraHwDecode);
 
     // --- Calibration group ---
     auto* calibGroup = new QGroupBox(tr("Calibration Checkerboard"));
@@ -297,6 +305,28 @@ void SettingsDialog::createAiTab(QTabWidget* tabs)
     tabs->addTab(page, tr("AI"));
 }
 
+void SettingsDialog::createFeaturesTab(QTabWidget* tabs)
+{
+    auto* page = new QWidget;
+    auto* form = new QFormLayout(page);
+
+    m_remoteViewEnabled = new QCheckBox(tr("Enable remote view (browser stream)"));
+    m_remoteViewEnabled->setToolTip(
+        tr("Streams the camera image over WebSocket. The viewer page is "
+           "written to the data directory (remote_view.html) — open it in a "
+           "browser with ?host=<device-ip> from another machine."));
+    form->addRow(m_remoteViewEnabled);
+
+    m_remoteViewPort = new QSpinBox;
+    m_remoteViewPort->setRange(1024, 65535);
+    form->addRow(tr("Remote view port:"), m_remoteViewPort);
+
+    m_autoReloadIbom = new QCheckBox(tr("Reload last iBOM at startup"));
+    form->addRow(m_autoReloadIbom);
+
+    tabs->addTab(page, tr("Features"));
+}
+
 // ---------------------------------------------------------------------------
 // Load / Save
 // ---------------------------------------------------------------------------
@@ -310,6 +340,7 @@ void SettingsDialog::loadFromConfig()
     m_cameraWidth->setValue(m_config.cameraWidth());
     m_cameraHeight->setValue(m_config.cameraHeight());
     m_cameraFps->setValue(m_config.cameraFps());
+    m_cameraHwDecode->setChecked(m_config.cameraHwDecode());
 
     // Calibration
     m_calibBoardCols->setValue(m_config.calibBoardCols());
@@ -339,6 +370,11 @@ void SettingsDialog::loadFromConfig()
     m_useTensorRT->setChecked(m_config.useTensorRT());
     m_aiConfidence->setValue(static_cast<double>(m_config.detectionConfidence()));
 
+    // Features
+    m_remoteViewEnabled->setChecked(m_config.remoteViewEnabled());
+    m_remoteViewPort->setValue(m_config.remoteViewPort());
+    m_autoReloadIbom->setChecked(m_config.autoReloadIbom());
+
     // Inspection
     m_sortMethod->setCurrentIndex(
         m_sortMethod->findData(static_cast<int>(m_config.sortMethod())));
@@ -364,6 +400,7 @@ void SettingsDialog::accept()
     m_config.setCameraWidth(m_cameraWidth->value());
     m_config.setCameraHeight(m_cameraHeight->value());
     m_config.setCameraFps(m_cameraFps->value());
+    m_config.setCameraHwDecode(m_cameraHwDecode->isChecked());
 
     // Calibration
     m_config.setCalibBoardCols(m_calibBoardCols->value());
@@ -392,6 +429,11 @@ void SettingsDialog::accept()
     m_config.setModelsPath(m_modelsPath->text().toStdString());
     m_config.setUseTensorRT(m_useTensorRT->isChecked());
     m_config.setDetectionConfidence(static_cast<float>(m_aiConfidence->value()));
+
+    // Features
+    m_config.setRemoteViewEnabled(m_remoteViewEnabled->isChecked());
+    m_config.setRemoteViewPort(m_remoteViewPort->value());
+    m_config.setAutoReloadIbom(m_autoReloadIbom->isChecked());
 
     // Inspection
     m_config.setSortMethod(
@@ -424,9 +466,17 @@ void SettingsDialog::enumerateCameras()
 
     std::thread([this, previousIndex]() {
         QStringList names;
-        const auto cameras = QMediaDevices::videoInputs();
-        for (int i = 0; i < cameras.size(); ++i)
-            names << QString("%1: %2").arg(i).arg(cameras[i].description());
+        // Use OpenCV V4L2 enumeration (reliable on Jetson/Docker).
+        // QMediaDevices::videoInputs() is blind to /dev/video* in this environment.
+        const auto v4lDevices = ibom::camera::CameraCapture::listDevices();
+        const auto qtCameras  = QMediaDevices::videoInputs();
+        for (size_t i = 0; i < v4lDevices.size(); ++i) {
+            const int qi = static_cast<int>(i);
+            QString label = (qi < qtCameras.size())
+                ? qtCameras[qi].description()
+                : QString::fromStdString(v4lDevices[i]);
+            names << QString("%1: %2").arg(qi).arg(label);
+        }
         QMetaObject::invokeMethod(this, [this, names, previousIndex]() {
             m_cameraDevice->clear();
             if (names.isEmpty()) {

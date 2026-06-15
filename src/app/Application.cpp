@@ -22,11 +22,15 @@
 #include "features/Measurement.h"
 #include "features/SnapshotHistory.h"
 #include "features/DatasetCreator.h"
+#include "features/RemoteView.h"
 #include "gui/DatasetPanel.h"
 #include "export/DataExporter.h"
+#include "export/ReportGenerator.h"
 #include "gui/Theme.h"
 #include "utils/Logger.h"
+#include "utils/QtLogSink.h"
 #include "utils/Paths.h"
+#include "utils/ImageUtils.h"
 
 #include <spdlog/spdlog.h>
 #include <QCommandLineParser>
@@ -42,6 +46,10 @@
 #include <QCameraDevice>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QDateTime>
+#include <QFile>
+#include <nlohmann/json.hpp>
+#include <fstream>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -61,6 +69,12 @@ Application::Application(QApplication& qapp)
 
 Application::~Application()
 {
+    // Persist runtime tweaks made outside the settings dialog (control panel
+    // sliders update Config in memory only — SettingsDialog is the only other
+    // call site of save()).
+    if (m_config)
+        m_config->save();
+
     // The AI init thread owns no Qt objects; joining is safe and bounded by
     // the ONNX session creation (cannot be cancelled mid-flight anyway).
     if (m_aiInitThread.joinable())
@@ -113,16 +127,31 @@ bool Application::initialize()
     // Wire signals between subsystems
     connectSignals();
 
+    // Reflect persisted AI settings in the control panel (before initializeAI
+    // so the spinner already shows the threshold the detector will use).
+    m_mainWindow->controlPanel()->setConfidenceThreshold(m_config->detectionConfidence());
+
     // AI pipeline — off the GUI thread: first launch with TensorRT compiles
     // the engine (minutes); the app is fully usable without it meanwhile.
     initializeAI();
 
-    // Enumerate cameras and populate ControlPanel
+    // Enumerate cameras and populate ControlPanel.
+    // The capture pipeline opens devices by index via OpenCV/V4L2, so we
+    // enumerate the same way (CameraCapture::listDevices). QMediaDevices is
+    // only queried for friendlier labels: on Jetson-in-Docker its multimedia
+    // backend frequently fails to see /dev/video* even when V4L2 capture works
+    // perfectly — relying on it alone yields "0 cameras" on a working device.
     {
         QStringList cameraNames;
-        const auto cameras = QMediaDevices::videoInputs();
-        for (int i = 0; i < cameras.size(); ++i)
-            cameraNames << QString("%1: %2").arg(i).arg(cameras[i].description());
+        const auto v4lDevices = camera::CameraCapture::listDevices();
+        const auto qtCameras  = QMediaDevices::videoInputs();
+        for (size_t i = 0; i < v4lDevices.size(); ++i) {
+            const int qi = static_cast<int>(i);
+            QString label = (qi < qtCameras.size())
+                ? qtCameras[qi].description()
+                : QString::fromStdString(v4lDevices[i]);
+            cameraNames << QString("%1: %2").arg(qi).arg(label);
+        }
         if (cameraNames.isEmpty())
             cameraNames << tr("No camera detected");
         m_mainWindow->controlPanel()->setCameraDevices(cameraNames);
@@ -132,14 +161,130 @@ bool Application::initialize()
             if (idx >= 0 && idx < cameraNames.size())
                 cp->findChild<QComboBox*>()->setCurrentIndex(idx);
         }
-        spdlog::info("Found {} camera(s)", cameras.size());
+        spdlog::info("Found {} camera(s) (V4L2 enumeration)", v4lDevices.size());
     }
 
     // Show main window
     m_mainWindow->show();
 
+    // Remote browser view, if enabled in config.
+    applyRemoteViewConfig();
+
+    // Recent iBOM files menu + optional auto-reload of the last board.
+    refreshRecentFilesMenu();
+    if (m_config->autoReloadIbom() && !m_config->ibomFilePath().empty()) {
+        const QString last = QString::fromStdString(m_config->ibomFilePath());
+        if (QFileInfo::exists(last)) {
+            spdlog::info("Auto-reloading last iBOM: {}", last.toStdString());
+            loadIBomFile(last);
+        }
+    }
+
     spdlog::info("Application initialized successfully.");
     return true;
+}
+
+void Application::refreshRecentFilesMenu()
+{
+    QStringList files;
+    for (const auto& f : m_config->recentIbomFiles())
+        files << QString::fromStdString(f);
+    m_mainWindow->setRecentFiles(files);
+}
+
+void Application::saveInspectionState()
+{
+    const std::string key = m_config->ibomFilePath();
+    if (key.empty()) return;
+
+    const auto statePath = utils::dataDir() / "session_state.json";
+
+    nlohmann::json root = nlohmann::json::object();
+    {
+        std::ifstream ifs(statePath);
+        if (ifs.good()) {
+            try { root = nlohmann::json::parse(ifs); } catch (...) {}
+            if (!root.is_object()) root = nlohmann::json::object();
+        }
+    }
+
+    if (m_placedRefs.empty()) {
+        root.erase(key);
+    } else {
+        nlohmann::json entry;
+        entry["placed"]   = std::vector<std::string>(m_placedRefs.begin(),
+                                                     m_placedRefs.end());
+        entry["saved_at"] = QDateTime::currentDateTime()
+                                .toString(Qt::ISODate).toStdString();
+        root[key] = entry;
+    }
+
+    std::ofstream ofs(statePath);
+    if (!ofs.good()) {
+        spdlog::warn("Could not write inspection state to {}", statePath.string());
+        return;
+    }
+    ofs << root.dump(2);
+}
+
+std::unordered_set<std::string> Application::loadSavedPlacedRefs() const
+{
+    std::unordered_set<std::string> refs;
+    const std::string key = m_config->ibomFilePath();
+    if (key.empty()) return refs;
+
+    std::ifstream ifs(utils::dataDir() / "session_state.json");
+    if (!ifs.good()) return refs;
+
+    nlohmann::json root;
+    try { root = nlohmann::json::parse(ifs); } catch (...) { return refs; }
+
+    auto it = root.find(key);
+    if (it == root.end() || !it->is_object() || !it->contains("placed"))
+        return refs;
+    for (const auto& r : (*it)["placed"])
+        if (r.is_string()) refs.insert(r.get<std::string>());
+    return refs;
+}
+
+void Application::applyRemoteViewConfig()
+{
+    const bool    enabled = m_config->remoteViewEnabled();
+    const quint16 port    = static_cast<quint16>(m_config->remoteViewPort());
+
+    if (!enabled) {
+        if (m_remoteView && m_remoteView->isRunning()) {
+            m_remoteView->stop();
+            spdlog::info("RemoteView: disabled");
+        }
+        return;
+    }
+
+    if (m_remoteView && m_remoteView->isRunning() && m_remoteView->port() == port)
+        return;  // already running with the requested settings
+
+    if (!m_remoteView)
+        m_remoteView = std::make_unique<features::RemoteView>();
+    else if (m_remoteView->isRunning())
+        m_remoteView->stop();
+
+    if (!m_remoteView->start(port))
+        return;
+
+    // The server speaks WebSocket only (no HTTP), so the viewer page is
+    // written to disk; open it in any browser, with ?host=<jetson-ip> when
+    // viewing from another machine.
+    const auto viewerPath = utils::dataDir() / "remote_view.html";
+    QFile f(QString::fromStdString(viewerPath.string()));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(m_remoteView->generateHTMLViewer().toUtf8());
+        spdlog::info("RemoteView: streaming on ws://0.0.0.0:{} — viewer page: {} "
+                     "(open with ?host=<jetson-ip> from another machine)",
+                     port, viewerPath.string());
+    } else {
+        spdlog::warn("RemoteView: could not write viewer page to {}",
+                     viewerPath.string());
+    }
 }
 
 Config& Application::config()
@@ -200,6 +345,9 @@ void Application::createSubsystems()
     // Camera capture
     spdlog::info("Creating CameraCapture...");
     m_camera = std::make_unique<camera::CameraCapture>(m_config->cameraIndex());
+    m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
+    m_camera->setFps(m_config->cameraFps());
+    m_camera->setHardwareDecode(m_config->cameraHwDecode());
 
     // Camera calibration
     spdlog::info("Creating CameraCalibration...");
@@ -295,6 +443,7 @@ void Application::initializeAI()
 {
     if (!m_config->aiEnabled()) {
         spdlog::info("AI pipeline disabled in config (ai.enabled=false)");
+        emit aiStatusChanged(false, tr("AI: disabled"));
         return;
     }
 
@@ -303,6 +452,7 @@ void Application::initializeAI()
         spdlog::info("AI pipeline idle: no .onnx model in '{}' — drop a model "
                      "there and restart to enable detection (see docs/AI_PIPELINE.md)",
                      m_modelManager->modelsDirectory());
+        emit aiStatusChanged(false, tr("AI: no model"));
         return;
     }
 
@@ -354,6 +504,14 @@ void Application::connectSignals()
 {
     connect(this, &Application::shutdownRequested, &m_qapp, &QApplication::quit);
 
+    // ── Runtime logs → in-app Event Log (StatsPanel) ────────────
+    // spdlog records (info+) routed through the Qt sink. Queued because the
+    // sink may fire from the camera/tracking worker threads.
+    if (auto* sp = m_mainWindow->statsPanel()) {
+        connect(&utils::LogBridge::instance(), &utils::LogBridge::messageLogged,
+                sp, &gui::StatsPanel::addLogEntry, Qt::QueuedConnection);
+    }
+
     // ── Tracking worker → homography update on GUI thread ───────
     if (m_trackingWorker) {
         connect(m_trackingWorker, &overlay::TrackingWorker::homographyUpdated,
@@ -403,6 +561,7 @@ void Application::connectSignals()
             m_camera->setDeviceIndex(m_config->cameraIndex());
             m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
             m_camera->setFps(m_config->cameraFps());
+            m_camera->setHardwareDecode(m_config->cameraHwDecode());
             if (!m_camera->start()) {
                 m_mainWindow->updateStatusMessage(tr("Failed to start camera"));
             }
@@ -439,6 +598,19 @@ void Application::connectSignals()
                 Q_ARG(ibom::camera::FrameRef, frameRef));
         }
 
+        // ── Focus assist: Laplacian variance, throttled (~1 ms at 0.25×) ──
+        // Same downscale as the dataset capture gate so the displayed value
+        // is directly comparable to the dataset.min_sharpness threshold.
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - m_lastSharpnessMs >= 300) {
+            m_lastSharpnessMs = nowMs;
+            cv::Mat small;
+            cv::resize(frame, small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+            const double sharpness = utils::ImageUtils::computeSharpness(small);
+            m_mainWindow->statsPanel()->setSharpness(
+                sharpness, sharpness >= m_config->datasetMinSharpness());
+        }
+
         // Apply undistortion if calibrated (allocates a new Mat; unavoidable).
         cv::Mat processed;
         if (m_calibration && m_calibration->isCalibrated()) {
@@ -458,7 +630,15 @@ void Application::connectSignals()
 
         QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
                     QImage::Format_RGB888);
-        m_mainWindow->cameraView()->updateFrame(qimg.copy());
+        // Deep copy: qimg only wraps rgb's pixel buffer, which dies with this
+        // scope. The copy is shared (COW) between the camera view and the
+        // remote stream.
+        const QImage display = qimg.copy();
+        m_mainWindow->cameraView()->updateFrame(display);
+
+        // Mirror to remote browser clients (RemoteView throttles internally).
+        if (m_remoteView && m_remoteView->isRunning() && m_remoteView->clientCount() > 0)
+            m_remoteView->pushFrame(display);
 
         // Render iBOM overlay if data is loaded and homography is set
         if (m_ibomProject && m_homography && m_homography->isValid()) {
@@ -656,6 +836,7 @@ void Application::connectSignals()
         m_camera->setDeviceIndex(index);
         m_camera->setResolution(w, h);
         m_camera->setFps(fps);
+        m_camera->setHardwareDecode(m_config->cameraHwDecode());
         if (wasCapturing) m_camera->start();
         spdlog::info("Camera settings applied: device={} {}x{} @{}fps", index, w, h, fps);
     });
@@ -681,6 +862,19 @@ void Application::connectSignals()
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showFabricationChanged,
             this, [this](bool show) {
         m_config->setShowFabrication(show);
+    });
+
+    // ── AI: status bar indicator + detection confidence ─────────
+    // aiStatusChanged is also emitted from the AI init thread; the queued
+    // cross-thread delivery to the GUI is handled by Qt automatically.
+    connect(this, &Application::aiStatusChanged,
+            m_mainWindow.get(), &gui::MainWindow::updateAiStatus);
+
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::confidenceChanged,
+            this, [this](float conf) {
+        m_config->setDetectionConfidence(conf);
+        if (auto* detector = componentDetector())
+            detector->setConfidenceThreshold(conf);
     });
 
     // ── iBOM file loading ───────────────────────────────────────
@@ -839,6 +1033,7 @@ void Application::connectSignals()
             m_camera->setDeviceIndex(newIdx);
             m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
             m_camera->setFps(m_config->cameraFps());
+            m_camera->setHardwareDecode(m_config->cameraHwDecode());
             m_camera->start();
             spdlog::info("Camera restarted on device {} ({}x{} @{}fps)",
                          newIdx, m_config->cameraWidth(), m_config->cameraHeight(),
@@ -866,6 +1061,16 @@ void Application::connectSignals()
         auto* cp = m_mainWindow->controlPanel();
         if (cp && newIdx >= 0)
             cp->findChild<QComboBox*>()->setCurrentIndex(newIdx);
+
+        // AI confidence may have changed in the dialog — sync the control
+        // panel spinner and the live detector.
+        m_mainWindow->controlPanel()->setConfidenceThreshold(
+            m_config->detectionConfidence());
+        if (auto* detector = componentDetector())
+            detector->setConfidenceThreshold(m_config->detectionConfidence());
+
+        // Remote view may have been toggled or moved to another port.
+        applyRemoteViewConfig();
 
         // Apply optical multiplier change to pixels-per-mm
         float mult = m_config->opticalMultiplier();
@@ -1194,6 +1399,9 @@ void Application::connectSignals()
             this, [this, bomPanel](const std::string& ref) {
         m_placedRefs.insert(ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
+        // Persist on every placement: a restart (app or device) resumes
+        // exactly where the inspection stopped.
+        saveInspectionState();
     });
 
     connect(m_pickAndPlace.get(), &features::PickAndPlace::allPlaced,
@@ -1213,7 +1421,10 @@ void Application::connectSignals()
     connect(inspPanel, &gui::InspectionPanel::backClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::goBack);
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
-            this, [this]() { m_placedRefs.clear(); });
+            this, [this]() {
+        m_placedRefs.clear();
+        saveInspectionState();  // empty set removes the saved entry
+    });
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::reset);
 
@@ -1321,6 +1532,22 @@ void Application::loadIBomFile(const QString& path)
     // Feed to BOM panel
     m_mainWindow->bomPanel()->loadBomData(m_ibomProject->bomGroups, m_ibomProject->components);
 
+    // Remember for the File → Open Recent menu and startup auto-reload.
+    m_config->setIBomFilePath(path.toStdString());
+    m_config->addRecentIbomFile(path.toStdString());
+    refreshRecentFilesMenu();
+
+    // Restore the placed state of a previous inspection of this board so the
+    // overlay and BOM panel show progress immediately (full resume happens
+    // in startInspection).
+    m_placedRefs = loadSavedPlacedRefs();
+    if (!m_placedRefs.empty()) {
+        for (const auto& ref : m_placedRefs)
+            m_mainWindow->bomPanel()->setComponentState(ref, tr("Placed"));
+        spdlog::info("Restored {} placed components from a previous session",
+                     m_placedRefs.size());
+    }
+
     // Auto-compute a basic homography based on board bounding box
     if (!m_homography->isValid()) {
         auto& bb = m_ibomProject->boardInfo.boardBBox;
@@ -1384,6 +1611,20 @@ void Application::startInspection()
     case SortMethod::ValueAlphabetic: m_pickAndPlace->sortByValueGroup();      break;
     case SortMethod::Position:        m_pickAndPlace->sortByPosition();        break;
     case SortMethod::FootprintSize:   m_pickAndPlace->sortByFootprintSize();   break;
+    }
+
+    // Resume a previous session of this board, if one was saved (state is
+    // written on every "Placed" click). The Reset button starts over.
+    m_placedRefs = loadSavedPlacedRefs();
+    if (!m_placedRefs.empty()) {
+        const int restored = m_pickAndPlace->restorePlaced(m_placedRefs);
+        if (restored > 0) {
+            m_mainWindow->updateStatusMessage(
+                tr("Inspection resumed: %1/%2 already placed")
+                    .arg(restored).arg(m_pickAndPlace->totalSteps()));
+            return;
+        }
+        m_placedRefs.clear();  // saved refs match nothing in this board
     }
 
     // Re-emit current step so InspectionPanel shows the first item of the new order
@@ -1475,6 +1716,12 @@ void Application::onExport(const QString& format)
     } else if (format == "defects") {
         ext = "csv";  filter = tr("Defects CSV (*.csv)");
         defaultName = "defects.csv";
+    } else if (format == "report-html") {
+        ext = "html"; filter = tr("HTML report (*.html)");
+        defaultName = "inspection_report.html";
+    } else if (format == "report-pdf") {
+        ext = "pdf";  filter = tr("PDF report (*.pdf)");
+        defaultName = "inspection_report.pdf";
     } else {
         spdlog::warn("Unknown export format: {}", format.toStdString());
         return;
@@ -1494,6 +1741,31 @@ void Application::onExport(const QString& format)
     else if (format == "placement") ok = m_dataExporter->exportPlacement(path);
     else if (format == "bom")       ok = m_dataExporter->exportBOM(path);
     else if (format == "defects")   ok = m_dataExporter->exportDefectsCSV(path);
+    else if (format.startsWith("report-")) {
+        exports::ReportGenerator gen;
+
+        exports::ReportGenerator::ReportConfig rc;
+        rc.projectName      = QString::fromStdString(m_ibomProject->boardInfo.title);
+        rc.boardRevision    = QString::fromStdString(m_ibomProject->boardInfo.revision);
+        rc.includeSnapshots = false;  // per-component snapshots not collected yet
+        gen.setConfig(rc);
+
+        std::vector<exports::ReportGenerator::InspectionResult> results;
+        results.reserve(records.size());
+        for (const auto& r : records) {
+            exports::ReportGenerator::InspectionResult ir;
+            ir.reference = r.reference;
+            ir.value     = r.value;
+            ir.footprint = r.footprint;
+            ir.status    = r.status;
+            results.push_back(std::move(ir));
+        }
+        gen.setResults(results);
+        gen.setBoardImage(m_mainWindow->cameraView()->captureView());
+
+        ok = (format == "report-pdf") ? gen.generatePDF(path)
+                                      : gen.generateHTML(path);
+    }
 
     if (ok) {
         m_mainWindow->updateStatusMessage(

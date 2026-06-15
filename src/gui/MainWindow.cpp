@@ -14,6 +14,8 @@
 
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QMenu>
+#include <QDir>
 #include <QDockWidget>
 #include <QKeyEvent>
 #include <QCloseEvent>
@@ -92,6 +94,26 @@ void MainWindow::updateStatusMessage(const QString& msg)
     m_statusLabel->setText(msg);
 }
 
+void MainWindow::updateAiStatus(bool ready, const QString& message)
+{
+    m_aiLabel->setText(message);
+    m_aiLabel->setToolTip(message);
+    m_aiLabel->setStyleSheet(ready ? theme::placedCSS() : theme::defectCSS());
+}
+
+void MainWindow::setRecentFiles(const QStringList& files)
+{
+    m_recentMenu->clear();
+    for (const QString& path : files) {
+        // Full path as text: iBOM files are often all named "ibom.html",
+        // only the directory disambiguates the board.
+        QAction* act = m_recentMenu->addAction(QDir::toNativeSeparators(path));
+        connect(act, &QAction::triggered, this,
+                [this, path]() { emit ibomFileRequested(path); });
+    }
+    m_recentMenu->setEnabled(!files.isEmpty());
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 void MainWindow::createActions()
@@ -141,6 +163,8 @@ void MainWindow::createMenuBar()
 {
     auto* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(m_actOpenIBom);
+    m_recentMenu = fileMenu->addMenu(tr("Open &Recent"));
+    m_recentMenu->setEnabled(false);
     fileMenu->addSeparator();
     fileMenu->addAction(m_actScreenshot);
     fileMenu->addAction(m_actExport);
@@ -222,18 +246,29 @@ void MainWindow::createStatusBar()
     m_fpsLabel    = new QLabel("FPS: --");
     m_statusLabel = new QLabel(tr("Ready"));
     m_gpuLabel    = new QLabel("GPU: --");
+    m_aiLabel     = new QLabel(tr("AI: --"));
 
     // Add spacing between permanent widgets
     m_fpsLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
     m_gpuLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
+    m_aiLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
 
     statusBar()->addWidget(m_statusLabel, 1);
+    statusBar()->addPermanentWidget(m_aiLabel);
     statusBar()->addPermanentWidget(m_gpuLabel);
     statusBar()->addPermanentWidget(m_fpsLabel);
 }
 
 void MainWindow::createDockWidgets()
 {
+    // Let the left/right dock areas own the bottom corners so they span the
+    // full window height; the bottom dock (Statistics) then occupies only the
+    // central column instead of underlapping the side docks. Prevents the
+    // left Inspection dock from fighting the Statistics dock for the
+    // bottom-left corner.
+    setCorner(Qt::BottomLeftCorner,  Qt::LeftDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
+
     // BOM panel (right)
     m_bomPanel = new BomPanel(this);
     auto* bomDock = new QDockWidget(tr("BOM"), this);
@@ -374,9 +409,10 @@ void MainWindow::onStartInspection()
 
 void MainWindow::onExportReport()
 {
-    // Default to CSV via the inspection panel's export pipeline.
+    // Full report (stats, yield, BOM checklist) via the export pipeline;
+    // the inspection panel also offers CSV/JSON/.pos/BOM and Report PDF.
     if (m_inspectionPanel)
-        emit m_inspectionPanel->exportRequested("csv");
+        emit m_inspectionPanel->exportRequested("report-html");
 }
 
 void MainWindow::onGenerateCheckerboard()
@@ -812,19 +848,19 @@ void MainWindow::applyDarkStylesheet()
 
         /* ── Scrollbars ── */
         QScrollBar:vertical {
-            background: transparent; width: 8px; margin: 2px 1px;
+            background: transparent; width: 14px; margin: 2px 1px;
         }
         QScrollBar::handle:vertical {
-            background: #2a2a48; border-radius: 4px; min-height: 30px;
+            background: #2a2a48; border-radius: 7px; min-height: 48px;
         }
         QScrollBar::handle:vertical:hover { background: #3a3a60; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
         QScrollBar:horizontal {
-            background: transparent; height: 8px; margin: 1px 2px;
+            background: transparent; height: 14px; margin: 1px 2px;
         }
         QScrollBar::handle:horizontal {
-            background: #2a2a48; border-radius: 4px; min-width: 30px;
+            background: #2a2a48; border-radius: 7px; min-width: 48px;
         }
         QScrollBar::handle:horizontal:hover { background: #3a3a60; }
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
@@ -1030,13 +1066,13 @@ void MainWindow::applyLightStylesheet()
             border: none; border-bottom: 1px solid #d0d4e0;
             padding: 8px 10px; font-size: 11px; font-weight: 600;
         }
-        QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 1px; }
-        QScrollBar::handle:vertical { background: #c0c4d4; border-radius: 4px; min-height: 30px; }
+        QScrollBar:vertical { background: transparent; width: 14px; margin: 2px 1px; }
+        QScrollBar::handle:vertical { background: #c0c4d4; border-radius: 7px; min-height: 48px; }
         QScrollBar::handle:vertical:hover { background: #a8acbc; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-        QScrollBar:horizontal { background: transparent; height: 8px; margin: 1px 2px; }
-        QScrollBar::handle:horizontal { background: #c0c4d4; border-radius: 4px; min-width: 30px; }
+        QScrollBar:horizontal { background: transparent; height: 14px; margin: 1px 2px; }
+        QScrollBar::handle:horizontal { background: #c0c4d4; border-radius: 7px; min-width: 48px; }
         QScrollBar::handle:horizontal:hover { background: #a8acbc; }
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }

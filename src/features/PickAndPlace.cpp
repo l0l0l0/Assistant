@@ -148,6 +148,31 @@ void PickAndPlace::reset()
     emitProgress();
 }
 
+int PickAndPlace::restorePlaced(const std::unordered_set<std::string>& placedRefs)
+{
+    int restored = 0;
+    for (auto& step : m_steps) {
+        step.placed = placedRefs.count(step.reference) > 0;
+        if (step.placed) restored++;
+    }
+
+    // Position on the first unplaced step.
+    m_currentIndex = 0;
+    while (m_currentIndex < static_cast<int>(m_steps.size()) &&
+           m_steps[m_currentIndex].placed) {
+        m_currentIndex++;
+    }
+
+    spdlog::info("PickAndPlace: restored {} placed of {} steps", restored, m_steps.size());
+    emitProgress();
+    if (isComplete()) {
+        emit allPlaced();
+    } else if (m_currentIndex < static_cast<int>(m_steps.size())) {
+        emit currentStepChanged(m_steps[m_currentIndex]);
+    }
+    return restored;
+}
+
 int PickAndPlace::placedCount() const
 {
     return static_cast<int>(

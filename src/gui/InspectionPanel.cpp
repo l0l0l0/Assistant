@@ -4,6 +4,9 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QScrollArea>
+#include <QScroller>
+#include <QFrame>
 #include <QFont>
 
 namespace ibom::gui {
@@ -12,19 +15,32 @@ InspectionPanel::InspectionPanel(QWidget* parent)
     : QWidget(parent)
 {
     buildUI();
-    QWidget::setEnabled(false);  // Disabled until iBOM is loaded
+    // Disable only the inner content, NOT this widget: disabling `this` would
+    // also disable the QScrollArea, killing the scrollbar/wheel until an iBOM
+    // is loaded. The scroll area must stay live so the user can scroll the
+    // (greyed-out) controls before loading.
+    m_content->setEnabled(false);
 }
 
 void InspectionPanel::setEnabled(bool enabled)
 {
-    QWidget::setEnabled(enabled);
+    m_content->setEnabled(enabled);
 }
 
 // ── UI ────────────────────────────────────────────────────────────
 
 void InspectionPanel::buildUI()
 {
-    auto* main = new QVBoxLayout(this);
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    // Keep a usable vertical scrollbar for mouse (wheel + handle drag).
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* content = new QWidget;
+    m_content = content;
+    auto* main = new QVBoxLayout(content);
     main->setContentsMargins(8, 8, 8, 8);
     main->setSpacing(10);
 
@@ -127,14 +143,34 @@ void InspectionPanel::buildUI()
     m_btnExportJSON      = new QPushButton(tr("JSON"),        exportGroup);
     m_btnExportPlacement = new QPushButton(tr("KiCad .pos"),  exportGroup);
     m_btnExportBOM       = new QPushButton(tr("BOM"),         exportGroup);
+    m_btnReportHTML      = new QPushButton(tr("Report HTML"), exportGroup);
+    m_btnReportPDF       = new QPushButton(tr("Report PDF"),  exportGroup);
+    m_btnReportHTML->setToolTip(tr("Full inspection report: statistics, yield, "
+                                   "BOM checklist, board snapshot"));
+    m_btnReportPDF->setToolTip(m_btnReportHTML->toolTip());
 
     exportGrid->addWidget(m_btnExportCSV,       0, 0);
     exportGrid->addWidget(m_btnExportJSON,      0, 1);
     exportGrid->addWidget(m_btnExportPlacement, 1, 0);
     exportGrid->addWidget(m_btnExportBOM,       1, 1);
+    exportGrid->addWidget(m_btnReportHTML,      2, 0);
+    exportGrid->addWidget(m_btnReportPDF,       2, 1);
 
     main->addWidget(exportGroup);
     main->addStretch();
+
+    scroll->setWidget(content);
+    scroll->setEnabled(true);   // scroll area always live, even when content disabled
+
+    // Touchscreen kinetic scrolling — TouchGesture only, NOT LeftMouseButton:
+    // grabbing the left mouse button hijacks the cursor and breaks the normal
+    // scrollbar (wheel + handle drag) and click behaviour for mouse users.
+    // TouchGesture reacts to genuine touch events and leaves the mouse native.
+    QScroller::grabGesture(scroll->viewport(), QScroller::TouchGesture);
+
+    auto* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->addWidget(scroll);
 
     // ── Wiring ──────────────────────────────────────────────────
     connect(m_btnStart,   &QPushButton::clicked, this, &InspectionPanel::startInspectionClicked);
@@ -157,6 +193,8 @@ void InspectionPanel::buildUI()
     connect(m_btnExportJSON,      &QPushButton::clicked, this, [this](){ emit exportRequested("json");      });
     connect(m_btnExportPlacement, &QPushButton::clicked, this, [this](){ emit exportRequested("placement"); });
     connect(m_btnExportBOM,       &QPushButton::clicked, this, [this](){ emit exportRequested("bom");       });
+    connect(m_btnReportHTML,      &QPushButton::clicked, this, [this](){ emit exportRequested("report-html"); });
+    connect(m_btnReportPDF,       &QPushButton::clicked, this, [this](){ emit exportRequested("report-pdf");  });
 }
 
 // ── Slots ─────────────────────────────────────────────────────────
@@ -203,7 +241,7 @@ void InspectionPanel::onSnapshotTaken(int /*id*/, const QString& /*label*/)
 
 void InspectionPanel::onIBomLoaded(int componentCount)
 {
-    QWidget::setEnabled(componentCount > 0);
+    m_content->setEnabled(componentCount > 0);
     m_currentValueLabel->setText(componentCount > 0
         ? tr("%1 components loaded — click Start").arg(componentCount)
         : tr("Load iBOM and click Start"));

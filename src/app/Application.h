@@ -44,6 +44,7 @@ class PickAndPlace;
 class Measurement;
 class SnapshotHistory;
 class DatasetCreator;
+class RemoteView;
 }
 
 namespace exports {
@@ -98,6 +99,13 @@ private:
     void initializeAI();
 
     void loadIBomFile(const QString& path);
+    void refreshRecentFilesMenu();
+    void applyRemoteViewConfig();
+    /// Persist m_placedRefs for the current iBOM (session_state.json,
+    /// keyed by iBOM path). An empty set removes the entry.
+    void saveInspectionState();
+    /// Read back the placed refs saved for the current iBOM, if any.
+    std::unordered_set<std::string> loadSavedPlacedRefs() const;
     void runCalibration();
     void takeScreenshot();
     void updateDynamicScale();
@@ -133,9 +141,16 @@ private:
     std::unique_ptr<features::SnapshotHistory>  m_snapshotHistory;
     std::unique_ptr<exports::DataExporter>      m_dataExporter;
 
+    // Remote browser view (WebSocket MJPEG) — created on demand when
+    // features.remote_view is enabled (config or Settings dialog).
+    std::unique_ptr<features::RemoteView>       m_remoteView;
+
     // FPS tracking
     QTimer* m_fpsTimer = nullptr;
     std::atomic<int> m_frameCount{0};
+
+    // Focus assist — last time the sharpness metric was computed (throttle).
+    qint64 m_lastSharpnessMs = 0;
 
     // Calibration image collection
     std::vector<cv::Mat> m_calibImages;

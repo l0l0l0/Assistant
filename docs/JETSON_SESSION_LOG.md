@@ -11,8 +11,22 @@
 
 ---
 
-## État actuel — au 2026-06-11
+## État actuel — au 2026-06-15
 
+> **2026-06-15 (suite 2)** : **fix ascenseur dock gauche (souris)** — le `QScroller::LeftMouseButtonGesture` ajouté pour le tactile capturait le bouton gauche et cassait la molette + le glissement de l'ascenseur à la souris. Remplacé par `QScroller::TouchGesture` (vrai tactile uniquement, souris native) + policy scrollbar explicite sur `InspectionPanel`.
+>
+> **2026-06-15 (suite)** : **décodage MJPG hardware NVIDIA** (`CameraCapture`) — pipeline GStreamer `v4l2src ! image/jpeg ! nvv4l2decoder mjpeg=1 ! nvvidconv ! BGR ! appsink`, décodage sur NVDEC/VIC au lieu du CPU. Fallback automatique vers V4L2 si GStreamer absent ou pipeline KO. Toggle `camera.hw_decode` (Config, défaut ON) + case à cocher Settings → Camera. **H.264 écarté volontairement** : compression inter-frames → artefacts de bloc nuisibles au tracking ORB / mesure (cf échange utilisateur). ⚠️ À valider sur Jetson (vérifier `v4l2-ctl --list-formats-ext` que la caméra sort bien du MJPG, et que OpenCV a le backend GStreamer).
+>
+> **2026-06-15** : fix **mise en page InspectionPanel** (QScrollArea — boutons Export Report plus tronqués/chevauchants) + fix **caméra dans Settings** (SettingsDialog utilisait QMediaDevices au lieu de CameraCapture::listDevices, même bug que #17). Branche `claude/pr5-plus-fixes`. ⚠️ À valider sur Jetson.
+>
+> **2026-06-12 (suite 3)** : **restauration de session d'inspection** (`session_state.json` clé = chemin iBOM, sauvegarde à chaque « Placed », reprise au chargement + au Start Inspection, Reset efface) + **boutons Report HTML/PDF** (InspectionPanel + menu File → Export Report, via `ReportGenerator` enfin instancié — stats/yield/checklist + snapshot caméra). Nouveau : `PickAndPlace::restorePlaced()`. ⚠️ Toujours rien compilé ici — valider sur Jetson.
+>
+> **2026-06-12 (suite 2)** : **items 4-6 du backlog implémentés** — focus assist (netteté Laplacien live dans StatsPanel), fichiers récents + auto-reload iBOM (File → Open Recent), **RemoteView câblé** (viewer HTML écrit dans `$IBOM_DATA_DIR/remote_view.html`) + nouvel onglet **Settings → Features**. ⚠️ Toujours rien compilé ici — valider sur Jetson.
+>
+> **2026-06-12 (suite)** : **quick wins 1.1–1.3 d'IDEES_AMELIORATIONS.md implémentés** (garde-fou anti zip-bomb décompression LZString + test, statut IA dans la status bar, slider confiance câblé Config+détecteur, bonus : `Config::save()` à l'arrêt). ⚠️ **Non compilé** (pas de toolchain ici) — valider sur Jetson : `bash scripts/build_jetson.sh` + `ctest`. Voir l'entrée de session ci-dessous.
+>
+> **2026-06-12** : analyse complète du code à la demande de l'utilisateur (« trouve des améliorations et des nouvelles features ») → nouveau document **[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** : 3 quick wins (garde-fou décompression iBOM, slider confiance non câblé, statut IA invisible), 7 features dormantes à câbler (RemoteView, ReportGenerator, BarcodeScanner…), 7 nouvelles features (focus assist, fichiers récents, restauration session, InferenceWorker async…), priorisation en §5. Branche `claude/focused-fermi-if21mm`.
+>
 > **2026-06-11** : PR #2 mergée dans `main` (`f36895e`) — Dataset Studio Lots 1+2 + Phase 1c + pipeline IA + tous les fixes Docker/scripts. Fix `INSTALL.bat` (PR #3), scripts Linux du Studio (PR #4). **Phase A implémentée** : `DatasetCreator` + `DatasetPanel` + signal qualité tracking + `footprint_classes.json` + tests (voir session "suite" ci-dessous). Le dev continue sur `claude/dreamy-cori-oec93c`.
 >
 > ✅ **Build + ctest Jetson validés** (2026-06-11) : `bash scripts/build_jetson.sh` → 31/31, binaire 1.3 MB. `ctest` → **7/7 passent**. Branche `claude/dreamy-cori-oec93c` mergée dans `main`.
@@ -71,6 +85,294 @@ Aucun. Tous les obstacles Phase 0/1/2 sont résolus et documentés dans [JETSON_
 2. Vérifier le statut de [JETSON_ERREURS.md](JETSON_ERREURS.md) pour les bugs ouverts
 3. Sur le Jetson : `cd ~/Assistant-git && git pull && git status`
 4. Continuer là où la dernière session s'est arrêtée
+
+---
+
+## Session 2026-06-15 — Fix mise en page InspectionPanel + caméra absente dans Settings
+
+### Contexte
+Suite de la session 2026-06-14. Deux problèmes découverts lors du premier test visuel de l'app sur le Jetson :
+1. **Mise en page** : la section « Export Report » (bas du dock Inspection) avait des boutons chevauchants/tronqués — le panel était trop haut pour le dock sans ascenseur.
+2. **Camera dans Settings** : `SettingsDialog → Camera → Device` affichait « No camera detected » même quand la caméra était bien détectée dans le reste de l'app.
+
+### Cause de la mise en page
+`InspectionPanel::buildUI()` installe directement un `QVBoxLayout` sur `this`. Avec 4 groupes (Inspection/Measure/Snapshots/Export) + Progress/Labels/Buttons, le panel dépasse la hauteur du dock → Qt compresse les widgets du bas. Référence : `ControlPanel` utilise déjà le pattern `QScrollArea` + widget contenu.
+
+### Fix 1 — InspectionPanel : scroll area (`src/gui/InspectionPanel.cpp`)
+Même pattern que `ControlPanel` :
+```
+QScrollArea (this, widgetResizable, NoFrame)
+  └─ content (QWidget)
+       └─ QVBoxLayout — contient les 4 groupes
+```
+Includes ajoutés : `<QScrollArea>`, `<QFrame>`.
+
+### Fix 2 — SettingsDialog : V4L2 enumeration (`src/gui/SettingsDialog.cpp`)
+`SettingsDialog::enumerateCameras()` utilisait `QMediaDevices::videoInputs()` (aveugle sur Jetson/Docker) → même cause que l'erreur #17 dans Application.cpp. Fix : remplacé par `ibom::camera::CameraCapture::listDevices()` (V4L2 OpenCV), `QMediaDevices` conservé uniquement pour les libellés. Include `CameraCapture.h` ajouté.
+
+### Fix 3 — MainWindow : corner ownership (`src/gui/MainWindow.cpp`)
+La capture d'écran montrait que le dock **Inspection** (gauche) et le dock **Statistics** (bas) se chevauchaient dans le coin bas-gauche. Par défaut Qt attribue les deux coins du bas au `BottomDockWidgetArea` → le dock Statistics s'étend pleine largeur **sous** le dock Inspection, et quand le contenu du panel débordait (problème Fix 1) il se dessinait par-dessus. Ajout dans `createDockWidgets()` :
+```cpp
+setCorner(Qt::BottomLeftCorner,  Qt::LeftDockWidgetArea);
+setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
+```
+→ les docks gauche/droite occupent toute la hauteur, le dock bas reste dans la colonne centrale. Layout type IDE, plus de conflit de coin.
+
+### Fichiers modifiés
+- `src/gui/InspectionPanel.cpp` — QScrollArea pattern
+- `src/gui/SettingsDialog.cpp` — V4L2 enumeration + include CameraCapture.h
+- `src/gui/MainWindow.cpp` — setCorner (bottom corners → side dock areas)
+
+### ⚠️ À valider sur le Jetson
+```bash
+bash scripts/build_jetson.sh && cd build && ctest --output-on-failure
+```
+Tests manuels :
+- Dock Inspection : faire défiler jusqu'aux boutons Report HTML/PDF (scroll doit apparaître si la fenêtre est trop petite)
+- Settings → Camera : onglet ouvert → Device doit afficher « 0: /dev/video0 » au lieu de « No camera detected »
+
+### Fix 4 — nouveau script `scripts/run_dev_shell.sh`
+L'utilisateur ne savait jamais quel script lancer pour avoir un **shell dev AVEC caméra**.
+Cause : `docker/run-dev.sh` n'utilise que `compose.yml` (pas de `/dev/video*`), et
+`run_local_gui.sh` lance le binaire directement (pas de shell). Aucun ne faisait
+« shell dev + vidéo ».
+
+Nouveau `scripts/run_dev_shell.sh` : même setup que `run_local_gui.sh` (override caméra
+dynamique `/tmp/microscope-ibom.cameras.yml` + X11 + xauth) mais dépose dans `bash` au
+lieu de lancer le binaire. README Docker corrigé (tableau des 3 scripts ; l'ancien README
+prétendait à tort que `run-dev.sh` donnait accès aux caméras).
+
+### Fix 5 — Defect Log → Event Log (logs runtime visibles dans l'UI)
+L'utilisateur signalait que le « Defect Log » était toujours vide (il ne se remplissait
+que via la détection IA de défauts, non câblée sans modèle) et voulait y voir les logs
+qui posent problème + les logs de calibration, etc.
+
+- **`src/utils/QtLogSink.{h,cpp}`** (nouveau) : `LogBridge` (QObject singleton, signal
+  `messageLogged(int level, QString logger, QString message)`) + `qt_signal_sink<Mutex>`
+  (sink spdlog qui pousse chaque record vers LogBridge ; thread-safe, marshalé sur le
+  thread GUI via QueuedConnection).
+- **`src/utils/Logger.cpp`** : ajout du `qt_signal_sink_mt` (niveau **info+**) aux sinks —
+  garde les événements de cycle de vie (caméra, calibration, iBOM, AI) + tous les
+  warnings/erreurs, sans le spam debug/trace par frame.
+- **`src/gui/StatsPanel.{h,cpp}`** : « Defect Log » renommé **« Event Log »**, colonnes
+  Time | Level | Message. Nouveau slot `addLogEntry(level, logger, message)` (couleur par
+  niveau : rouge=ERR/CRIT, orange=WARN, gris=INFO). `addDefectEntry()` réécrit dessus
+  (level DEFECT, ref stockée en UserRole → clic = navigation conservée). Log borné à 500
+  lignes (drop des plus anciennes).
+- **`src/app/Application.cpp`** : connexion `LogBridge::messageLogged` → `StatsPanel::addLogEntry`
+  (QueuedConnection) dans `connectSignals()`.
+- **`CMakeLists.txt`** : ajout de `QtLogSink.{h,cpp}`.
+
+### Fix 6 — défilement tactile (écran Minix) sur le panneau gauche
+L'utilisateur (écran tactile Minix SF16T) signalait que « les ascenseurs du panneau de
+gauche ne fonctionnent pas ». Cause : ascenseurs Qt à 8px (impossibles au doigt) + pas
+de glisser-pour-défiler tactile sur `QScrollArea` par défaut.
+
+- **`src/gui/InspectionPanel.cpp`** : `QScroller::grabGesture(scroll->viewport(),
+  QScroller::LeftMouseButtonGesture)` → défilement cinétique au doigt (le tactile X11 est
+  synthétisé en souris, donc LeftMouseButtonGesture couvre tactile + souris ; les taps
+  passent quand même en clic). InspectionPanel n'a pas de slider → pas de conflit.
+- **`src/gui/MainWindow.cpp`** : ascenseurs élargis 8px → **14px** (handle radius 7px,
+  min 48px) dans les deux thèmes (dark + light) — saisissables au doigt partout.
+- **ControlPanel** (droite) : volontairement **sans** QScroller (slider d'opacité +
+  spinbox → le cinétique intercepterait le glisser). Bénéficie quand même de l'ascenseur
+  14px.
+
+### Reste à faire
+- [ ] Valider calibration `findChessboardCornersSB` (fix erreur #18 — déjà pushé, test demain)
+- [ ] Segfault à la fermeture (RemoteView teardown, non bloquant)
+- [ ] Ouvrir PR `claude/pr5-plus-fixes` → `main` quand tous les tests passent
+
+---
+
+## Session 2026-06-12 (suite 3) — Restauration session d'inspection + rapports HTML/PDF
+
+### Contexte
+GO utilisateur (« go 1 et 2 ») sur les deux items recommandés du backlog restant.
+
+### Livré
+1. **Restauration de session d'inspection (item 3.3)** :
+   - `Application::saveInspectionState()` / `loadSavedPlacedRefs()` : fichier `$IBOM_DATA_DIR/session_state.json`, objet JSON clé = **chemin iBOM** → `{placed: [...], saved_at: ISO}`. Set vide = entrée supprimée. Lecture tolérante (JSON corrompu → repart de zéro).
+   - Sauvegarde à **chaque clic « Placed »** (fichier minuscule, robuste aux coupures) et au **Reset** (qui efface l'entrée).
+   - Reprise à deux niveaux : au **chargement de l'iBOM** (overlay + BomPanel montrent immédiatement les composants déjà posés) et au **Start Inspection** — nouveau `PickAndPlace::restorePlaced(unordered_set)` : marque les steps, se positionne sur le premier non-placé, émet progress/currentStep/allPlaced une seule fois. Statut « Inspection resumed: N/M already placed ».
+   - Si les refs sauvées ne matchent rien (autre carte au même chemin) → départ propre.
+2. **Rapports HTML/PDF (item 2.2)** :
+   - `Application::onExport()` : nouveaux formats `report-html` / `report-pdf` — construit les `InspectionResult` depuis les mêmes records que les exports CSV (statut placed/pending), config rapport depuis `boardInfo` (titre + révision), snapshot caméra via `CameraView::captureView()`, puis `ReportGenerator::generateHTML/generatePDF` (libharu, guard `__has_include`).
+   - `InspectionPanel` : 2 boutons « Report HTML » / « Report PDF » (ligne 3 de la grille d'export).
+   - `MainWindow::onExportReport` (action **File → Export Report**, Ctrl+E) génère maintenant le **vrai rapport** HTML au lieu d'un simple CSV.
+
+### Fichiers modifiés
+`src/app/{Application.h,Application.cpp}`, `src/features/{PickAndPlace.h,PickAndPlace.cpp}`, `src/gui/{InspectionPanel.h,InspectionPanel.cpp,MainWindow.cpp}`, `docs/IDEES_AMELIORATIONS.md`, `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici)
+```bash
+bash scripts/build_jetson.sh && cd build && ctest --output-on-failure
+```
+Tests manuels : inspecter quelques composants → fermer l'app → relancer (auto-reload iBOM) → Start Inspection doit reprendre au bon endroit ; bouton Report HTML doit produire un rapport ouvrable ; Report PDF dépend de libharu (présent dans l'image base).
+
+### Prochaine étape
+1. Build + ctest Jetson (toute la série de commits du jour)
+2. Backlog restant : BarcodeScanner + assoc iBOM (2.3), fin onglet Features (dropdown modèle, dark mode), cheat-sheet raccourcis, InferenceWorker async (dès modèle v1)
+
+---
+
+## Session 2026-06-12 (suite 2) — Items 4-6 : focus assist, fichiers récents, RemoteView
+
+### Contexte
+Suite du GO utilisateur (« oui continue ») → items 🟠 4-6 de la priorisation d'[IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md), plus l'essentiel de l'item 7 (onglet Features).
+
+### Livré
+1. **Focus assist (item 3.1)** :
+   - `StatsPanel::setSharpness(double, bool)` + ligne « Focus: » dans la grille Performance (vert = au-dessus du seuil `dataset.min_sharpness`, orange sinon ; tooltip mode d'emploi).
+   - `Application` : calcul dans le handler `frameReady`, **throttlé 300 ms**, variance Laplacien via `ImageUtils::computeSharpness` sur downscale 0.25× (même échelle que le gate du DatasetCreator → la valeur affichée est directement comparable au seuil 100).
+2. **Fichiers récents + auto-reload (item 3.2)** :
+   - `Config` : `recentIbomFiles()` (max 5, dédup, plus récent en tête), `addRecentIbomFile()`, `autoReloadIbom` (défaut **true**) — clés JSON `ibom_recent` / `ibom_auto_reload`.
+   - `MainWindow` : sous-menu **File → Open Recent** (chemins complets — les iBOM s'appellent souvent tous `ibom.html`), désactivé si vide.
+   - `Application` : `refreshRecentFilesMenu()` ; succès de `loadIBomFile` → push dans la config + refresh ; au démarrage → auto-reload du dernier iBOM si le fichier existe.
+3. **RemoteView câblé (item 2.1)** :
+   - Préalable viewer : le serveur ne parle que WebSocket (pas HTTP) et le HTML généré utilisait `location.host` (inutilisable en `file://`). Fix dans `RemoteView` : hôte/port lus depuis l'URL (`remote_view.html?host=<ip>&port=<p>`), fallback port injecté via placeholder `__WS_PORT__` ; `generateHTMLViewer()` passé en public.
+   - `Application::applyRemoteViewConfig()` : start/stop/restart selon `features.remote_view`(+port), écrit le viewer dans `$IBOM_DATA_DIR/remote_view.html`, log le mode d'emploi. Appelé à l'init **et** sur `settingsChanged`.
+   - Push des frames dans le handler `frameReady` **seulement si des clients sont connectés** (throttle 15 fps côté RemoteView). ⚠ La frame envoyée = image caméra sans overlay (overlay composé séparément dans CameraView) — composition remote = amélioration future.
+   - Au passage : la copie `qimg.copy()` est maintenant partagée (COW) entre CameraView et RemoteView — pas de 2ᵉ copie.
+4. **Onglet Settings → Features (item 3.4 partiel)** : case remote view + port (1024-65535) + case « Reload last iBOM at startup ». `settingsChanged` applique aussi maintenant la confiance IA au détecteur et resynchronise le spinner du ControlPanel. *Restent pour plus tard : dropdown detector model, dark mode, checkbox columns.*
+
+### Fichiers modifiés
+`src/app/{Application.h,Application.cpp,Config.h,Config.cpp}`, `src/gui/{MainWindow.h,MainWindow.cpp,StatsPanel.h,StatsPanel.cpp,SettingsDialog.h,SettingsDialog.cpp}`, `src/features/{RemoteView.h,RemoteView.cpp}`, `docs/IDEES_AMELIORATIONS.md`, `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici)
+```bash
+bash scripts/build_jetson.sh && cd build && ctest --output-on-failure
+```
+Tests manuels : ligne « Focus » réagit à la molette de mise au point ; File → Open Recent après un premier chargement ; Settings → Features → cocher remote view → ouvrir `~/ibom-data/remote_view.html?host=<ip-jetson>` depuis le PC (port 8080 accessible direct grâce à `network_mode: host`).
+
+### Prochaine étape
+1. Build + ctest Jetson
+2. Reste du backlog : restauration session d'inspection (3.3), InferenceWorker async (3.5, dès le modèle v1), bouton rapport (2.2), BarcodeScanner+assoc iBOM (2.3)
+
+---
+
+## Session 2026-06-12 (suite) — Implémentation des 3 quick wins
+
+### Contexte
+GO utilisateur (« tu peux commencer à faire les modifications ») → implémentation des priorités 🔴 1-3 de [IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md).
+
+### Livré
+1. **Statut IA visible (item 1.3)** :
+   - `MainWindow` : nouveau label permanent `m_aiLabel` dans la status bar (« AI: -- » au départ), méthode `updateAiStatus(bool ready, QString)` — vert (`placedCSS`) quand prêt, orange (`defectCSS`) sinon, tooltip = message complet.
+   - `Application::connectSignals()` : `aiStatusChanged` → `MainWindow::updateAiStatus` (connexion **avant** `initializeAI()`, donc le premier « Loading AI model… » est capté ; les émissions du thread d'init arrivent en queued automatiquement).
+   - `initializeAI()` : les retours anticipés émettent maintenant aussi le statut (« AI: disabled », « AI: no model ») au lieu de laisser le label muet.
+2. **Garde-fou décompression LZString (item 1.1)** — `IBomParser.cpp` :
+   - Nuance vs l'analyse : la boucle `while(true)` a déjà une sortie (`data.index > length`), le vrai risque est l'**expansion quadratique** (zip-bomb LZ78) sur données corrompues → OOM avant la fin du flux.
+   - Fix : borne `maxOutputChars = 1000 × taille_entrée + 1 MiB` vérifiée après chaque `result += entry` → `spdlog::error` + `nullopt`.
+   - `decompressLZString` passé en **public** dans `IBomParser.h` pour test direct.
+   - `tests/test_ibom_parser.cpp` : nouveau TEST_CASE (entrée vide, 50 000 chars de base64 pseudo-aléatoire déterministe → doit terminer, caractères non-base64 → pas de crash). Borne du test ×3 (sortie UTF-8 vs garde UTF-16).
+3. **Slider de confiance câblé (item 1.2)** :
+   - `Application::connectSignals()` : `ControlPanel::confidenceChanged` → `m_config->setDetectionConfidence()` + `setConfidenceThreshold()` sur le détecteur s'il est prêt (`componentDetector()` null-safe).
+   - `ControlPanel::setConfidenceThreshold(float)` (nouveau, avec `QSignalBlocker`) ; appelé dans `Application::initialize()` pour refléter la valeur persistée au démarrage (spinner borné 0.1–1.0).
+4. **Bonus découvert en route** : `Config::save()` n'était appelé **que** par le SettingsDialog — tous les réglages faits via le ControlPanel (opacité, caméra, confiance…) étaient perdus à la fermeture. Fix : `m_config->save()` en tête de `~Application()`.
+
+### Fichiers modifiés
+`src/gui/MainWindow.{h,cpp}`, `src/gui/ControlPanel.{h,cpp}`, `src/app/Application.cpp`, `src/ibom/IBomParser.{h,cpp}`, `tests/test_ibom_parser.cpp`, `docs/IDEES_AMELIORATIONS.md` (statut), `docs/JETSON_SESSION_LOG.md`.
+
+### ⚠️ À valider sur le Jetson (rien compilé ici — pas de toolchain)
+```bash
+bash scripts/build_jetson.sh
+cd build && ctest --output-on-failure
+```
+Vérifier au lancement : label « AI: no model » (orange) dans la status bar tant que `models/` est vide.
+
+### Note infra (session)
+Le push git direct via le proxy de session renvoie 403 (token lecture seule) — contourné avec un PAT fourni par l'utilisateur. **Le PAT a transité en clair dans la conversation : à révoquer après la session** (Settings GitHub → Developer settings → Tokens).
+
+### Prochaine étape
+1. Build + ctest sur le Jetson (8 suites attendues : les 7 existantes + le test LZString étendu dans test_ibom_parser)
+2. Puis items 🟠 4-7 du backlog (focus assist, fichiers récents, RemoteView, onglet Settings « Features ») selon priorité utilisateur
+
+---
+
+## Session 2026-06-12 — Analyse améliorations & nouvelles features (IDEES_AMELIORATIONS.md)
+
+### Contexte
+Demande utilisateur : « trouve des améliorations et des nouvelles features que je pourrais ajouter, fais-moi un journal ». Session d'**analyse pure** (environnement sans toolchain — rien compilé, rien modifié dans le code).
+
+### Méthode
+Exploration complète de `src/`, `tools/`, `tests/`, `Config.h` vs `SettingsDialog`, modules instanciés vs dormants dans `Application.cpp` — en excluant tout ce qui est déjà planifié (Phases B/C/D dataset, Phase 2d/2.5/3, audit [JETSON_AMELIORATIONS.md](JETSON_AMELIORATIONS.md), roadmap [PROCHAINE_SESSION.md](PROCHAINE_SESSION.md)).
+
+### Livré
+- **Créé : [docs/IDEES_AMELIORATIONS.md](IDEES_AMELIORATIONS.md)** — propositions priorisées en 4 catégories :
+  1. **Quick wins/risques** : `while(true)` sans garde dans la décompression LZ-String (`IBomParser.cpp:389` — freeze/OOM possible sur HTML corrompu), slider de confiance `ControlPanel` jamais connecté au détecteur, signal `aiStatusChanged` jamais affiché en GUI, micro-perfs (`qimg.copy()` par frame, `SetIntraOpNumThreads(4)` hardcodé).
+  2. **Features dormantes** (code ~complet, jamais instancié) : RemoteView (WebSocket MJPEG — idéal atelier Jetson), ReportGenerator, BarcodeScanner (+ idée combo : association code-barres → iBOM auto-chargé), StencilAlign, OCR/SolderInspector (attendent des modèles), VoiceControl (squelette).
+  3. **Nouvelles features** : focus assist (netteté Laplacien live — métrique déjà calculée par DatasetCreator), fichiers récents + auto-reload iBOM, restauration de session d'inspection (`m_placedRefs` perdus au restart), onglet Settings pour les 6 clés config sans UI, **InferenceWorker async** (prérequis du point F roadmap — `detect()` n'est invoqué nulle part et bloquerait le thread GUI), cheat-sheet raccourcis, i18n FR.
+  4. **Hygiène** : test round-trip `Config` manquant, code mort `estimateOrientation()`, TODO arcs silkscreen (`OverlayRenderer.cpp:206`), `TODO.md` racine obsolète (2026-03-20, ère Windows).
+- Recommandation : faire les 3 quick wins (~1 h 30) **avant** la première session de capture dataset ; la priorité produit reste calibration → capture → entraînement v1.
+
+### Fichiers
+- **Créé** : `docs/IDEES_AMELIORATIONS.md`
+- **Modifié** : `docs/JETSON_SESSION_LOG.md` (cette entrée + bloc État actuel)
+
+### Prochaine étape
+1. Décision utilisateur sur la priorisation (§5 du doc) — quels items implémenter en premier
+2. Inchangé côté produit : calibration caméra + première capture dataset ([PROCHAINE_SESSION.md](PROCHAINE_SESSION.md))
+
+---
+
+## Session 2026-06-14 — Test PR #5 sur Jetson : fix link libharu
+
+### Contexte
+L'utilisateur teste la PR #5 (`l0l0l0/Assistant:claude/focused-fermi-if21mm`, 9 items de
+`IDEES_AMELIORATIONS.md`) sur le Jetson, dans le container dev, depuis un autre compte
+GitHub. Marche à suivre établie : fork ajouté comme remote `pr5`, fetch + checkout de la
+branche dans le container (réseau GitHub OK seulement depuis le container, pas l'hôte
+Jetson), puis `bash scripts/build_jetson.sh`.
+
+### Problème rencontré
+Build KO au link : `undefined reference to HPDF_*` (cf [JETSON_ERREURS.md](JETSON_ERREURS.md)
+entrée #16). `ReportGenerator.cpp` compile le code PDF via `__has_include(<hpdf.h>)` (header
+présent) mais le CMake ne linke jamais `libhpdf.so` (aucun `find_package` n'aboutit avec
+le paquet apt `libhpdf-dev` qui ne fournit pas de config CMake).
+
+### Livré
+- **`CMakeLists.txt`** : fallback `find_library(HPDF_LIBRARY NAMES hpdf)` + branche de link
+  `elseif(HPDF_LIBRARY)`. Aligne CMake sur le critère `__has_include` du `.cpp`.
+- Entrée #16 dans `JETSON_ERREURS.md` (🟡 CONTOURNÉ — validation build Jetson en attente).
+
+### Validé sur Jetson (2026-06-14)
+- ✅ Rebuild OK après le fix CMake — binaire `build/bin/MicroscopeIBOM` (1,4 MB)
+- ✅ `ctest --output-on-failure` : **7/7 tests passent** (0,45 s)
+- Erreur #16 passée ✅ RÉSOLU.
+- ⚠️ Piège rencontré : copier-coller multi-lignes dans le shell du container pollue le
+  buffer d'entrée (commandes avalées, sortie absente, syntax errors fantômes). Solution :
+  ressortir/rentrer dans le container et taper les commandes **une par une**.
+
+### Suite — caméra non détectée (erreur #17)
+Après build OK, lancement de l'app : caméra HAYEAR MOS-4K Pro branchée, `/dev/video0` mappé
+dans le container, OpenCV l'ouvre (test Python `True True`), `v4l2-ctl` liste MJPG
+1920×1080@30 — **mais** l'app logue `Found 0 camera(s)` et l'UI ne montre rien.
+
+**Cause** : `Application.cpp` énumérait via `QMediaDevices::videoInputs()` (Qt Multimedia,
+aveugle aux `/dev/video*` sur Jetson/Docker) alors que la capture ouvre par index en
+OpenCV/V4L2. `CameraCapture::listDevices()` (OpenCV) existait mais n'était pas utilisée.
+
+**Fix appliqué** : énumération via `camera::CameraCapture::listDevices()`, QMediaDevices
+réduit à un simple fournisseur de libellé. Cf [JETSON_ERREURS.md](JETSON_ERREURS.md) #17.
+
+Piège de chemin de log noté au passage : le log courant est `logs/pcb_inspector.log`
+**relatif au CWD de lancement** (pas `build/bin/logs/`). Lancé depuis `/opt/microscope-ibom`
+→ `/opt/microscope-ibom/logs/pcb_inspector.log`.
+
+### ✅ Validé sur Jetson (2026-06-14)
+- `Found 1 camera(s) (V4L2 enumeration)` — caméra HAYEAR MOS-4K Pro détectée
+- `Camera opened: 1920x1080 @ 30 fps, FOURCC=MJPG` — flux affiché à l'écran ✅
+- Erreur #17 → ✅ RÉSOLU
+
+### Reste à faire
+- [ ] **SettingsDialog** : la caméra n'apparaît pas dans l'onglet Settings (QMediaDevices
+      encore utilisé là). Cosmétique — même fix que Application.cpp à appliquer dans SettingsDialog.cpp.
+- [ ] **Calibration** : `No checkerboard patterns detected` — pas un bug code, le patron
+      doit être imprimé et présenté correctement à la caméra (Menu Aide → patron).
+- [ ] **Segfault à la fermeture** : `exiting with code 0` puis `Segmentation fault` — teardown
+      Qt (probablement RemoteView). Non bloquant.
+- [ ] Ouvrir PR `claude/pr5-plus-fixes` → `main` (branche déjà prête).
 
 ---
 

@@ -85,6 +85,13 @@ if(NOT unofficial-libharu_FOUND)
     find_package(libharu CONFIG QUIET)
     if(NOT libharu_FOUND)
         find_package(HPDF QUIET)
+        # Fallback: plain find_library (Jetson apt libhpdf-dev ships no CMake
+        # config nor a HPDF module, only the .so + <hpdf.h>). Matches the
+        # __has_include(<hpdf.h>) check in ReportGenerator.cpp so the symbols
+        # actually get linked.
+        if(NOT HPDF_FOUND)
+            find_library(HPDF_LIBRARY NAMES hpdf)
+        endif()
     endif()
 endif()
 
@@ -157,6 +164,7 @@ set(SOURCES
 
     # Utils
     src/utils/Logger.cpp
+    src/utils/QtLogSink.cpp
     src/utils/GpuUtils.cpp
     src/utils/ImageUtils.cpp
     src/utils/Paths.cpp
@@ -220,6 +228,7 @@ set(HEADERS
 
     # Utils
     src/utils/Logger.h
+    src/utils/QtLogSink.h
     src/utils/GpuUtils.h
     src/utils/ImageUtils.h
     src/utils/Paths.h
@@ -283,6 +292,9 @@ if(unofficial-libharu_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE IBOM_HAS_LIBHARU)
 elseif(libharu_FOUND OR HPDF_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE hpdf)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE IBOM_HAS_LIBHARU)
+elseif(HPDF_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${HPDF_LIBRARY})
     target_compile_definitions(${PROJECT_NAME} PRIVATE IBOM_HAS_LIBHARU)
 endif()
 

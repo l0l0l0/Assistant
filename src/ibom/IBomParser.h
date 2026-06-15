@@ -38,14 +38,16 @@ public:
     /// Get the last error message.
     const std::string& lastError() const { return m_lastError; }
 
+    /// Decompress LZString (base64 variant) data, as embedded by iBOM.
+    /// Bounded against corrupted/malicious input (returns nullopt past
+    /// a generous output-size limit). Public for direct unit testing.
+    std::optional<std::string> decompressLZString(const std::string& encoded);
+
 private:
     /// Extract a JavaScript variable assignment as JSON from HTML.
     /// Looks for: var <varName> = <JSON>;
     std::optional<nlohmann::json> extractJsVar(const std::string& html,
                                                 const std::string& varName);
-
-    /// Extract LZString compressed data if present.
-    std::optional<std::string> decompressLZString(const std::string& encoded);
 
     /// Parse the config block.
     void parseConfig(const nlohmann::json& config, IBomProject& project);

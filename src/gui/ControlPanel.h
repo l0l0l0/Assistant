@@ -33,6 +33,7 @@ public:
     int    cameraFps()         const;
 
     void setCameraDevices(const QStringList& devices);
+    void setConfidenceThreshold(float conf);
 
 signals:
     void overlayOpacityChanged(float opacity);

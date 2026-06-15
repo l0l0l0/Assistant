@@ -40,6 +40,10 @@ public:
     /// Set max FPS for streaming (throttle)
     void setMaxFps(int fps);
 
+    /// Self-contained HTML viewer page (connects back over WebSocket).
+    /// Written to disk by the application so it can be opened in a browser.
+    QString generateHTMLViewer() const;
+
 signals:
     void clientConnected(const QString& address);
     void clientDisconnected(const QString& address);
@@ -55,7 +59,6 @@ private slots:
 private:
     void broadcastFrame();
     QByteArray compressFrame(const QImage& frame) const;
-    QString generateHTMLViewer() const;
 
     std::unique_ptr<QWebSocketServer> m_server;
     std::vector<QWebSocket*>          m_clients;

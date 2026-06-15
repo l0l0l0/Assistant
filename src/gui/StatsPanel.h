@@ -5,6 +5,8 @@
 #include <QProgressBar>
 #include <QTableWidget>
 #include <QGridLayout>
+#include <QColor>
+#include <QString>
 #include <map>
 #include <string>
 
@@ -26,7 +28,16 @@ public:
     void setInferenceTime(double ms);
     void setGpuMemory(size_t usedMB, size_t totalMB);
     void setScale(double pixelsPerMm);
+    /// Live focus assist: Laplacian variance of the current frame.
+    /// `good` = above the sharpness threshold (same metric/scale as the
+    /// dataset capture gate) — turn the focus ring until the value peaks.
+    void setSharpness(double variance, bool good);
     void addDefectEntry(const std::string& reference, const std::string& type);
+
+public slots:
+    /// Append a runtime log line to the Event Log.
+    /// `level` is the spdlog::level::level_enum value as int.
+    void addLogEntry(int level, const QString& logger, const QString& message);
 
 signals:
     void defectClicked(const std::string& reference);
@@ -35,6 +46,11 @@ private:
     void buildUI();
     void updateProgress();
     void updateSummaryLabel();
+    void appendEventRow(const QString& level, const QString& message,
+                        const QColor& color, const QString& defectRef = {});
+
+    // Keep the Event Log bounded to avoid unbounded memory growth.
+    static constexpr int kMaxEventRows = 500;
 
     // Summary
     QLabel*       m_summaryLabel    = nullptr;
@@ -51,8 +67,9 @@ private:
     QLabel* m_inferenceLabel    = nullptr;
     QLabel* m_gpuMemLabel       = nullptr;
     QLabel* m_scaleLabel        = nullptr;
+    QLabel* m_focusLabel        = nullptr;
 
-    // Defect log
+    // Event log (runtime logs + defects)
     QTableWidget* m_defectTable = nullptr;
 
     int m_total   = 0;

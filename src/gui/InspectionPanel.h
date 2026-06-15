@@ -53,6 +53,8 @@ signals:
 private:
     void buildUI();
 
+    QWidget* m_content = nullptr;  // inner content widget; only this gets disabled
+
     // Inspection section
     QLabel*       m_currentRefLabel    = nullptr;
     QLabel*       m_currentValueLabel  = nullptr;
@@ -81,6 +83,8 @@ private:
     QPushButton*  m_btnExportJSON      = nullptr;
     QPushButton*  m_btnExportPlacement = nullptr;
     QPushButton*  m_btnExportBOM       = nullptr;
+    QPushButton*  m_btnReportHTML      = nullptr;
+    QPushButton*  m_btnReportPDF       = nullptr;
 
     int m_snapshotTotal = 0;
 };
