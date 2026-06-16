@@ -2,6 +2,7 @@
 #include "Config.h"
 #include "gui/MainWindow.h"
 #include "gui/CameraView.h"
+#include "gui/PointCloudView.h"
 #include "gui/ControlPanel.h"
 #include "gui/StatsPanel.h"
 #include "gui/BomPanel.h"
@@ -55,6 +56,7 @@
 #include <QFile>
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <cmath>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -104,6 +106,7 @@ bool Application::initialize()
     // DepthFrameRef is the same C++ type as FrameRef; register the alias name so
     // RealSenseCapture::depthFrameReady can be queued across threads.
     qRegisterMetaType<ibom::camera::FrameRef>("ibom::camera::DepthFrameRef");
+    qRegisterMetaType<ibom::camera::PointCloudRef>("ibom::camera::PointCloudRef");
     qRegisterMetaType<ibom::features::DatasetStatus>("ibom::features::DatasetStatus");
     qRegisterMetaType<std::shared_ptr<const IBomProject>>(
         "std::shared_ptr<const ibom::IBomProject>");
@@ -607,6 +610,65 @@ void Application::openRealSenseControls()
 #endif
 }
 
+void Application::updateCalibrationUI()
+{
+    if (!m_mainWindow) return;
+    const bool isRS = (m_activeBackend == CameraBackend::RealSense);
+
+    // Update calibration button in the control panel.
+    if (auto* cp = m_mainWindow->controlPanel())
+        cp->setCameraBackendUI(isRS);
+
+    // Depth view + 3D point cloud are only available with RealSense (depth).
+    m_mainWindow->setDepthViewAvailable(isRS);
+    m_mainWindow->setPointCloudAvailable(isRS);
+    if (!isRS) { m_depthViewMode = false; m_pointCloudMode = false; }
+
+    // Update calibration info in the stats panel.
+    if (auto* sp = m_mainWindow->statsPanel()) {
+#ifdef IBOM_HAVE_REALSENSE
+        if (isRS) {
+            auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get());
+            const double fx = rs ? rs->colorFx() : 0.0;
+            QString tip;
+            if (rs && fx > 0.0) {
+                const double fy  = rs->colorFy();
+                const double ppx = rs->colorPpx();
+                const double ppy = rs->colorPpy();
+                const auto   res = m_camera->resolution();
+                const int    w   = res.width();
+                const int    h   = res.height();
+                // Field of view from the pinhole model: FOV = 2·atan(size / 2f).
+                const double rad2deg = 180.0 / 3.14159265358979323846;
+                const double hfov = (w > 0 && fx > 0) ? 2.0 * std::atan(w / (2.0 * fx)) * rad2deg : 0.0;
+                const double vfov = (h > 0 && fy > 0) ? 2.0 * std::atan(h / (2.0 * fy)) * rad2deg : 0.0;
+                tip = tr(
+                    "Intel RealSense — factory intrinsics (no calibration needed).\n"
+                    "Resolution: %1×%2\n"
+                    "Focal length: fx=%3 px, fy=%4 px\n"
+                    "Principal point: (%5, %6) px\n"
+                    "Field of view: %7° H × %8° V\n\n"
+                    "fx scales with width; cross-check on the Jetson with "
+                    "`rs-enumerate-devices -c`.")
+                    .arg(w).arg(h)
+                    .arg(fx, 0, 'f', 1).arg(fy, 0, 'f', 1)
+                    .arg(ppx, 0, 'f', 1).arg(ppy, 0, 'f', 1)
+                    .arg(hfov, 0, 'f', 1).arg(vfov, 0, 'f', 1);
+            }
+            sp->setCalibration(fx, 0.0, true, tip);
+            return;
+        }
+#endif
+        // V4L2 / USB microscope
+        if (m_calibration && m_calibration->isCalibrated()) {
+            sp->setCalibration(m_calibration->rmsError(),
+                               m_calibration->pixelsPerMm(), false);
+        } else {
+            sp->setCalibration(0.0, 0.0, false);
+        }
+    }
+}
+
 void Application::connectSignals()
 {
     connect(this, &Application::shutdownRequested, &m_qapp, &QApplication::quit);
@@ -697,8 +759,14 @@ void Application::wireCameraSignals()
 
     // ── Camera frame → CameraView + Overlay ─────────────────────
     // Slot receives a shared_ptr<const cv::Mat> — no pixel clone across threads.
+    // Pin the backend per-connection: m_activeBackend is already set for the new
+    // camera here, and capturing it by value prevents a hot-swap race where
+    // queued frames from the old camera would be (un)distorted using the new
+    // backend's rule (e.g. double-correcting the last RealSense frames after a
+    // switch to V4L2). The connection itself dies with the old camera object.
+    const CameraBackend backend = m_activeBackend;
     connect(m_camera.get(), &camera::ICameraSource::frameReady, this,
-            [this](ibom::camera::FrameRef frameRef) {
+            [this, backend](ibom::camera::FrameRef frameRef) {
         if (!frameRef || frameRef->empty()) return;
         const cv::Mat& frame = *frameRef;
 
@@ -731,8 +799,10 @@ void Application::wireCameraSignals()
         }
 
         // Apply undistortion if calibrated (allocates a new Mat; unavoidable).
+        // Skip for RealSense: librealsense already applies factory calibration.
         cv::Mat processed;
-        if (m_calibration && m_calibration->isCalibrated()) {
+        if (m_calibration && m_calibration->isCalibrated()
+            && backend != CameraBackend::RealSense) {
             processed = m_calibration->undistort(frame);
         } else {
             processed = frame;  // header share, no pixel copy
@@ -753,7 +823,16 @@ void Application::wireCameraSignals()
         // scope. The copy is shared (COW) between the camera view and the
         // remote stream.
         const QImage display = qimg.copy();
-        m_mainWindow->cameraView()->updateFrame(display);
+        // In depth-view mode the colorized depth map drives the view instead.
+        // In IR mode the infraredReady handler drives it. Keep overlay/remote
+        // paths fed with the color image regardless.
+        bool irActive = false;
+#ifdef IBOM_HAVE_REALSENSE
+        if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get()))
+            irActive = rs->emitInfrared();
+#endif
+        if (!m_depthViewMode && !irActive)
+            m_mainWindow->cameraView()->updateFrame(display);
 
         // Mirror to remote browser clients (RemoteView throttles internally).
         if (m_remoteView && m_remoteView->isRunning() && m_remoteView->clientCount() > 0)
@@ -948,14 +1027,23 @@ void Application::wireCameraSignals()
         connect(rs, &camera::RealSenseCapture::depthFrameReady, this,
                 [this, rs](ibom::camera::DepthFrameRef depth) {
             if (!depth || depth->empty() || depth->type() != CV_16UC1) return;
+            // Note: the depth-view image is produced by rs2::colorizer on the
+            // capture thread (colorizedDepthReady), not here — better histogram
+            // equalization than a fixed-range colormap.
 
             // Throttle to ~3 Hz — distance/scale change slowly on a fixed rig.
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             if (nowMs - m_lastDepthMs < 300) return;
             m_lastDepthMs = nowMs;
 
-            // Median depth over a central ROI (20%), ignoring 0 = invalid.
+            // Depth fill rate over the whole frame (valid = non-zero).
             const cv::Mat& d = *depth;
+            if (auto* sp = m_mainWindow->statsPanel()) {
+                const double area = static_cast<double>(d.rows) * d.cols;
+                sp->setFillRate(area > 0 ? cv::countNonZero(d) / area : -1.0);
+            }
+
+            // Median depth over a central ROI (20%), ignoring 0 = invalid.
             const int rw = std::max(1, d.cols / 5), rh = std::max(1, d.rows / 5);
             const cv::Rect roi((d.cols - rw) / 2, (d.rows - rh) / 2, rw, rh);
             std::vector<uint16_t> vals;
@@ -987,8 +1075,50 @@ void Application::wireCameraSignals()
                 }
             }
         }, Qt::QueuedConnection);
+
+        // 3D point cloud built on the capture thread (rs2::pointcloud) → view.
+        connect(rs, &camera::RealSenseCapture::pointCloudReady, this,
+                [this](ibom::camera::PointCloudRef cloud) {
+            if (auto* pcv = m_mainWindow->pointCloudView())
+                pcv->setCloud(cloud);
+        }, Qt::QueuedConnection);
+
+        // Histogram-equalized colorized depth (rs2::colorizer) → camera view
+        // when the 2D depth view mode is active and IR view is not overriding.
+        connect(rs, &camera::RealSenseCapture::colorizedDepthReady, this,
+                [this, rs](ibom::camera::FrameRef rgb) {
+            if (!m_depthViewMode || rs->emitInfrared() || !rgb || rgb->empty()) return;
+            cv::Mat disp;
+            cv::cvtColor(*rgb, disp, cv::COLOR_BGR2RGB);
+            QImage qimg(disp.data, disp.cols, disp.rows,
+                        static_cast<int>(disp.step), QImage::Format_RGB888);
+            if (auto* view = m_mainWindow->cameraView())
+                view->updateFrame(qimg.copy());
+        }, Qt::QueuedConnection);
+
+        // Left IR camera (grayscale-as-BGR) → camera view when IR mode active.
+        // IR view overrides both color and colorized depth — useful for
+        // reflective surfaces (solder, bare metal) per Intel tuning guide.
+        connect(rs, &camera::RealSenseCapture::infraredReady, this,
+                [this](ibom::camera::FrameRef ir) {
+            if (!ir || ir->empty()) return;
+            cv::Mat disp;
+            cv::cvtColor(*ir, disp, cv::COLOR_BGR2RGB);
+            QImage qimg(disp.data, disp.cols, disp.rows,
+                        static_cast<int>(disp.step), QImage::Format_RGB888);
+            if (auto* view = m_mainWindow->cameraView())
+                view->updateFrame(qimg.copy());
+        }, Qt::QueuedConnection);
+
+        // Only pay these costs while the respective views are shown.
+        rs->setEmitPointCloud(m_pointCloudMode);
+        rs->setEmitColorizedDepth(m_depthViewMode);
+        rs->setEmitInfrared(false);  // off by default; toggled in RealSenseControlsDialog
     }
 #endif
+
+    // Sync calibration UI for the new (or initial) backend.
+    updateCalibrationUI();
 }
 
 void Application::connectControlSignals()
@@ -1199,6 +1329,30 @@ void Application::connectControlSignals()
             m_mainWindow->showNormal();
     });
 
+    // ── Depth view toggle (RealSense) ───────────────────────────
+    connect(m_mainWindow.get(), &gui::MainWindow::depthViewToggled,
+            this, [this](bool depth) {
+        m_depthViewMode = depth;
+        spdlog::info("View mode: {}", depth ? "colorized depth" : "color");
+#ifdef IBOM_HAVE_REALSENSE
+        if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get()))
+            rs->setEmitColorizedDepth(depth);
+#endif
+    });
+
+    // ── 3D point cloud toggle (RealSense) ───────────────────────
+    connect(m_mainWindow.get(), &gui::MainWindow::pointCloudToggled,
+            this, [this](bool on) {
+        m_pointCloudMode = on;
+        spdlog::info("3D point cloud view: {}", on ? "on" : "off");
+#ifdef IBOM_HAVE_REALSENSE
+        if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get()))
+            rs->setEmitPointCloud(on);
+#endif
+        if (!on && m_mainWindow->pointCloudView())
+            m_mainWindow->pointCloudView()->clear();
+    });
+
     // ── Settings changed ────────────────────────────────────────
     connect(m_mainWindow.get(), &gui::MainWindow::settingsChanged,
             this, [this]() {
@@ -1213,10 +1367,16 @@ void Application::connectControlSignals()
         // Check if camera index changed and restart if needed
         int newIdx = m_config->cameraIndex();
         bool wasCapturing = m_camera->isCapturing();
+        // Don't push the V4L2-oriented 1920x1080 default onto the D405 — it
+        // doesn't support it and would log a spurious "unsupported, retrying"
+        // fallback. Same guard as createCamera(); RealSense keeps its own res.
+        const bool genericRes = (m_config->cameraWidth() == 1920 && m_config->cameraHeight() == 1080);
+        const bool skipRes = (m_activeBackend == CameraBackend::RealSense && genericRes);
         if (wasCapturing) {
             m_camera->stop();
             m_camera->setDeviceIndex(newIdx);
-            m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
+            if (!skipRes)
+                m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
             m_camera->setFps(m_config->cameraFps());
             m_camera->setHardwareDecode(m_config->cameraHwDecode());
             m_camera->start();
@@ -1225,7 +1385,8 @@ void Application::connectControlSignals()
                          m_config->cameraFps());
         } else {
             m_camera->setDeviceIndex(newIdx);
-            m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
+            if (!skipRes)
+                m_camera->setResolution(m_config->cameraWidth(), m_config->cameraHeight());
             m_camera->setFps(m_config->cameraFps());
         }
         // Push updated tracking parameters to the worker — it will recreate
@@ -2003,6 +2164,8 @@ void Application::runCalibration()
     m_mainWindow->updateStatusMessage(
         tr("Calibration done — error: %1, pixels/mm: %2")
         .arg(error, 0, 'f', 4).arg(m_calibration->pixelsPerMm(), 0, 'f', 1));
+
+    updateCalibrationUI();
 }
 
 // ── Dynamic Scale ──────────────────────────────────────────────────

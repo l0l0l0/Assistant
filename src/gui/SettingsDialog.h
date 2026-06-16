@@ -25,7 +25,10 @@ signals:
     /// MainWindow closes Settings and routes this to Application (live camera).
     void realSenseControlsRequested();
 
-private slots:
+public slots:
+    // QDialog::accept() is a public slot; the override stays public so callers
+    // (MainWindow closing Settings before opening the RealSense panel) can
+    // invoke it.
     void accept() override;
 
 private:
@@ -49,6 +52,13 @@ private:
     QSpinBox*     m_cameraHeight   = nullptr;
     QSpinBox*     m_cameraFps      = nullptr;
     QCheckBox*    m_cameraHwDecode = nullptr;
+
+    // Resolution selector — V4L2 uses free spinboxes, RealSense uses profiles
+    QWidget*      m_v4l2ResWidget  = nullptr;  // container W/H/FPS (V4L2 only)
+    QWidget*      m_rsResWidget    = nullptr;  // container profile combo (RS only)
+    QComboBox*    m_rsResCombo     = nullptr;
+
+    void updateCameraResolutionUI();
 
     // Calibration
     QSpinBox*       m_calibBoardCols  = nullptr;

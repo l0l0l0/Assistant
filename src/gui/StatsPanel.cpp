@@ -109,6 +109,19 @@ void StatsPanel::buildUI()
                                    "to the board. Drives automatic px/mm scale."));
     perfGrid->addWidget(m_distanceLabel, 5, 1);
 
+    perfGrid->addWidget(new QLabel(tr("Depth fill:")),     6, 0);
+    m_fillRateLabel = new QLabel("—");
+    m_fillRateLabel->setToolTip(tr("Fraction of valid (non-zero) depth pixels. "
+                                   "Low = many holes (smooth/shiny surfaces, too "
+                                   "close/far). RealSense only."));
+    perfGrid->addWidget(m_fillRateLabel, 6, 1);
+
+    perfGrid->addWidget(new QLabel(tr("Calibration:")),    7, 0);
+    m_calibLabel = new QLabel("—");
+    m_calibLabel->setToolTip(tr("USB microscope: OpenCV checkerboard RMS + px/mm.\n"
+                                "RealSense: factory intrinsics (focal length)."));
+    perfGrid->addWidget(m_calibLabel, 7, 1);
+
     perfLayout->addLayout(perfGrid);
     perfLayout->addStretch();
     mainLayout->addWidget(perfGroup);
@@ -252,10 +265,45 @@ void StatsPanel::setDistance(double mm)
         m_distanceLabel->setText("—");
 }
 
+void StatsPanel::setFillRate(double fraction)
+{
+    if (fraction < 0) { m_fillRateLabel->setText("—"); m_fillRateLabel->setStyleSheet({}); return; }
+    const int pct = static_cast<int>(fraction * 100.0 + 0.5);
+    m_fillRateLabel->setText(QString("%1 %").arg(pct));
+    // Green ≥ 80%, orange 50–80%, red < 50% — rough guide for depth coverage.
+    m_fillRateLabel->setStyleSheet(
+        fraction >= 0.80 ? theme::placedCSS()
+      : fraction >= 0.50 ? QString("color:#e0a000;")
+                         : theme::defectCSS());
+}
+
 void StatsPanel::setSharpness(double variance, bool good)
 {
     m_focusLabel->setText(QString::number(variance, 'f', 0));
     m_focusLabel->setStyleSheet(good ? theme::placedCSS() : theme::defectCSS());
+}
+
+void StatsPanel::setCalibration(double rmsOrFx, double ppmm, bool isFactory,
+                                const QString& tooltip)
+{
+    const QString defaultTip =
+        tr("USB microscope: OpenCV checkerboard RMS + px/mm.\n"
+           "RealSense: factory intrinsics (focal length).");
+    m_calibLabel->setToolTip(tooltip.isEmpty() ? defaultTip : tooltip);
+
+    if (isFactory) {
+        // RealSense: show factory focal length
+        m_calibLabel->setText(QString("Factory  fx=%1 px").arg(rmsOrFx, 0, 'f', 1));
+        m_calibLabel->setStyleSheet(theme::placedCSS());
+    } else if (ppmm > 0) {
+        // V4L2 calibrated
+        m_calibLabel->setText(QString("RMS %1  %2 px/mm")
+            .arg(rmsOrFx, 0, 'f', 2).arg(ppmm, 0, 'f', 2));
+        m_calibLabel->setStyleSheet(rmsOrFx < 1.0 ? theme::placedCSS() : theme::defectCSS());
+    } else {
+        m_calibLabel->setText("—");
+        m_calibLabel->setStyleSheet({});
+    }
 }
 
 void StatsPanel::addDefectEntry(const std::string& reference, const std::string& type)

@@ -18,10 +18,16 @@ CameraView::CameraView(QWidget* parent)
 
 void CameraView::updateFrame(const QImage& frame)
 {
+    bool sizeChanged = false;
     {
         std::lock_guard lock(m_frameMutex);
+        // A resolution change (e.g. RealSense profile switch) invalidates any
+        // accumulated pan — recenter so the image doesn't appear shifted.
+        sizeChanged = (frame.size() != m_frame.size());
         m_frame = frame;
     }
+    if (sizeChanged)
+        m_panOffset = {0, 0};
     updateTransform();
     update();
 }
@@ -41,6 +47,20 @@ void CameraView::setOverlayOpacity(float opacity)
 void CameraView::setCrosshairVisible(bool visible)
 {
     m_crosshairVisible = visible;
+    update();
+}
+
+void CameraView::setViewToggleVisible(bool visible)
+{
+    if (m_viewToggleVisible == visible) return;
+    m_viewToggleVisible = visible;
+    update();
+}
+
+void CameraView::setDepthViewActive(bool active)
+{
+    if (m_depthViewActive == active) return;
+    m_depthViewActive = active;
     update();
 }
 
@@ -198,6 +218,12 @@ void CameraView::paintEvent(QPaintEvent* /*event*/)
     // Zoom indicator
     if (std::abs(m_zoom - 1.0f) > 0.01f)
         drawZoomIndicator(painter);
+
+    // In-image view-mode toggle (top-right), RealSense only
+    if (m_viewToggleVisible)
+        drawViewToggle(painter);
+    else
+        m_viewToggleRect = QRectF();  // no hit target when hidden
 }
 
 void CameraView::drawCrosshair(QPainter& painter)
@@ -210,6 +236,33 @@ void CameraView::drawCrosshair(QPainter& painter)
 
     // Center circle
     painter.drawEllipse(QPoint(cx, cy), 20, 20);
+}
+
+void CameraView::drawViewToggle(QPainter& painter)
+{
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setFont(QFont("Segoe UI", 9, QFont::DemiBold));
+
+    // Label shows the mode you'll switch TO (the action of the button).
+    const QString label = m_depthViewActive ? tr("● Color") : tr("● Depth");
+
+    QFontMetrics fm(painter.font());
+    const int padX = 12, padY = 6, margin = 10;
+    const int w = fm.horizontalAdvance(label) + 2 * padX;
+    const int h = fm.height() + 2 * padY;
+    m_viewToggleRect = QRectF(width() - w - margin, margin, w, h);
+
+    // Semi-transparent pill — brighter when depth view is active.
+    const QColor bg = m_depthViewActive ? QColor(0, 150, 200, 180)
+                                        : QColor(20, 20, 28, 160);
+    painter.setPen(QPen(QColor(255, 255, 255, 90), 1));
+    painter.setBrush(bg);
+    painter.drawRoundedRect(m_viewToggleRect, h / 2.0, h / 2.0);
+
+    painter.setPen(QColor(235, 240, 250));
+    painter.drawText(m_viewToggleRect, Qt::AlignCenter, label);
+    painter.restore();
 }
 
 void CameraView::drawMeasurement(QPainter& painter)
@@ -382,6 +435,12 @@ void CameraView::mousePressEvent(QMouseEvent* event)
         m_lastMouse = event->position();
         setCursor(Qt::ClosedHandCursor);
     } else if (event->button() == Qt::LeftButton) {
+        // In-image view-mode toggle takes priority over image clicks.
+        if (m_viewToggleVisible && m_viewToggleRect.contains(event->position())) {
+            emit viewToggleClicked();
+            return;
+        }
+
         QPointF imgPos = mapToImage(event->pos());
 
         if (m_measureMode && m_measureModeKind >= 0) {

@@ -34,6 +34,10 @@ public:
 
     void setCameraDevices(const QStringList& devices);
     void setConfidenceThreshold(float conf);
+    /// Switch UI between USB-microscope and RealSense mode.
+    /// Disables/relabels the calibration button when RealSense is active
+    /// (factory intrinsics are embedded in the SDK — no checkerboard needed).
+    void setCameraBackendUI(bool isRealSense);
 
 signals:
     void overlayOpacityChanged(float opacity);
@@ -46,6 +50,8 @@ signals:
     void cameraSettingsChanged(int index, int w, int h, int fps);
     void realSenseControlsRequested();
     void recalibrateRequested();
+    void generateCheckerboardRequested();
+    void openCalibrationPdfRequested();
     void alignHomographyRequested();
     void alignOnComponentsRequested();
     void liveModeChanged(bool enabled);
@@ -55,7 +61,7 @@ private:
     QGroupBox* createOverlayGroup();
     QGroupBox* createAiGroup();
     QGroupBox* createCameraGroup();
-    QGroupBox* createActionsGroup();
+    QGroupBox* createCalibrationGroup();
 
     // Overlay controls
     QSlider*       m_opacitySlider   = nullptr;
@@ -70,13 +76,20 @@ private:
     QCheckBox*      m_autoInspect    = nullptr;
 
     // Camera controls
-    QComboBox* m_cameraDevice = nullptr;
-    QSpinBox*  m_camWidth     = nullptr;
-    QSpinBox*  m_camHeight    = nullptr;
-    QSpinBox*  m_camFps       = nullptr;
+    QComboBox* m_cameraDevice  = nullptr;
+    QSpinBox*  m_camWidth      = nullptr;
+    QSpinBox*  m_camHeight     = nullptr;
+    QSpinBox*  m_camFps        = nullptr;
+    QWidget*   m_camResWidget  = nullptr;  // container W/H/FPS — hidden for RealSense
 
-    // Action buttons
-    QPushButton* m_btnCalibrate    = nullptr;
+    // Calibration & Alignment group. Widgets are shown/hidden by backend:
+    // microscope → checkerboard tools; RealSense → factory note + sensor
+    // controls. Alignment + live tracking apply to both.
+    QLabel*      m_calibInfo      = nullptr;  // backend-specific one-liner
+    QPushButton* m_btnCalibrate   = nullptr;  // microscope: checkerboard calib
+    QPushButton* m_btnGenPattern  = nullptr;  // microscope: generate/print board
+    QPushButton* m_btnOpenPdf      = nullptr;  // microscope: open patterns PDF
+    QPushButton* m_btnRealSense    = nullptr;  // RealSense: sensor controls
     QPushButton* m_btnAlign        = nullptr;
     QPushButton* m_btnAlignComps   = nullptr;
     QCheckBox*   m_liveMode        = nullptr;

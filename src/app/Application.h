@@ -120,6 +120,7 @@ private:
     /// the Settings dialog). Shows a hint if the backend isn't RealSense / the
     /// camera isn't running.
     void openRealSenseControls();
+    void updateCalibrationUI();
 
     void loadIBomFile(const QString& path);
     void refreshRecentFilesMenu();
@@ -177,6 +178,12 @@ private:
     qint64 m_lastSharpnessMs = 0;
     // Depth (RealSense) — last time distance/scale was computed (throttle).
     qint64 m_lastDepthMs = 0;
+    // Live view mode: false = color image, true = colorized depth map.
+    // Only meaningful for the RealSense backend (depth stream).
+    bool m_depthViewMode = false;
+    // 3D point cloud mode: central view shows the orbitable cloud (RealSense).
+    // The cloud itself is built on the capture thread (rs2::pointcloud).
+    bool m_pointCloudMode = false;
 
     // Calibration image collection
     std::vector<cv::Mat> m_calibImages;

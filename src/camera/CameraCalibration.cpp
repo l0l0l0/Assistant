@@ -4,6 +4,8 @@
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
+#include <filesystem>
+#include <system_error>
 
 namespace ibom::camera {
 
@@ -83,6 +85,7 @@ double CameraCalibration::calibrate(const std::vector<cv::Mat>& images,
     );
 
     m_calibrated = true;
+    m_rmsError   = rmsError;
 
     // Calculate pixels-per-mm from the first image
     if (!imagePoints.empty() && imagePoints[0].size() >= 2) {
@@ -101,6 +104,13 @@ double CameraCalibration::calibrate(const std::vector<cv::Mat>& images,
 bool CameraCalibration::load(const std::string& path)
 {
     try {
+        // A missing file is expected on first run (no calibration yet) — don't
+        // alarm with an error (and avoid OpenCV's own FileStorage error spam).
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            spdlog::debug("No calibration file at {} (not calibrated yet)", path);
+            return false;
+        }
         cv::FileStorage fs(path, cv::FileStorage::READ);
         if (!fs.isOpened()) {
             spdlog::error("Cannot open calibration file: {}", path);
@@ -110,6 +120,7 @@ bool CameraCalibration::load(const std::string& path)
         fs["camera_matrix"] >> m_cameraMatrix;
         fs["dist_coeffs"] >> m_distCoeffs;
         fs["pixels_per_mm"] >> m_pixelsPerMm;
+        fs["rms_error"] >> m_rmsError;
 
         int w, h;
         fs["image_width"] >> w;
@@ -146,6 +157,7 @@ bool CameraCalibration::save(const std::string& path) const
         fs << "camera_matrix" << m_cameraMatrix;
         fs << "dist_coeffs" << m_distCoeffs;
         fs << "pixels_per_mm" << m_pixelsPerMm;
+        fs << "rms_error" << m_rmsError;
 
         if (!m_map1.empty()) {
             fs << "image_width" << m_map1.cols;

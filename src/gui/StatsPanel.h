@@ -31,10 +31,19 @@ public:
     /// Live distance from a depth-capable camera (RealSense) to the board, in
     /// millimetres. Pass <= 0 to show "—" (no depth / invalid).
     void setDistance(double mm);
+    /// Depth fill rate: fraction [0..1] of valid (non-zero) depth pixels.
+    /// Pass < 0 to show "—" (no depth source).
+    void setFillRate(double fraction);
     /// Live focus assist: Laplacian variance of the current frame.
-    /// `good` = above the sharpness threshold (same metric/scale as the
-    /// dataset capture gate) — turn the focus ring until the value peaks.
     void setSharpness(double variance, bool good);
+    /// Calibration status line.
+    /// V4L2 + calibrated: setCalibration(rms, ppmm, false)
+    /// V4L2 + not calibrated: setCalibration(0, 0, false)
+    /// RealSense: setCalibration(0, fx, true)
+    /// `tooltip`, when non-empty, replaces the default hover text (used to show
+    /// the full RealSense intrinsics / computed FOV).
+    void setCalibration(double rmsOrFx, double ppmm, bool isFactory,
+                        const QString& tooltip = {});
     void addDefectEntry(const std::string& reference, const std::string& type);
 
 public slots:
@@ -72,6 +81,8 @@ private:
     QLabel* m_scaleLabel        = nullptr;
     QLabel* m_focusLabel        = nullptr;
     QLabel* m_distanceLabel     = nullptr;
+    QLabel* m_fillRateLabel     = nullptr;
+    QLabel* m_calibLabel        = nullptr;
 
     // Event log (runtime logs + defects)
     QTableWidget* m_defectTable = nullptr;

@@ -30,7 +30,7 @@ void ControlPanel::buildUI()
     layout->addWidget(createOverlayGroup());
     layout->addWidget(createAiGroup());
     layout->addWidget(createCameraGroup());
-    layout->addWidget(createActionsGroup());
+    layout->addWidget(createCalibrationGroup());
     layout->addStretch();
 
     scroll->setWidget(content);
@@ -118,30 +118,45 @@ QGroupBox* ControlPanel::createAiGroup()
 QGroupBox* ControlPanel::createCameraGroup()
 {
     auto* group  = new QGroupBox(tr("Camera"));
-    auto* layout = new QFormLayout(group);
-    layout->setSpacing(theme::GroupSpacing);
-    layout->setContentsMargins(theme::GroupMarginH, theme::GroupMarginV,
-                               theme::GroupMarginH, theme::GroupMarginV);
-    layout->setLabelAlignment(Qt::AlignRight);
+    auto* vbox   = new QVBoxLayout(group);
+    vbox->setSpacing(theme::GroupSpacing);
+    vbox->setContentsMargins(theme::GroupMarginH, theme::GroupMarginV,
+                             theme::GroupMarginH, theme::GroupMarginV);
 
+    // Device selector — always visible
+    auto* devForm = new QFormLayout;
+    devForm->setLabelAlignment(Qt::AlignRight);
     m_cameraDevice = new QComboBox;
     m_cameraDevice->addItem(tr("Default (0)"));
-    layout->addRow(tr("Device:"), m_cameraDevice);
+    // Long device names (e.g. "Intel RealSense D405 <serial>") must not force
+    // the dock wider — let the combo shrink and elide instead.
+    m_cameraDevice->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_cameraDevice->setMinimumContentsLength(8);
+    m_cameraDevice->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    devForm->addRow(tr("Device:"), m_cameraDevice);
+    vbox->addLayout(devForm);
+
+    // W/H/FPS + Apply — hidden when RealSense is active (fixed resolution profiles)
+    m_camResWidget = new QWidget;
+    auto* resForm  = new QFormLayout(m_camResWidget);
+    resForm->setContentsMargins(0, 0, 0, 0);
+    resForm->setSpacing(theme::GroupSpacing);
+    resForm->setLabelAlignment(Qt::AlignRight);
 
     m_camWidth = new QSpinBox;
     m_camWidth->setRange(320, 4096);
     m_camWidth->setValue(1920);
-    layout->addRow(tr("Width:"), m_camWidth);
+    resForm->addRow(tr("Width:"), m_camWidth);
 
     m_camHeight = new QSpinBox;
     m_camHeight->setRange(240, 2160);
     m_camHeight->setValue(1080);
-    layout->addRow(tr("Height:"), m_camHeight);
+    resForm->addRow(tr("Height:"), m_camHeight);
 
     m_camFps = new QSpinBox;
     m_camFps->setRange(1, 120);
     m_camFps->setValue(30);
-    layout->addRow(tr("FPS:"), m_camFps);
+    resForm->addRow(tr("FPS:"), m_camFps);
 
     auto* applyBtn = new QPushButton(tr("Apply Camera"));
     connect(applyBtn, &QPushButton::clicked, this, [this]() {
@@ -149,36 +164,60 @@ QGroupBox* ControlPanel::createCameraGroup()
                                     m_camWidth->value(), m_camHeight->value(),
                                     m_camFps->value());
     });
-    layout->addRow(applyBtn);
+    resForm->addRow(applyBtn);
 
-    auto* rsBtn = new QPushButton(tr("Camera Controls (RealSense)…"));
-    rsBtn->setToolTip(tr("Exposure, gain, laser power, depth presets… — every "
-                         "sensor option of a connected RealSense, each with its "
-                         "SDK description. Available only with the RealSense "
-                         "backend running."));
-    connect(rsBtn, &QPushButton::clicked, this, &ControlPanel::realSenseControlsRequested);
-    layout->addRow(rsBtn);
+    vbox->addWidget(m_camResWidget);
 
     return group;
 }
 
-QGroupBox* ControlPanel::createActionsGroup()
+QGroupBox* ControlPanel::createCalibrationGroup()
 {
-    auto* group  = new QGroupBox(tr("Actions"));
+    auto* group  = new QGroupBox(tr("Calibration && Alignment"));
     auto* layout = new QVBoxLayout(group);
     layout->setSpacing(theme::GroupSpacing);
     layout->setContentsMargins(theme::GroupMarginH, theme::GroupMarginV,
                                theme::GroupMarginH, theme::GroupMarginV);
 
-    m_btnCalibrate = new QPushButton(tr("Calibrate Camera (Checkerboard)"));
+    // Backend-specific one-liner (set by setCameraBackendUI).
+    m_calibInfo = new QLabel;
+    m_calibInfo->setWordWrap(true);
+    m_calibInfo->setStyleSheet("color: #8892b8; font-size: 11px;");
+    layout->addWidget(m_calibInfo);
+
+    // ── Microscope (V4L2): lens calibration via printed checkerboard ──
+    m_btnCalibrate = new QPushButton(tr("Calibrate (Checkerboard)"));
+    m_btnCalibrate->setToolTip(tr("Capture checkerboard views and compute lens "
+                                  "distortion correction (OpenCV)."));
     connect(m_btnCalibrate, &QPushButton::clicked, this, &ControlPanel::recalibrateRequested);
     layout->addWidget(m_btnCalibrate);
 
-    m_btnAlign = new QPushButton(tr("Set Alignment Points (4 corners)"));
+    m_btnGenPattern = new QPushButton(tr("Generate Checkerboard…"));
+    m_btnGenPattern->setToolTip(tr("Generate a printable checkerboard at the "
+                                   "configured square size."));
+    connect(m_btnGenPattern, &QPushButton::clicked, this, &ControlPanel::generateCheckerboardRequested);
+    layout->addWidget(m_btnGenPattern);
+
+    m_btnOpenPdf = new QPushButton(tr("Open Patterns PDF…"));
+    m_btnOpenPdf->setToolTip(tr("Open the bundled patterns (0.5 / 1 / 2 mm squares)."));
+    connect(m_btnOpenPdf, &QPushButton::clicked, this, &ControlPanel::openCalibrationPdfRequested);
+    layout->addWidget(m_btnOpenPdf);
+
+    // ── RealSense: factory-calibrated, expose live sensor controls ──
+    m_btnRealSense = new QPushButton(tr("RealSense Controls…"));
+    m_btnRealSense->setToolTip(tr("Exposure, gain, laser power, depth presets… — every "
+                                  "sensor option of a connected RealSense, each with its "
+                                  "SDK description. Requires the RealSense backend running."));
+    connect(m_btnRealSense, &QPushButton::clicked, this, &ControlPanel::realSenseControlsRequested);
+    layout->addWidget(m_btnRealSense);
+
+    // ── Alignment + live tracking (both backends) ──
+    m_btnAlign = new QPushButton(tr("Align: 4 Corners"));
+    m_btnAlign->setToolTip(tr("Set alignment by clicking the 4 board corners."));
     connect(m_btnAlign, &QPushButton::clicked, this, &ControlPanel::alignHomographyRequested);
     layout->addWidget(m_btnAlign);
 
-    m_btnAlignComps = new QPushButton(tr("Align on 2 Components"));
+    m_btnAlignComps = new QPushButton(tr("Align: 2 Components"));
     m_btnAlignComps->setToolTip(tr("Align overlay by clicking 2 known components — best for small FOV microscopes"));
     connect(m_btnAlignComps, &QPushButton::clicked, this, &ControlPanel::alignOnComponentsRequested);
     layout->addWidget(m_btnAlignComps);
@@ -187,6 +226,9 @@ QGroupBox* ControlPanel::createActionsGroup()
     m_liveMode->setToolTip(tr("Track PCB movement in real-time using feature matching"));
     connect(m_liveMode, &QCheckBox::toggled, this, &ControlPanel::liveModeChanged);
     layout->addWidget(m_liveMode);
+
+    // Default to microscope view until the backend is known.
+    setCameraBackendUI(false);
 
     return group;
 }
@@ -226,6 +268,29 @@ void ControlPanel::setConfidenceThreshold(float conf)
 {
     QSignalBlocker blocker(m_confidenceSpin);
     m_confidenceSpin->setValue(static_cast<double>(conf));
+}
+
+void ControlPanel::setCameraBackendUI(bool isRealSense)
+{
+    if (!m_btnCalibrate) return;  // group not built yet
+
+    // Camera group: hide free W/H/FPS spinboxes for RealSense (fixed profiles)
+    if (m_camResWidget) m_camResWidget->setVisible(!isRealSense);
+
+    // Show only the tools relevant to the active backend. Alignment + live
+    // tracking stay visible for both.
+    m_btnCalibrate->setVisible(!isRealSense);
+    m_btnGenPattern->setVisible(!isRealSense);
+    m_btnOpenPdf->setVisible(!isRealSense);
+    m_btnRealSense->setVisible(isRealSense);
+
+    if (m_calibInfo) {
+        m_calibInfo->setText(isRealSense
+            ? tr("RealSense: factory-calibrated. No checkerboard needed — see the "
+                 "intrinsics in Statistics. Set scale to “From depth” in Settings.")
+            : tr("USB microscope: print a checkerboard, then calibrate to correct "
+                 "lens distortion and derive px/mm."));
+    }
 }
 
 } // namespace ibom::gui

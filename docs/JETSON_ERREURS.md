@@ -15,6 +15,8 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 20 | 2026-06-16 | PointCloudView.cpp / GUI | ✅ RÉSOLU | [`initializeFunctions was not declared` — faute de frappe pour `initializeOpenGLFunctions`](#erreur-20--initializefunctions-was-not-declared) |
+| 19 | 2026-06-15 | SettingsDialog.h / GUI | ✅ RÉSOLU | [`SettingsDialog::accept() is private` — override sous `private slots:` appelé par MainWindow](#erreur-19--settingsdialogaccept-is-private) |
 | 18 | 2026-06-14 | CameraCalibration.cpp | 🟡 EN COURS | [Calibration échoue `No checkerboard patterns detected` sur damier 7×5 valide — détecteur legacy capricieux](#erreur-18--calibration-echoue-sur-damier-valide--detecteur-legacy) |
 | 17 | 2026-06-14 | Application.cpp / caméra | ✅ RÉSOLU | [`Found 0 camera(s)` sur device V4L2 fonctionnel — énumération via QMediaDevices au lieu d'OpenCV](#erreur-17--found-0-cameras-sur-device-v4l2-fonctionnel--enumeration-via-qmediadevices) |
 | 16 | 2026-06-14 | CMakeLists.txt / libharu | ✅ RÉSOLU | [Link `undefined reference HPDF_*` — header `<hpdf.h>` présent mais lib non linkée](#erreur-16--link-undefined-reference-hpdf_--header-présent-mais-lib-non-linkée) |
@@ -88,6 +90,83 @@ Fix concret avec les commandes/diff exacts.
 ### Notes / prévention
 Comment éviter ce problème à l'avenir, ou quels symptômes apparentés guetter.
 ```
+
+---
+
+## ERREUR 20 — `initializeFunctions was not declared`
+
+**Date :** 2026-06-16
+**Composant :** GUI / PointCloudView.cpp
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-06-16
+
+### Symptôme
+Build Jetson échoue à la compilation de `PointCloudView.cpp` :
+
+```
+/opt/microscope-ibom/src/gui/PointCloudView.cpp:103:5: error: ‘initializeFunctions’ was not declared in this scope; did you mean ‘initializeOpenGLFunctions’?
+  103 |     initializeFunctions();
+      |     ^~~~~~~~~~~~~~~~~~~
+      |     initializeOpenGLFunctions
+```
+
+### Contexte
+- Commande lancée : `bash scripts/build_jetson.sh` (ou ninja dans `/opt/microscope-ibom/build`)
+- Faute de frappe introduite à la création de `PointCloudView` (session 2026-06-15 suite 23). Jamais détectée avant car rien ne compilait ce fichier dans l'environnement d'analyse (pas de Qt/OpenGL) — seul un build Jetson l'attrape.
+- Reproductible : oui (déterministe)
+
+### Cause
+`PointCloudView` hérite de `QOpenGLWidget, protected QOpenGLFunctions`. La méthode d'initialisation des pointeurs de fonctions GL fournie par `QOpenGLFunctions` s'appelle **`initializeOpenGLFunctions()`**, pas `initializeFunctions()`.
+
+### Solution appliquée ✅
+```diff
+- initializeFunctions();
++ initializeOpenGLFunctions();
+```
+
+### Notes / prévention
+- Rappel récurrent (cf. suites 18-19) : **la CI ne compile pas le C++**, seul un build Jetson attrape ce type d'erreur. Tout nouveau widget Qt/GL doit être validé par un build Jetson réel.
+- Le `Wall -Wextra` n'aide pas ici : c'est une vraie erreur de nom non déclaré, pas un warning.
+
+---
+
+## ERREUR 19 — `SettingsDialog::accept() is private`
+
+**Date :** 2026-06-15
+**Composant :** SettingsDialog.h / GUI
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) session 2026-06-15 (suite 18)
+
+### Symptôme
+Premier build Jetson de la branche `claude/fix-realsense-undistort` :
+
+```
+/opt/microscope-ibom/src/gui/MainWindow.cpp:383:19: error: 'virtual void SettingsDialog::accept()' is private within this context
+  383 |         dlg.accept();
+src/gui/SettingsDialog.h:29:10: note: declared private here
+   29 |     void accept() override;
+```
+
+### Contexte
+- Commande : `bash scripts/build_jetson.sh`
+- Introduit en suite 12 (bouton « RealSense Controls » dans Settings) : `MainWindow::onShowSettings` appelle `dlg.accept()` pour fermer Settings avant d'ouvrir le panneau RealSense.
+- Reproductible : oui (n'avait jamais été compilé — la CI ne build pas le C++).
+
+### Cause
+`QDialog::accept()` est un **slot public**. L'override dans `SettingsDialog` était déclaré sous `private slots:`, donc inaccessible depuis `MainWindow`. C++ interdit d'appeler une méthode override privée même si la méthode de base est publique (l'accès est déterminé par le type statique `SettingsDialog`).
+
+### Solution
+Déplacer la déclaration sous `public slots:` (cohérent avec `QDialog`).
+
+```diff
+- private slots:
+-     void accept() override;
++ public slots:
++     void accept() override;
+```
+
+### Notes / prévention
+La CI GitHub ne compile pas le C++ (pas de toolchain CUDA/Qt/OpenCV) → ce type d'erreur d'accès ne sera **jamais** attrapé en CI. Toujours valider un build Jetson avant merge. ⚠️ `main` a hérité du bug via la PR #7 ; il est corrigé par la PR #8.
 
 ---
 

@@ -148,6 +148,9 @@ set(SOURCES
     # GUI
     src/gui/MainWindow.cpp
     src/gui/CameraView.cpp
+    src/gui/PointCloudView.cpp
+    src/gui/ViewModeBar.cpp
+    src/gui/ToggleSwitch.cpp
     src/gui/BomPanel.cpp
     src/gui/ControlPanel.cpp
     src/gui/InspectionWizard.cpp
@@ -186,6 +189,7 @@ set(HEADERS
 
     # Camera
     src/camera/ICameraSource.h
+    src/camera/PointCloudData.h
     src/camera/CameraCapture.h
     src/camera/CameraCalibration.h
     src/camera/UnifiedAllocator.h
@@ -212,6 +216,9 @@ set(HEADERS
     # GUI
     src/gui/MainWindow.h
     src/gui/CameraView.h
+    src/gui/PointCloudView.h
+    src/gui/ViewModeBar.h
+    src/gui/ToggleSwitch.h
     src/gui/BomPanel.h
     src/gui/ControlPanel.h
     src/gui/InspectionWizard.h

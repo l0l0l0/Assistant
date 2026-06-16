@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 #include "CameraView.h"
+#include "PointCloudView.h"
+#include "ViewModeBar.h"
 #include "BomPanel.h"
 #include "ControlPanel.h"
 #include "InspectionWizard.h"
@@ -17,6 +19,7 @@
 #include <QMenu>
 #include <QDir>
 #include <QDockWidget>
+#include <QStackedWidget>
 #include <QKeyEvent>
 #include <QCloseEvent>
 #include <QDragEnterEvent>
@@ -44,9 +47,25 @@ MainWindow::MainWindow(Application* app, QWidget* parent)
     setMinimumSize(1280, 720);
     setAcceptDrops(true);
 
-    // Central camera view
-    m_cameraView = new CameraView(this);
-    setCentralWidget(m_cameraView);
+    // Central view: stack of the 2D camera and the 3D point cloud.
+    m_centralStack   = new QStackedWidget(this);
+    m_cameraView     = new CameraView(this);
+    m_pointCloudView = new PointCloudView(this);
+    m_centralStack->addWidget(m_cameraView);      // index 0
+    m_centralStack->addWidget(m_pointCloudView);  // index 1
+    setCentralWidget(m_centralStack);
+
+    // View-mode overlay — two pill buttons (Depth / 3D) floating top-right,
+    // visible on both pages of the stack.
+    m_viewModeBar = new ViewModeBar(m_centralStack);
+    m_viewModeBar->show();
+    m_viewModeBar->raise();
+
+    // QStackedWidget raises the current page on each switch, which would bury
+    // the overlay — re-raise it (and reposition) whenever the page changes.
+    connect(m_centralStack, &QStackedWidget::currentChanged, this, [this](int) {
+        repositionViewModeBar();
+    });
 
     createActions();
     createMenuBar();
@@ -61,6 +80,22 @@ MainWindow::MainWindow(Application* app, QWidget* parent)
         applyDarkStylesheet();
     else
         applyLightStylesheet();
+
+    // ViewModeBar signals → existing depth/cloud toggle logic.
+    connect(m_viewModeBar, &ViewModeBar::depthToggled, this, [this]() {
+        if (m_actDepthView) m_actDepthView->toggle();
+    });
+    connect(m_viewModeBar, &ViewModeBar::cloudToggled, this, [this]() {
+        if (m_actPointCloud) m_actPointCloud->toggle();
+    });
+    // Keep ViewModeBar in sync when actions change state.
+    connect(m_actDepthView, &QAction::toggled,
+            m_viewModeBar, &ViewModeBar::setDepthActive);
+    connect(m_actPointCloud, &QAction::toggled,
+            m_viewModeBar, &ViewModeBar::setCloudActive);
+
+    // CameraView's single built-in toggle is replaced by ViewModeBar; disable it.
+    m_cameraView->setViewToggleVisible(false);
 
     // Double-click camera view → camera-only fullscreen
     connect(m_cameraView, &CameraView::doubleClicked, this, [this]() {
@@ -114,6 +149,46 @@ void MainWindow::setRecentFiles(const QStringList& files)
     m_recentMenu->setEnabled(!files.isEmpty());
 }
 
+void MainWindow::setDepthViewAvailable(bool available)
+{
+    if (!m_actDepthView) return;
+    m_actDepthView->setEnabled(available);
+    if (!available && m_actDepthView->isChecked())
+        m_actDepthView->setChecked(false);
+    if (m_viewModeBar) {
+        m_viewModeBar->setDepthEnabled(available);
+        repositionViewModeBar();
+    }
+}
+
+void MainWindow::setPointCloudAvailable(bool available)
+{
+    if (!m_actPointCloud) return;
+    m_actPointCloud->setEnabled(available);
+    if (!available && m_actPointCloud->isChecked())
+        m_actPointCloud->setChecked(false);
+    if (m_viewModeBar)
+        m_viewModeBar->setCloudEnabled(available);
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    repositionViewModeBar();
+}
+
+void MainWindow::repositionViewModeBar()
+{
+    if (!m_viewModeBar || !m_centralStack) return;
+    const QSize sz = m_viewModeBar->sizeHint();
+    const int margin = 10;
+    m_viewModeBar->setGeometry(
+        m_centralStack->width() - sz.width() - margin,
+        margin,
+        sz.width(), sz.height());
+    m_viewModeBar->raise();
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 void MainWindow::createActions()
@@ -140,6 +215,9 @@ void MainWindow::createActions()
     m_actCalibrate = new QAction(tr("Calibrate Camera"), this);
     m_actCalibrate->setShortcut(Qt::Key_K);
     connect(m_actCalibrate, &QAction::triggered, this, &MainWindow::onCalibrate);
+    // Not in the menu/toolbar (calibration lives in the right panel now), but
+    // kept as a window-level action so the K shortcut still works.
+    addAction(m_actCalibrate);
 
     m_actInspect = new QAction(tr("Start Inspection"), this);
     m_actInspect->setShortcut(Qt::Key_I);
@@ -157,6 +235,28 @@ void MainWindow::createActions()
     m_actDarkMode->setCheckable(true);
     m_actDarkMode->setChecked(m_darkMode);
     connect(m_actDarkMode, &QAction::toggled, this, &MainWindow::setDarkMode);
+
+    m_actDepthView = new QAction(tr("Depth View (colorized)"), this);
+    m_actDepthView->setCheckable(true);
+    m_actDepthView->setShortcut(Qt::Key_D);
+    m_actDepthView->setEnabled(false);  // enabled once a RealSense stream is live
+    m_actDepthView->setToolTip(tr("Show the colorized depth map instead of the "
+                                  "color image (RealSense only)."));
+    connect(m_actDepthView, &QAction::toggled, this, &MainWindow::depthViewToggled);
+    connect(m_actDepthView, &QAction::toggled, m_cameraView, &CameraView::setDepthViewActive);
+
+    m_actPointCloud = new QAction(tr("3D Point Cloud"), this);
+    m_actPointCloud->setCheckable(true);
+    m_actPointCloud->setShortcut(Qt::Key_3);
+    m_actPointCloud->setEnabled(false);  // enabled once a RealSense stream is live
+    m_actPointCloud->setToolTip(tr("Show the live 3D point cloud (orbit with the "
+                                   "mouse) instead of the camera image. RealSense only."));
+    connect(m_actPointCloud, &QAction::toggled, this, [this](bool on) {
+        m_pointCloudActive = on;
+        m_centralStack->setCurrentIndex(on ? 1 : 0);
+        if (on && m_pointCloudView) m_pointCloudView->resetView();
+        emit pointCloudToggled(on);
+    });
 }
 
 void MainWindow::createMenuBar()
@@ -174,18 +274,19 @@ void MainWindow::createMenuBar()
 
     auto* cameraMenu = menuBar()->addMenu(tr("&Camera"));
     cameraMenu->addAction(m_actToggleCam);
-    cameraMenu->addAction(m_actCalibrate);
-    cameraMenu->addSeparator();
-    auto* actGenBoard = cameraMenu->addAction(tr("Generate Checkerboard..."));
-    actGenBoard->setToolTip(tr("Generate a printable checkerboard for camera calibration"));
-    connect(actGenBoard, &QAction::triggered, this, &MainWindow::onGenerateCheckerboard);
-
-    auto* actOpenPatterns = cameraMenu->addAction(tr("Open Calibration Patterns PDF..."));
-    actOpenPatterns->setToolTip(tr("Open pre-generated calibration patterns (0.5, 1, 2 mm squares)"));
-    connect(actOpenPatterns, &QAction::triggered, this, &MainWindow::onOpenCalibrationPDF);
+    // Calibration / checkerboard / alignment all live in the right-side
+    // "Calibration & Alignment" panel now (backend-aware) — not duplicated in
+    // the menu/toolbar. The K shortcut still triggers checkerboard calibration
+    // via m_actCalibrate, which is added to the window in createActions().
 
     auto* inspectMenu = menuBar()->addMenu(tr("&Inspection"));
     inspectMenu->addAction(m_actInspect);
+
+    // Depth/3D view switching is done via the in-image ViewModeBar overlay;
+    // keep the actions alive for keyboard shortcuts (D / 3) but don't add them
+    // to the View menu — that menu is for GUI panels, not view modes.
+    addAction(m_actDepthView);
+    addAction(m_actPointCloud);
 
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(m_actFullscreen);
@@ -232,7 +333,6 @@ void MainWindow::createToolBar()
     m_mainToolBar->addAction(m_actOpenIBom);
     m_mainToolBar->addSeparator();
     m_mainToolBar->addAction(m_actToggleCam);
-    m_mainToolBar->addAction(m_actCalibrate);
     m_mainToolBar->addSeparator();
     m_mainToolBar->addAction(m_actInspect);
     m_mainToolBar->addAction(m_actScreenshot);
@@ -281,8 +381,13 @@ void MainWindow::createDockWidgets()
     auto* controlDock = new QDockWidget(tr("Controls"), this);
     controlDock->setObjectName("ControlDock");
     controlDock->setWidget(m_controlPanel);
-    controlDock->setMinimumWidth(250);
-    controlDock->setMaximumWidth(320);
+    controlDock->setMinimumWidth(260);
+    controlDock->setMaximumWidth(400);
+    // Checkerboard tools moved out of the Camera menu into the panel.
+    connect(m_controlPanel, &ControlPanel::generateCheckerboardRequested,
+            this, &MainWindow::onGenerateCheckerboard);
+    connect(m_controlPanel, &ControlPanel::openCalibrationPdfRequested,
+            this, &MainWindow::onOpenCalibrationPDF);
     addDockWidget(Qt::RightDockWidgetArea, controlDock);
     tabifyDockWidget(bomDock, controlDock);
     controlDock->raise(); // Show Controls tab by default
@@ -945,7 +1050,7 @@ void MainWindow::applyDarkStylesheet()
         QProgressBar {
             background: #1a1a2e; border: none; border-radius: 4px;
             height: 8px; text-align: center;
-            font-size: 0px;
+            color: transparent;
         }
         QProgressBar::chunk {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -1125,7 +1230,7 @@ void MainWindow::applyLightStylesheet()
         QTabBar::tab:hover:!selected { color: #3a4060; }
         QProgressBar {
             background: #e0e2ec; border: none; border-radius: 4px;
-            height: 8px; font-size: 0px;
+            height: 8px; color: transparent;
         }
         QProgressBar::chunk {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
