@@ -9,6 +9,15 @@
 #include <chrono>
 #include <algorithm>
 
+#ifdef __linux__
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+#include <cstdint>
+#endif
+
 namespace ibom::camera {
 
 namespace {
@@ -61,6 +70,15 @@ bool CameraCapture::start()
         return true;
     }
 
+    // A previous captureLoop may have self-exited (e.g. failed open) leaving a
+    // finished-but-joinable thread. Reassigning m_thread below would destroy a
+    // joinable std::thread → std::terminate(). Join it first.
+    if (m_thread) {
+        if (m_thread->joinable())
+            m_thread->join();
+        m_thread.reset();
+    }
+
     spdlog::info("Starting camera capture on device {}...", m_deviceIndex);
 
     m_capturing.store(true);
@@ -72,18 +90,24 @@ bool CameraCapture::start()
 
 void CameraCapture::stop()
 {
-    if (!m_capturing.load()) return;
+    // Always join/reset the thread if present — even if the capture loop already
+    // cleared m_capturing on its own (error exit). An early return here would
+    // leave a joinable thread that std::terminate()s on destruction or on the
+    // next start(). (Mirrors RealSenseCapture::stop().)
+    const bool wasCapturing = m_capturing.exchange(false);
+    if (wasCapturing)
+        spdlog::info("Stopping camera capture...");
 
-    spdlog::info("Stopping camera capture...");
-    m_capturing.store(false);
-
-    if (m_thread && m_thread->joinable()) {
+    if (m_thread && m_thread->joinable())
         m_thread->join();
-    }
     m_thread.reset();
 
-    emit captureStateChanged(false);
-    spdlog::info("Camera capture stopped.");
+    // Only signal the transition if we were the ones stopping it; if the loop
+    // exited by itself it already emitted captureStateChanged(false).
+    if (wasCapturing) {
+        emit captureStateChanged(false);
+        spdlog::info("Camera capture stopped.");
+    }
 }
 
 FrameRef CameraCapture::latestFrame() const
@@ -113,18 +137,57 @@ QSize CameraCapture::resolution() const
     return QSize(m_width, m_height);
 }
 
-std::vector<std::string> CameraCapture::listDevices()
+std::vector<std::pair<int, std::string>> CameraCapture::listDevices()
 {
-    std::vector<std::string> devices;
+    std::vector<std::pair<int, std::string>> devices;
 
+#ifdef __linux__
+    // Probe each /dev/video<N> node directly with VIDIOC_QUERYCAP. This:
+    //  - returns the REAL index N (not a list position), so gaps are preserved;
+    //  - reads the card name so the UI can tell the microscope from the D405;
+    //  - skips non-capture nodes (metadata / output) that would fail to open;
+    //  - avoids the cv::VideoCapture::open() probe, which floods the log with
+    //    GStreamer/obsensor warnings on every missing index.
+    for (int i = 0; i < 16; ++i) {
+        const std::string path = "/dev/video" + std::to_string(i);
+        // O_RDONLY: VIDIOC_QUERYCAP is a read-only query, and this is less likely
+        // to clash with a device already held open by the capture thread.
+        const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0)
+            continue;
+
+        v4l2_capability cap{};
+        if (::ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+            const uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS)
+                ? cap.device_caps : cap.capabilities;
+            if (caps & V4L2_CAP_VIDEO_CAPTURE) {
+                std::string name = (cap.card[0] != 0)
+                    ? std::string(reinterpret_cast<const char*>(cap.card))
+                    : ("Camera " + std::to_string(i));
+                // The D405 exposes its color/IR/depth streams as plain UVC
+                // /dev/video* nodes too, so VIDIOC_QUERYCAP reports them as
+                // valid capture devices here. They must only ever be opened
+                // through the RealSense SDK (depth-aligned, factory-rectified),
+                // never as a raw V4L2 stream, so exclude them from this list.
+                if (name.find("RealSense") != std::string::npos) {
+                    ::close(fd);
+                    continue;
+                }
+                devices.emplace_back(i, std::move(name));
+            }
+        }
+        ::close(fd);
+    }
+#else
     for (int i = 0; i < 10; ++i) {
         cv::VideoCapture cap;
         cap.open(i, cv::CAP_V4L2);
         if (cap.isOpened()) {
-            devices.push_back("Camera " + std::to_string(i));
+            devices.emplace_back(i, "Camera " + std::to_string(i));
             cap.release();
         }
     }
+#endif
 
     return devices;
 }

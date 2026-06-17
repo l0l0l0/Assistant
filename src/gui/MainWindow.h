@@ -11,6 +11,7 @@
 #include <memory>
 
 class QStackedWidget;
+class QComboBox;
 
 namespace ibom {
 class Application;
@@ -27,6 +28,7 @@ class InspectionWizard;
 class InspectionPanel;
 class StatsPanel;
 class DatasetPanel;
+class BoardMinimap;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -43,6 +45,7 @@ public:
     InspectionPanel*  inspectionPanel()  { return m_inspectionPanel; }
     StatsPanel*       statsPanel()       { return m_statsPanel; }
     DatasetPanel*     datasetPanel()     { return m_datasetPanel; }
+    BoardMinimap*     boardMinimap()     { return m_boardMinimap; }
 
     void setDarkMode(bool dark);
     void updateFpsDisplay(double fps);
@@ -59,6 +62,9 @@ public:
     /// True while the central view is showing the 3D point cloud.
     bool pointCloudActive() const { return m_pointCloudActive; }
 
+    /// Update the profile combo without triggering the change signal.
+    void setActiveProfile(int idx);
+
 signals:
     void ibomFileRequested(const QString& path);
     void cameraToggled(bool start);
@@ -73,6 +79,12 @@ signals:
     /// Open the RealSense sensor-controls panel (routed from the Settings
     /// dialog; the live camera lives in Application).
     void realSenseControlsRequested();
+    /// User selected a different camera profile in the toolbar combo.
+    void cameraProfileChangeRequested(int idx);
+    /// Arm microscope 1-point anchoring on the currently selected component.
+    void componentAnchorRequested();
+    /// Dev menu: measure current FOV & scale.
+    void fovMeasureRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -122,6 +134,7 @@ private:
     InspectionPanel*  m_inspectionPanel  = nullptr;
     StatsPanel*       m_statsPanel       = nullptr;
     DatasetPanel*     m_datasetPanel     = nullptr;
+    BoardMinimap*     m_boardMinimap     = nullptr;
 
     // Menus
     QMenu* m_recentMenu = nullptr;
@@ -134,11 +147,13 @@ private:
     QAction*  m_actFullscreen = nullptr;
     QAction*  m_actCalibrate  = nullptr;
     QAction*  m_actInspect    = nullptr;
+    QAction*  m_actAnchor     = nullptr;
     QAction*  m_actExport     = nullptr;
     QAction*  m_actSettings   = nullptr;
     QAction*  m_actDarkMode   = nullptr;
     QAction*  m_actDepthView  = nullptr;
     QAction*  m_actPointCloud = nullptr;
+    QComboBox* m_profileCombo = nullptr;
 
     // Status bar widgets
     QLabel* m_fpsLabel    = nullptr;

@@ -8,12 +8,15 @@
 #include "InspectionPanel.h"
 #include "StatsPanel.h"
 #include "DatasetPanel.h"
+#include "BoardMinimap.h"
 #include "SettingsDialog.h"
 #include "HelpDialog.h"
 #include "Theme.h"
 #include "../app/Application.h"
 #include "../app/Config.h"
 
+#include <QComboBox>
+#include <QSignalBlocker>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QMenu>
@@ -223,6 +226,12 @@ void MainWindow::createActions()
     m_actInspect->setShortcut(Qt::Key_I);
     connect(m_actInspect, &QAction::triggered, this, &MainWindow::onStartInspection);
 
+    m_actAnchor = new QAction(tr("Anchor on Component"), this);
+    m_actAnchor->setShortcut(Qt::Key_A);
+    m_actAnchor->setToolTip(tr("Anchor the overlay on the selected component, then click it in the image (microscope)"));
+    connect(m_actAnchor, &QAction::triggered, this, [this]() { emit componentAnchorRequested(); });
+    addAction(m_actAnchor);  // keep the A shortcut active even if not in a menu
+
     m_actExport = new QAction(tr("Export Report"), this);
     m_actExport->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_E));
     connect(m_actExport, &QAction::triggered, this, &MainWindow::onExportReport);
@@ -294,6 +303,23 @@ void MainWindow::createMenuBar()
 
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
 
+    // ── Dev menu (diagnostic / measurement tools) ─────────────────
+    auto* devMenu = menuBar()->addMenu(tr("&Dev"));
+    devMenu->setToolTipsVisible(true);
+
+    auto* actFovMeasure = devMenu->addAction(tr("Measure FOV & Scale…"));
+    actFovMeasure->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
+    actFovMeasure->setToolTip(tr(
+        "Compute field of view in mm, px/mm scale, and number of visible components "
+        "for the current camera. Helps answer Q2/Q3 of MICROSCOPE_PLACEMENT_PLAN.md."));
+    connect(actFovMeasure, &QAction::triggered, this, &MainWindow::fovMeasureRequested);
+
+    devMenu->addSeparator();
+    auto* actScript = devMenu->addAction(tr("How to run scripts/measure_fov.py…"));
+    connect(actScript, &QAction::triggered, this, [this]() {
+        emit fovMeasureRequested();  // opens the same dialog (shows script instructions)
+    });
+
     auto* actGettingStarted = helpMenu->addAction(tr("Getting Started"));
     actGettingStarted->setShortcut(Qt::Key_F1);
     connect(actGettingStarted, &QAction::triggered, this, [this]() { onShowHelp(0); });
@@ -334,11 +360,30 @@ void MainWindow::createToolBar()
     m_mainToolBar->addSeparator();
     m_mainToolBar->addAction(m_actToggleCam);
     m_mainToolBar->addSeparator();
+
+    // Camera profile selector (D405 / Microscope)
+    m_profileCombo = new QComboBox(m_mainToolBar);
+    m_profileCombo->setToolTip(tr("Camera profile — switch between D405 (≥0402) and Microscope (0201)"));
+    m_profileCombo->addItem(tr("D405"));
+    m_profileCombo->addItem(tr("Microscope"));
+    m_profileCombo->setMinimumWidth(110);
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) { emit cameraProfileChangeRequested(idx); });
+    m_mainToolBar->addWidget(m_profileCombo);
+    m_mainToolBar->addSeparator();
     m_mainToolBar->addAction(m_actInspect);
+    m_mainToolBar->addAction(m_actAnchor);
     m_mainToolBar->addAction(m_actScreenshot);
     m_mainToolBar->addAction(m_actExport);
     m_mainToolBar->addSeparator();
     m_mainToolBar->addAction(m_actSettings);
+}
+
+void MainWindow::setActiveProfile(int idx)
+{
+    if (!m_profileCombo) return;
+    QSignalBlocker blocker(m_profileCombo);
+    m_profileCombo->setCurrentIndex(idx);
 }
 
 void MainWindow::createStatusBar()
@@ -419,6 +464,16 @@ void MainWindow::createDockWidgets()
     addDockWidget(Qt::LeftDockWidgetArea, datasetDock);
     tabifyDockWidget(inspDock, datasetDock);
     inspDock->raise();  // inspection remains the default left tab
+
+    // PCB minimap (left, tabified with Inspection/Dataset)
+    m_boardMinimap = new BoardMinimap(this);
+    auto* minimapDock = new QDockWidget(tr("PCB Map"), this);
+    minimapDock->setObjectName("MinimapDock");
+    minimapDock->setWidget(m_boardMinimap);
+    minimapDock->setMinimumWidth(160);
+    minimapDock->setMaximumWidth(360);
+    addDockWidget(Qt::LeftDockWidgetArea, minimapDock);
+    tabifyDockWidget(datasetDock, minimapDock);
 
     // Inspection wizard (floating, hidden by default)
     m_inspectionWizard = new InspectionWizard(this);

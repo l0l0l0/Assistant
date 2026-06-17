@@ -93,6 +93,9 @@ signals:
     /// engine — can take minutes; runs off the GUI thread).
     void aiStatusChanged(bool ready, QString message);
 
+    /// Emitted after a successful profile switch with the new active index.
+    void cameraProfileChanged(int idx);
+
 private:
     void setupLogging();
     void parseCommandLine();
@@ -114,6 +117,12 @@ private:
     /// Stop, destroy and recreate the camera for a new backend, then re-wire
     /// and restart if it was capturing. Used by the Settings backend selector.
     void switchCameraBackend(CameraBackend backend);
+    /// Switch to a named camera profile, saving/restoring per-profile tracking state.
+    void switchProfile(int profileIndex);
+    /// Arm microscope 1-point anchoring on the currently selected component.
+    /// The next image click sets the homography from that single correspondence,
+    /// using the live scale (or the configured microscope fallback) and rotation.
+    void startComponentAnchor();
     /// Enumerate devices for the active backend and refresh the ControlPanel.
     void refreshCameraDeviceList();
     /// Open the dynamic RealSense sensor-controls panel (from ControlPanel or
@@ -203,6 +212,14 @@ private:
     bool m_pickingHomographyPoints = false;
     std::vector<cv::Point2f> m_homographyImagePoints;
 
+    // Microscope 1-point anchor mode (see docs/MICROSCOPE_PLACEMENT_PLAN.md §2).
+    // Armed by startComponentAnchor() using the currently selected ref; the next
+    // image click builds a similarity homography (known scale + rotation) so the
+    // target component lands at the clicked point.
+    bool        m_anchorMode = false;
+    std::string m_anchorRef;
+    cv::Point2f m_anchorPcb;
+
     // 2-component alignment mode
     bool m_alignOnComponents = false;
     int  m_alignCompStep = 0;  // 0=select comp1, 1=click comp1, 2=select comp2, 3=click comp2
@@ -227,6 +244,15 @@ private:
     // Dynamic scale tracking
     double m_basePixelsPerMm = 0.0;  // pixelsPerMm at initial homography
     double m_currentPixelsPerMm = 0.0;
+
+    // Per-profile tracking state (saved/restored on profile switch)
+    struct ProfileTrackingState {
+        cv::Mat  baseHomography;   // m_baseHomography snapshot
+        cv::Mat  liveHomography;   // m_homography->matrix() snapshot
+        double   pixelsPerMm = 0.0;
+        bool     liveMode    = false;
+    };
+    std::vector<ProfileTrackingState> m_profileStates{2};
 };
 
 } // namespace ibom

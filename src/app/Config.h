@@ -28,6 +28,19 @@ enum class SortMethod {
     FootprintSize    = 3   // Smallest footprint first
 };
 
+/// Per-camera configuration bundle.
+struct CameraProfile {
+    std::string   name;
+    CameraBackend backend           = CameraBackend::V4L2;
+    int           cameraIndex       = 0;
+    int           width             = 1920;
+    int           height            = 1080;
+    int           fps               = 30;
+    bool          hwDecode          = true;
+    ScaleMethod   scaleMethod       = ScaleMethod::Homography;
+    float         opticalMultiplier = 1.0f;
+};
+
 /**
  * @brief Persistent application configuration.
  *
@@ -163,6 +176,32 @@ public:
     float opticalMultiplier() const { return m_opticalMultiplier; }
     void setOpticalMultiplier(float m) { m_opticalMultiplier = m; }
 
+    // --- Microscope (1-point anchoring, see docs/MICROSCOPE_PLACEMENT_PLAN.md) ---
+    /// Fallback scale (pixels/mm) used to build a 1-point anchor homography when
+    /// no live scale is available yet. Microscope optical zoom is continuous, so
+    /// this is only a bootstrap value; the live homography refines it afterwards.
+    double microscopeAnchorPixelsPerMm() const { return m_microscopeAnchorPixelsPerMm; }
+    void setMicroscopeAnchorPixelsPerMm(double v) { m_microscopeAnchorPixelsPerMm = v; }
+
+    /// Assumed board rotation (degrees) when building a 1-point anchor — the
+    /// microscope view is usually roughly axis-aligned with the board.
+    double microscopeAnchorRotationDeg() const { return m_microscopeAnchorRotationDeg; }
+    void setMicroscopeAnchorRotationDeg(double v) { m_microscopeAnchorRotationDeg = v; }
+
+    /// Incremental (frame→frame) tracking mode. At high magnification the field
+    /// of view is narrow, so matching every frame against one fixed reference
+    /// fails as soon as the microscope pans away. Incremental mode matches each
+    /// frame against the previous one and composes the deltas — overlap stays
+    /// high so tracking holds, at the cost of accumulated drift (see §2 of
+    /// docs/MICROSCOPE_PLACEMENT_PLAN.md). Re-anchor to reset the drift.
+    bool microscopeIncremental() const { return m_microscopeIncremental; }
+    void setMicroscopeIncremental(bool v) { m_microscopeIncremental = v; }
+
+    /// Accumulated drift (px, in current-image space) past which incremental
+    /// tracking flags the estimate as "drifting" and invites a re-anchor.
+    double microscopeReanchorDriftPx() const { return m_microscopeReanchorDriftPx; }
+    void setMicroscopeReanchorDriftPx(double v) { m_microscopeReanchorDriftPx = v; }
+
     // --- Checkboxes (BOM tracking) ---
     const std::vector<std::string>& checkboxColumns() const { return m_checkboxColumns; }
     void setCheckboxColumns(const std::vector<std::string>& cols) { m_checkboxColumns = cols; }
@@ -188,6 +227,21 @@ public:
     /// Width (px) of the silkscreen outline for the currently-selected component.
     float selectedOutlineWidth() const { return m_selectedOutlineWidth; }
     void setSelectedOutlineWidth(float w) { m_selectedOutlineWidth = w; }
+
+    // --- Camera profiles ---
+    const std::vector<CameraProfile>& profiles() const { return m_profiles; }
+    std::vector<CameraProfile>& profiles() { return m_profiles; }
+
+    int  activeProfileIndex() const { return m_activeProfileIndex; }
+    void setActiveProfileIndex(int idx);
+
+    const CameraProfile& activeProfile() const { return m_profiles[m_activeProfileIndex]; }
+    CameraProfile& activeProfile() { return m_profiles[m_activeProfileIndex]; }
+
+    /// Copy the active profile's settings into the flat camera fields.
+    void applyActiveProfile();
+    /// Copy the current flat camera settings back into the active profile.
+    void saveCurrentCameraToProfile();
 
     // --- Dataset capture (Phase A — see docs/DATASET_CREATOR_PLAN.md) ---
     int    datasetMinInliers() const { return m_datasetMinInliers; }
@@ -257,6 +311,12 @@ private:
     ScaleMethod m_scaleMethod = ScaleMethod::Homography;
     float m_opticalMultiplier = 1.0f; // Lens adapter: 0.5x, 1x, 2x etc.
 
+    // Microscope (1-point anchoring)
+    double m_microscopeAnchorPixelsPerMm = 20.0;  // bootstrap scale (user tunes)
+    double m_microscopeAnchorRotationDeg = 0.0;   // assumed board rotation
+    bool   m_microscopeIncremental       = false; // frame→frame tracking (narrow FOV)
+    double m_microscopeReanchorDriftPx   = 40.0;  // drift threshold → re-anchor hint
+
     // BOM
     std::vector<std::string> m_checkboxColumns = {"Sourced", "Placed"};
 
@@ -267,6 +327,10 @@ private:
     std::string m_normalColorHex      = "#AAAA44";  // muted gold (current default)
     float       m_placedOpacity       = 0.45f;      // dim placed comps to background
     float       m_selectedOutlineWidth = 3.0f;      // thicker silk border for selected
+
+    // Camera profiles
+    std::vector<CameraProfile> m_profiles;
+    int m_activeProfileIndex = 0;
 
     // Dataset capture (defaults from docs/DATASET_CREATOR_PLAN.md §A2/§A3)
     int    m_datasetMinInliers         = 25;

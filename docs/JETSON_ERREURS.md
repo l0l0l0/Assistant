@@ -15,6 +15,13 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 27 | 2026-06-16 | Application.cpp / calibration | ✅ RÉSOLU | [Calibration de mauvaise qualité (RMS 11 px) acceptée et sauvegardée — écrase une bonne calibration + corrompt l'overlay](#erreur-27--calibration-de-mauvaise-qualite-rms-11-px-acceptee) |
+| 26 | 2026-06-16 | Application.cpp / Config | ✅ RÉSOLU | [Scale microscope faux (3.47 px/mm) — `opticalMultiplier` 0.3 multiplié par-dessus la calibration checkerboard (double comptage optique)](#erreur-26--scale-microscope-faux--double-comptage-optique) |
+| 25 | 2026-06-16 | Application.cpp / StatsPanel | ✅ RÉSOLU | [Distance / Depth fill périmés affichés pour le microscope (stats depth D405 jamais réinitialisées)](#erreur-25--distance--depth-fill-perimes-affiches-pour-le-microscope) |
+| 24 | 2026-06-16 | Application.cpp / RealSense | ✅ RÉSOLU | [D405 « Factory fx=0.0 px » — `updateCalibrationUI()` lit `colorFx()` avant la mise en cache des intrinsics](#erreur-24--d405-factory-fx00-px--intrinsics-lues-trop-tot) |
+| 23 | 2026-06-16 | CameraCapture.cpp / V4L2 enum | ✅ RÉSOLU | [Liste caméras du profil Microscope inclut les nœuds UVC du D405 (RealSense vu deux fois)](#erreur-23--liste-cameras-du-profil-microscope-inclut-les-noeuds-uvc-du-d405) |
+| 22 | 2026-06-16 | CameraCapture / GUI device combo | ✅ RÉSOLU | [Microscope inaccessible via l'UI — index combo (position) confondu avec l'index `/dev/video` réel (caméra à video6)](#erreur-22--index-combo-confondu-avec-lindex-devvideo-reel) |
+| 21 | 2026-06-16 | CameraCapture.cpp / V4L2 | ✅ RÉSOLU | [`terminate called without an active exception` (SIGABRT) au switch caméra/profil — `std::thread` joignable détruit après auto-exit du captureLoop](#erreur-21--terminate-called-without-an-active-exception-au-switch-camera) |
 | 20 | 2026-06-16 | PointCloudView.cpp / GUI | ✅ RÉSOLU | [`initializeFunctions was not declared` — faute de frappe pour `initializeOpenGLFunctions`](#erreur-20--initializefunctions-was-not-declared) |
 | 19 | 2026-06-15 | SettingsDialog.h / GUI | ✅ RÉSOLU | [`SettingsDialog::accept() is private` — override sous `private slots:` appelé par MainWindow](#erreur-19--settingsdialogaccept-is-private) |
 | 18 | 2026-06-14 | CameraCalibration.cpp | 🟡 EN COURS | [Calibration échoue `No checkerboard patterns detected` sur damier 7×5 valide — détecteur legacy capricieux](#erreur-18--calibration-echoue-sur-damier-valide--detecteur-legacy) |
@@ -41,6 +48,193 @@
 - 🟡 CONTOURNÉ — solution temporaire en place
 - ✅ RÉSOLU — fix appliqué et validé
 - 📝 INFO — note pour mémoire (pas un bug, juste un piège)
+
+---
+
+## ERREUR 27 — Calibration de mauvaise qualité (RMS 11 px) acceptée
+
+**Date :** 2026-06-16
+**Composant :** Application::runCalibration
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 46
+
+### Symptôme
+Une calibration microscope renvoie `pixels/mm=11.56` mais **RMS error=11.09** (une bonne calibration = < 1 px ; la précédente était à 0.876). L'app affiche « Calibration succeeded », sauvegarde, et applique — l'overlay/undistort devient faux (« calibration ne fonctionne plus »). La bonne calibration précédente sur disque est écrasée.
+
+### Cause
+`runCalibration()` ne testait que `error < 0` (= damier non détecté). Tout solve « réussi » était accepté, **quelle que soit la qualité**. Un RMS de 11 px signifie un modèle d'intrinsics incohérent — typiquement : damier flou, angle trop prononcé, ou **trop peu de variation de pose** entre les 5 prises (fréquent avec le champ étroit du microscope : peu de place pour incliner). Le `pixels/mm` quasi identique (11.56 vs 11.58) confirme que la détection de coins était bonne (échelle correcte) mais que le bundle adjustment multi-images divergeait.
+
+### Solution appliquée ✅
+Gate qualité dans `runCalibration()` après le solve : si `error > 1.5 px`, avertir (QMessageBox, défaut **No**) et — si l'utilisateur ne force pas — **ne pas** sauvegarder/appliquer ; recharger la calibration précédente depuis le disque (`load()` + `initUndistortMaps`) pour ne pas corrompre l'existant. Le chemin `calibPath` est calculé en amont pour permettre ce rollback. Message d'aide explicite (incliner le damier à un angle différent à chaque prise, rester net).
+
+### Leçon
+Un code de retour « réussi » d'un solveur ne garantit pas la **qualité** du résultat. Pour la calibration, le RMS de reprojection est le critère de qualité : toujours le borner avant de remplacer une calibration existante. Et au microscope (champ étroit), varier l'angle entre les prises est crucial — sinon le solve dégénère.
+
+---
+
+## ERREUR 26 — Scale microscope faux — double comptage optique
+
+**Date :** 2026-06-16
+**Composant :** Application (calibration-complete + settings-apply) / Config (profil Microscope)
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 45
+
+### Symptôme
+Après une calibration checkerboard réussie du microscope (« Pixels per mm: 11.58 »), le panneau Statistics affiche « Scale: 3.5 px/mm ». 3.5 = 11.58 × 0.3 — l'overlay et les mesures utilisent donc une échelle physiquement fausse.
+
+### Contexte optique (réel)
+Microscope = caméra + **0.35× (adaptateur sous la caméra)** + **0.7× (lentille du microscope)** + bague d'éclairage polarisée (sans effet sur l'échelle). Le profil Microscope portait `opticalMultiplier = 0.3` (approximation de la réduction optique).
+
+### Cause
+Le `opticalMultiplier` était multiplié **par-dessus** le résultat de la calibration. Or la calibration checkerboard mesure le px/mm à travers **toute** la chaîne optique (capteur + 0.35× + 0.7×) — c'est déjà l'échelle effective réelle. La remultiplier par 0.3 double-compte l'optique → 3.47, qui ne correspond à rien. Les chemins homography/depth, eux, fixaient déjà `m_currentPixelsPerMm` **sans** multiplier → incohérence : seule la voie calibration était biaisée.
+
+### Solution appliquée ✅ (calibration autoritaire)
+1. Calibration terminée (`onCalibrationComplete`) : `m_currentPixelsPerMm = m_basePixelsPerMm` (suppression de `* opticalMultiplier()`).
+2. Handler settings-apply : multiplier appliqué **uniquement si la caméra n'est pas calibrée** (`!m_calibration->isCalibrated()`). Une vraie calibration prime toujours.
+3. Défaut du profil Microscope : `opticalMultiplier` 0.3 → **1.0** (neutre).
+Résultat : calibration / homography / depth donnent tous l'échelle vraie ; le multiplier n'est plus qu'un réglage manuel pour le cas **non calibré**.
+
+### Leçon
+Une calibration (checkerboard, ou depth `fx/distance`, ou homographie sur pads iBOM) capture **déjà** l'effet de toute l'optique physique. Ne jamais ré-appliquer un facteur optique « nominal » par-dessus une mesure réelle — c'est un double comptage. Les facteurs de lentille (0.35×, 0.7×…) n'ont pas à être saisis : ils sont mesurés par la calibration.
+
+---
+
+## ERREUR 25 — Distance / Depth fill périmés affichés pour le microscope
+
+**Date :** 2026-06-16
+**Composant :** Application::updateCalibrationUI + StatsPanel
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 45
+
+### Symptôme
+En profil Microscope (V4L2, sans capteur de profondeur), le panneau Statistics affiche encore « Distance: 190.0 mm » et « Depth fill: 77% » — des valeurs héritées de la session D405 précédente.
+
+### Cause
+`Distance` et `Depth fill` ne sont mis à jour que par le handler `depthFrameReady` (RealSense uniquement). Au passage en V4L2, ce signal ne se déclenche plus jamais → les labels gardent leur dernière valeur D405. Aucun code ne les réinitialise au changement de backend.
+
+### Solution appliquée ✅
+Dans `Application::updateCalibrationUI()`, branche V4L2/microscope (backend sans depth), appeler `sp->setDistance(-1.0)` et `sp->setFillRate(-1.0)` → affiche « — » (sentinelles déjà gérées par `StatsPanel::setDistance(<=0)` / `setFillRate(<0)`). `updateCalibrationUI()` est déjà appelée à chaque changement de backend et en fin de calibration.
+
+### Leçon
+Toute statistique alimentée par un seul backend (depth, IR, etc.) doit être explicitement remise à « indisponible » quand on bascule vers un backend qui ne la produit pas — sinon l'UI ment avec des valeurs périmées.
+
+---
+
+## ERREUR 24 — D405 « Factory fx=0.0 px » — intrinsics lues trop tôt
+
+**Date :** 2026-06-16
+**Composant :** Application::updateCalibrationUI / RealSenseCapture::colorFx
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 45
+
+### Symptôme
+Panneau Statistics en profil D405 : « Calibration: Factory fx=0.0 px », alors que les logs montrent `RealSense color opened: … fx=436.8px`. La FOV/intrinsics du tooltip restent vides.
+
+### Cause
+`RealSenseCapture` met en cache les intrinsics (`m_colorFx` …) dans `captureLoop()`, **sur le thread de capture**, juste avant la boucle de frames. Or `updateCalibrationUI()` est appelée **synchroniquement** depuis `wireCameraSignals()` juste après `start()` — à cet instant le thread de capture n'a pas encore atteint la mise en cache, donc `colorFx()` renvoie encore 0.0 (défaut). Le label se fige sur la première lecture.
+
+### Solution appliquée ✅
+Rafraîchir une fois le label dès que les intrinsics sont disponibles : dans le handler `frameReady` (qui tourne pour chaque backend), flag **one-shot par connexion** (`intrinsicsShown`, init-capture `mutable` → se réinitialise tout seul à chaque hot-swap de backend). Quand `backend == RealSense` et que `colorFx() > 0`, appeler `updateCalibrationUI()` une seule fois. Coût = un `dynamic_cast` sur les quelques premières frames jusqu'à ce que fx soit disponible, puis plus rien.
+
+### Leçon
+Les intrinsics RealSense ne sont valides qu'**après** que le pipeline a démarré et livré une frame. Toute lecture de `colorFx()`/`colorFy()`/… faite synchroniquement juste après `start()` voit 0. Lire ces valeurs dans un handler de frame (ou via un signal émis après la mise en cache), jamais en synchrone post-start.
+
+---
+
+## ERREUR 23 — Liste caméras du profil Microscope inclut les nœuds UVC du D405
+
+**Date :** 2026-06-16
+**Composant :** CameraCapture::listDevices (V4L2)
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 44
+
+### Symptôme
+En profil Microscope (backend V4L2), le combo « Device » affiche en plus du microscope (`6: HAYEAR_CAMERA…`) trois entrées RealSense (`0/2/4: Intel(R) RealSense(TM) Depth…`), alors que ces caméras ne devraient apparaître que dans le combo du profil D405.
+
+### Cause
+Le D405 expose ses flux couleur/IR/depth comme de **vrais nodes UVC** `/dev/video*` en plus de l'API RealSense SDK. `VIDIOC_QUERYCAP` les rapporte donc comme caméras capture valides, et `CameraCapture::listDevices()` (corrigée en ERREUR 22 pour énumérer via `VIDIOC_QUERYCAP`) les inclut sans distinction. Sélectionner une de ces entrées en mode V4L2 ouvrirait un flux RealSense brut, non rectifié, sans aucun lien avec le pipeline RealSense SDK (factory calibration, depth align) — comportement cassé/trompeur.
+
+### Solution appliquée ✅
+Dans `CameraCapture::listDevices()`, filtrer (`continue`) tout node dont le nom de carte (`v4l2_capability.card`) contient `"RealSense"`. Le combo Microscope ne liste plus que les caméras UVC génériques (microscope).
+
+### Leçon
+Sur Jetson, une caméra RealSense occupe à la fois l'API librealsense **et** plusieurs nodes `/dev/video*` UVC bruts. Toute énumération V4L2 générique doit explicitement exclure les devices RealSense pour éviter de les exposer deux fois sous deux APIs différentes.
+
+---
+
+## ERREUR 22 — Index combo confondu avec l'index `/dev/video` réel
+
+**Date :** 2026-06-16
+**Composant :** CameraCapture::listDevices + Application/ControlPanel/SettingsDialog (combo device)
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 43
+
+### Symptôme
+Aucun device caméra ne s'ouvre (« can't open camera by index » sur `/dev/video0`…`/dev/video9`), même en sélectionnant la caméra dans le menu déroulant. Dans l'énumération, **`video6` est absent** des warnings d'échec → c'est le seul node ouvrable (la vraie caméra USB).
+
+```
+Trying camera 0 with V4L2 backend ... can't open camera by index
+... video0..video5, video7..video9 échouent (video6 absent → ouvrable)
+Failed to open camera device 0 with any backend
+```
+
+### Contexte
+- Jetson + D405 (occupe des nodes `/dev/video` bas) + microscope USB sur un node plus haut (video6).
+- Le profil Microscope (index 0 par défaut) tape sur `/dev/video0` (un node D405 / non-capture) → échec.
+
+### Cause
+Triple confusion **position dans la liste** ↔ **index `/dev/video` réel** :
+1. `CameraCapture::listDevices()` renvoyait `["Camera 6"]` (index réel noyé dans la string, perdu comme info positionnelle).
+2. `refreshCameraDeviceList()` / `SettingsDialog::enumerateCameras()` étiquetaient avec la **position** (`arg(qi)`) au lieu de l'index réel, et stockaient la position comme `itemData`.
+3. `ControlPanel::cameraIndex()` / `SettingsDialog::accept()` renvoyaient `combo->currentIndex()` (= **position** du combo) comme index de device.
+
+→ Avec le microscope à video6 et un seul device listé, le combo affichait « 0: … » et sélectionner cette unique entrée appelait `setDeviceIndex(0)` → `/dev/video0` → échec. **Le microscope était littéralement inatteignable depuis l'UI.**
+
+En prime : l'énumération via `cv::VideoCapture::open(i, CAP_ANY)` sur chaque index inondait le log de warnings GStreamer/obsensor.
+
+### Solution appliquée ✅
+1. `CameraCapture::listDevices()` → renvoie `std::vector<std::pair<int,std::string>>` (index `/dev/video` **réel** + nom). Énumération Linux via `::open` + `VIDIOC_QUERYCAP` directement : (a) donne l'index réel, (b) lit le **nom de la carte** (distingue microscope ↔ D405), (c) filtre les nodes non-capture (`V4L2_CAP_VIDEO_CAPTURE`), (d) supprime le spam de warnings OpenCV.
+2. Combo : stocke l'index réel en `itemData` ; `setCameraDevices(labels, indices, currentIndex)` sélectionne via `findData`. `ControlPanel::cameraIndex()` et `SettingsDialog::accept()` lisent `currentData().toInt()`. Sélection au chargement par `findData` (jamais par position).
+
+### Leçon
+Sur Linux, les nodes `/dev/video` ont des **trous** (multi-node par device, nodes metadata, plusieurs caméras). Ne jamais assimiler « N-ième caméra ouvrable » à `/dev/video<N>` ni à la position dans un combo : transporter l'index réel de bout en bout (item data), et énumérer via `VIDIOC_QUERYCAP` pour ne garder que les nodes capture.
+
+---
+
+## ERREUR 21 — `terminate called without an active exception` (SIGABRT) au switch caméra
+
+**Date :** 2026-06-16
+**Composant :** CameraCapture.cpp / V4L2
+**Statut :** ✅ RÉSOLU
+**Référence session :** [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 41
+
+### Symptôme
+Crash (abort) après avoir cyclé sur plusieurs devices caméra puis changé de profil/backend (ou à la fermeture). Le device 0 ne s'ouvrait pas (« available but can't be used to capture by index »).
+
+```
+[18:05:46.077] Camera settings applied: device=0 1920x1080 @30fps
+terminate called without an active exception
+[18:05:48.816] UNHANDLED SIGNAL 6 (Aborted)
+  ...
+  libstdc++ __verbose_terminate_handler
+  QComboBox::currentIndexChanged(int)
+  ...itemSelected (mouse event)
+Aborted (core dumped)
+```
+
+### Contexte
+- Combo profil (toolbar) ou combo device (ControlPanel) → `switchProfile`/`cameraSettingsChanged`.
+- Un device V4L2 ne pouvait pas s'ouvrir → `captureLoop()` mettait `m_capturing=false` et sortait **tout seul**.
+- Reproductible : oui, dès qu'un device échoue à l'ouverture puis qu'on détruit/relance la caméra.
+
+### Cause
+`m_capturing` servait à la fois de « doit continuer la boucle » **et** de proxy « le thread est vivant ». Quand `captureLoop()` s'auto-terminait (échec d'open), `m_capturing` passait à `false` mais l'objet `std::thread` restait **joignable** (fini mais jamais joint). Or `CameraCapture::stop()` faisait `if (!m_capturing.load()) return;` **avant** le join → au `m_camera.reset()` (switch profil) ou au destructeur, le `unique_ptr<std::thread>` détruisait un thread joignable → `std::terminate()` → SIGABRT. `RealSenseCapture::stop()` avait déjà été corrigé (entrée non loggée à l'époque), mais **pas** `CameraCapture::stop()`.
+
+### Solution appliquée ✅
+`CameraCapture::stop()` : ne plus early-return sur `!m_capturing` — toujours `join()` + `reset()` le thread s'il existe (via `m_capturing.exchange(false)` pour ne logger/émettre que si on était bien en train de capturer). Même logique que `RealSenseCapture::stop()`. En complément, `start()` (CameraCapture **et** RealSenseCapture) joint/reset un éventuel thread résiduel **avant** de réassigner `m_thread` (sinon la réassignation détruirait un thread joignable). Diff dans `src/camera/CameraCapture.cpp` + `src/camera/RealSenseCapture.cpp`.
+
+### Leçon
+Ne jamais utiliser un flag « en cours » comme proxy de « thread joignable ». Un `std::thread` doit être joint/détaché avant toute destruction ou réassignation, **indépendamment** de l'état logique de la boucle.
 
 ---
 

@@ -30,6 +30,8 @@
 #include "features/DatasetCreator.h"
 #include "features/RemoteView.h"
 #include "gui/DatasetPanel.h"
+#include "gui/BoardMinimap.h"
+#include "gui/FovMeasureDialog.h"
 #include "export/DataExporter.h"
 #include "export/ReportGenerator.h"
 #include "gui/Theme.h"
@@ -146,26 +148,22 @@ bool Application::initialize()
     // the engine (minutes); the app is fully usable without it meanwhile.
     initializeAI();
 
-    // Enumerate cameras and populate ControlPanel.
-    // The capture pipeline opens devices by index via OpenCV/V4L2, so we
-    // enumerate the same way (CameraCapture::listDevices). QMediaDevices is
-    // only queried for friendlier labels: on Jetson-in-Docker its multimedia
-    // backend frequently fails to see /dev/video* even when V4L2 capture works
-    // perfectly — relying on it alone yields "0 cameras" on a working device.
-    {
-        refreshCameraDeviceList();
-        // Select the configured camera index
-        int idx = m_config->cameraIndex();
-        if (auto* cp = m_mainWindow->controlPanel()) {
-            if (auto* combo = cp->findChild<QComboBox*>()) {
-                if (idx >= 0 && idx < combo->count())
-                    combo->setCurrentIndex(idx);
-            }
-        }
-    }
+    // Enumerate cameras and populate ControlPanel. The capture pipeline opens
+    // devices by their real /dev/video index via V4L2 (VIDIOC_QUERYCAP), so the
+    // combo stores that index as item data and refreshCameraDeviceList() already
+    // re-selects the configured device by data — no positional fix-up here.
+    refreshCameraDeviceList();
 
     // Show main window
     m_mainWindow->show();
+
+    // Sync profile combo to the persisted active profile.
+    m_mainWindow->setActiveProfile(m_config->activeProfileIndex());
+
+    // Pass stable homography pointer to the minimap (it lives for the app's lifetime).
+    m_mainWindow->boardMinimap()->setHomography(
+        m_homography.get(),
+        QSize(m_config->cameraWidth(), m_config->cameraHeight()));
 
     // Remote browser view, if enabled in config.
     applyRemoteViewConfig();
@@ -386,6 +384,10 @@ void Application::createSubsystems()
         Q_ARG(double, m_config->ransacThreshold()),
         Q_ARG(int,    m_config->trackingIntervalMs()),
         Q_ARG(float,  m_config->trackingDownscale()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
+        Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
+                      && m_config->microscopeIncremental()),
+        Q_ARG(double, m_config->microscopeReanchorDriftPx()));
 
     // Dataset capture worker on its own thread — JPEG writes + label
     // projection must never block the GUI (same pattern as tracking).
@@ -552,31 +554,141 @@ void Application::switchCameraBackend(CameraBackend backend)
     }
 }
 
+void Application::switchProfile(int profileIndex)
+{
+    if (profileIndex < 0 || profileIndex >= static_cast<int>(m_config->profiles().size()))
+        return;
+    if (profileIndex == m_config->activeProfileIndex() && m_camera)
+        return;
+
+    // Save current tracking state for the outgoing profile
+    const int outIdx = m_config->activeProfileIndex();
+    if (outIdx < static_cast<int>(m_profileStates.size())) {
+        auto& st = m_profileStates[outIdx];
+        st.liveMode    = m_liveMode;
+        st.pixelsPerMm = m_currentPixelsPerMm;
+        if (m_homography && m_homography->isValid())
+            st.liveHomography  = m_homography->matrix().clone();
+        st.baseHomography = m_baseHomography.clone();
+    }
+
+    // Save current flat camera settings back to the outgoing profile
+    m_config->saveCurrentCameraToProfile();
+
+    // Switch to the new profile
+    m_config->setActiveProfileIndex(profileIndex);
+    m_config->applyActiveProfile();
+    m_config->save();
+
+    // Switch the camera backend (stops/creates/rewires/starts)
+    switchCameraBackend(m_config->cameraBackend());
+
+    // Restore tracking state for the incoming profile
+    if (profileIndex < static_cast<int>(m_profileStates.size())) {
+        const auto& st = m_profileStates[profileIndex];
+        m_liveMode           = false;  // always start with live tracking off after profile switch
+        m_currentPixelsPerMm = st.pixelsPerMm;
+        m_basePixelsPerMm    = st.pixelsPerMm;
+        if (!st.liveHomography.empty() && m_homography)
+            m_homography->setMatrix(st.liveHomography);
+        m_baseHomography = st.baseHomography.clone();
+    }
+
+    // Push the restored state into the rendering/UI components. With
+    // m_liveMode forced false above, the normal homographyUpdated handler
+    // won't run for this switch, so OverlayRenderer / StatsPanel scale /
+    // BoardMinimap would otherwise keep showing the outgoing profile's values.
+    if (m_homography && m_homography->isValid() && m_overlayRenderer)
+        m_overlayRenderer->setHomography(*m_homography);
+    if (auto* sp = m_mainWindow->statsPanel())
+        sp->setScale(m_currentPixelsPerMm);
+    if (m_mainWindow->boardMinimap())
+        m_mainWindow->boardMinimap()->update();
+
+    // Tracking mode follows the profile: the microscope (V4L2, narrow FOV) uses
+    // incremental frame→frame tracking when enabled; the D405 (RealSense, wide
+    // field) keeps global reference matching. See §0bis of the placement plan.
+    if (m_trackingWorker) {
+        const bool incremental = (m_config->cameraBackend() == CameraBackend::V4L2)
+                                 && m_config->microscopeIncremental();
+        QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode",
+            Qt::QueuedConnection,
+            Q_ARG(bool,   incremental),
+            Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+    }
+
+    emit cameraProfileChanged(profileIndex);
+    spdlog::info("Switched to camera profile {}: {}", profileIndex,
+                 m_config->profiles()[profileIndex].name);
+}
+
+void Application::startComponentAnchor()
+{
+    if (!m_ibomProject || m_ibomProject->components.empty()) {
+        m_mainWindow->updateStatusMessage(tr("Load an iBOM first"));
+        return;
+    }
+    if (m_selectedRef.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Select a component in the BOM panel, then anchor on it"));
+        return;
+    }
+
+    const Component* comp = nullptr;
+    for (const auto& c : m_ibomProject->components)
+        if (c.reference == m_selectedRef) { comp = &c; break; }
+    if (!comp) {
+        m_mainWindow->updateStatusMessage(tr("Selected component not found"));
+        return;
+    }
+
+    // Cancel any other interactive picking mode.
+    m_alignOnComponents = false;
+    m_alignCompStep = 0;
+    m_pickingHomographyPoints = false;
+
+    m_anchorRef = m_selectedRef;
+    m_anchorPcb = cv::Point2f(static_cast<float>(comp->bbox.center().x),
+                              static_cast<float>(comp->bbox.center().y));
+    m_anchorMode = true;
+    m_mainWindow->updateStatusMessage(
+        tr("Anchor: CLICK on %1 in the camera image")
+            .arg(QString::fromStdString(m_anchorRef)));
+    spdlog::info("Anchor armed on {} at PCB ({:.2f}, {:.2f})",
+                 m_anchorRef, m_anchorPcb.x, m_anchorPcb.y);
+}
+
 void Application::refreshCameraDeviceList()
 {
     QStringList cameraNames;
+    QList<int>  cameraIndices;
 #ifdef IBOM_HAVE_REALSENSE
     if (m_config->cameraBackend() == CameraBackend::RealSense) {
         const auto rsDevices = camera::RealSenseCapture::listDevices();
-        for (size_t i = 0; i < rsDevices.size(); ++i)
-            cameraNames << QString("%1: %2").arg(i).arg(QString::fromStdString(rsDevices[i]));
+        for (size_t i = 0; i < rsDevices.size(); ++i) {
+            cameraNames   << QString("%1: %2").arg(i).arg(QString::fromStdString(rsDevices[i]));
+            cameraIndices << static_cast<int>(i);  // RealSense indices are positional
+        }
     } else
 #endif
     {
+        // V4L2: listDevices() returns (real /dev/video index, card name) pairs.
+        // Use the real index for both the label and the combo item data so the
+        // selected device maps to the correct node (gaps are common: the D405
+        // occupies low indices, the USB microscope a higher one).
         const auto v4lDevices = camera::CameraCapture::listDevices();
-        const auto qtCameras  = QMediaDevices::videoInputs();
-        for (size_t i = 0; i < v4lDevices.size(); ++i) {
-            const int qi = static_cast<int>(i);
-            QString label = (qi < qtCameras.size())
-                ? qtCameras[qi].description()
-                : QString::fromStdString(v4lDevices[i]);
-            cameraNames << QString("%1: %2").arg(qi).arg(label);
+        for (const auto& [idx, name] : v4lDevices) {
+            cameraNames   << QString("%1: %2").arg(idx).arg(QString::fromStdString(name));
+            cameraIndices << idx;
         }
     }
-    if (cameraNames.isEmpty())
-        cameraNames << tr("No camera detected");
+    if (cameraNames.isEmpty()) {
+        cameraNames   << tr("No camera detected");
+        cameraIndices << 0;
+    }
     if (m_mainWindow && m_mainWindow->controlPanel())
-        m_mainWindow->controlPanel()->setCameraDevices(cameraNames);
+        m_mainWindow->controlPanel()->setCameraDevices(
+            cameraNames, cameraIndices, m_config->cameraIndex());
 }
 
 void Application::openRealSenseControls()
@@ -666,6 +778,11 @@ void Application::updateCalibrationUI()
         } else {
             sp->setCalibration(0.0, 0.0, false);
         }
+        // No depth sensor on a plain UVC camera — clear the depth-derived
+        // readouts so they don't show stale values left over from a prior
+        // RealSense session (e.g. "Distance: 190 mm", "Depth fill: 77%").
+        sp->setDistance(-1.0);
+        sp->setFillRate(-1.0);
     }
 }
 
@@ -690,11 +807,32 @@ void Application::connectSignals()
             if (m_overlayRenderer)
                 m_overlayRenderer->setHomography(*m_homography);
             updateDynamicScale();
+            m_mainWindow->boardMinimap()->update();
         }, Qt::QueuedConnection);
 
         connect(m_trackingWorker, &overlay::TrackingWorker::trackingError,
                 this, [](const QString& msg) {
             spdlog::warn("Tracking worker error: {}", msg.toStdString());
+        }, Qt::QueuedConnection);
+
+        // ── Incremental tracking state → re-anchor badge (§4) ───────
+        connect(m_trackingWorker, &overlay::TrackingWorker::trackingStateChanged,
+                this, [this](int state) {
+            if (!m_liveMode) return;
+            using S = overlay::TrackingWorker::State;
+            switch (static_cast<S>(state)) {
+                case S::Locked:
+                    m_mainWindow->updateStatusMessage(tr("Tracking: locked"));
+                    break;
+                case S::Drifting:
+                    m_mainWindow->updateStatusMessage(
+                        tr("Tracking: drifting — re-anchor (A) to reset"));
+                    break;
+                case S::Lost:
+                    m_mainWindow->updateStatusMessage(
+                        tr("Tracking: LOST — re-anchor (A) or click the PCB map"));
+                    break;
+            }
         }, Qt::QueuedConnection);
 
         // Tracking quality feed for dataset capture (worker → worker, queued).
@@ -766,9 +904,34 @@ void Application::wireCameraSignals()
     // switch to V4L2). The connection itself dies with the old camera object.
     const CameraBackend backend = m_activeBackend;
     connect(m_camera.get(), &camera::ICameraSource::frameReady, this,
-            [this, backend](ibom::camera::FrameRef frameRef) {
+            [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef) mutable {
         if (!frameRef || frameRef->empty()) return;
         const cv::Mat& frame = *frameRef;
+
+        // The minimap's FOV rectangle is sized from m_config's nominal
+        // resolution at startup, but the actual camera (e.g. RealSense
+        // defaulting to 848×480 instead of the generic 1920×1080 in config)
+        // may not match it. Push the real frame size in once per connection.
+        if (!minimapSized && m_mainWindow->boardMinimap()) {
+            m_mainWindow->boardMinimap()->setHomography(
+                m_homography.get(), QSize(frame.cols, frame.rows));
+            minimapSized = true;
+        }
+
+#ifdef IBOM_HAVE_REALSENSE
+        // Factory intrinsics are cached by the capture thread when it grabs its
+        // first frame — after updateCalibrationUI() already ran synchronously at
+        // backend switch (when colorFx() was still 0). Refresh the calibration
+        // readout once, now that fx is available. The init-capture flag is
+        // per-connection, so it resets automatically on every backend hot-swap.
+        if (backend == CameraBackend::RealSense && !intrinsicsShown) {
+            if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get());
+                rs && rs->colorFx() > 0.0) {
+                updateCalibrationUI();
+                intrinsicsShown = true;
+            }
+        }
+#endif
 
         // ── Live tracking: hand the raw frame off to the worker thread ──
         // The worker throttles, downscales and runs ORB without blocking us.
@@ -1268,6 +1431,7 @@ void Application::connectControlSignals()
         m_selectedRef = ref;
         if (m_overlayRenderer)
             m_overlayRenderer->setHighlightedRefs({ref});
+        m_mainWindow->boardMinimap()->setSelectedRef(ref);
 
         // Handle 2-component alignment selection
         if (m_alignOnComponents) {
@@ -1399,6 +1563,10 @@ void Application::connectControlSignals()
                 Q_ARG(double, m_config->ransacThreshold()),
                 Q_ARG(int,    m_config->trackingIntervalMs()),
                 Q_ARG(float,  m_config->trackingDownscale()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
+                Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
+                              && m_config->microscopeIncremental()),
+                Q_ARG(double, m_config->microscopeReanchorDriftPx()));
         }
         spdlog::info("Settings applied (camera={}, ORB={}, interval={}ms, RANSAC={:.1f}, downscale={:.2f})",
                      newIdx, m_config->orbKeypoints(), m_config->trackingIntervalMs(),
@@ -1418,9 +1586,14 @@ void Application::connectControlSignals()
         // Remote view may have been toggled or moved to another port.
         applyRemoteViewConfig();
 
-        // Apply optical multiplier change to pixels-per-mm
+        // Apply optical multiplier change to pixels-per-mm — but ONLY when the
+        // camera isn't checkerboard-calibrated. A real calibration already
+        // captures the full optical chain (the microscope's 0.35× adapter +
+        // 0.7× lens, etc.), so the multiplier must not skew it; it's purely a
+        // manual nudge for the un-calibrated nominal case.
+        const bool calibrated = m_calibration && m_calibration->isCalibrated();
         float mult = m_config->opticalMultiplier();
-        if (mult > 0 && m_basePixelsPerMm > 0) {
+        if (!calibrated && mult > 0 && m_basePixelsPerMm > 0) {
             m_currentPixelsPerMm = m_basePixelsPerMm * mult;
             if (m_calibration)
                 m_calibration->setPixelsPerMm(m_currentPixelsPerMm);
@@ -1513,6 +1686,65 @@ void Application::connectControlSignals()
 
     connect(m_mainWindow->cameraView(), &gui::CameraView::clicked,
             this, [this](QPointF imagePos) {
+        // ── Microscope 1-point anchor click handling ──
+        if (m_anchorMode) {
+            m_anchorMode = false;
+            if (!m_homography) return;
+
+            cv::Point2f imgPt(static_cast<float>(imagePos.x()),
+                              static_cast<float>(imagePos.y()));
+
+            // Use the live scale if we have one, else the configured fallback.
+            double scale = (m_currentPixelsPerMm > 0.0)
+                ? m_currentPixelsPerMm
+                : m_config->microscopeAnchorPixelsPerMm();
+            if (scale <= 0.0) scale = 20.0;
+            double rot = m_config->microscopeAnchorRotationDeg() * CV_PI / 180.0;
+
+            double cosR = std::cos(rot) * scale;
+            double sinR = std::sin(rot) * scale;
+
+            // Translation so the target component maps to the clicked point.
+            double tx = imgPt.x - (cosR * m_anchorPcb.x - sinR * m_anchorPcb.y);
+            double ty = imgPt.y - (sinR * m_anchorPcb.x + cosR * m_anchorPcb.y);
+
+            auto& bb = m_ibomProject->boardInfo.boardBBox;
+            std::vector<cv::Point2f> pcbCorners = {
+                {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+                {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+                {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+                {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+            };
+            std::vector<cv::Point2f> imgCorners;
+            for (const auto& p : pcbCorners) {
+                imgCorners.push_back({
+                    static_cast<float>(cosR * p.x - sinR * p.y + tx),
+                    static_cast<float>(sinR * p.x + cosR * p.y + ty)});
+            }
+
+            if (m_homography->compute(pcbCorners, imgCorners)) {
+                m_overlayRenderer->setHomography(*m_homography);
+                m_mainWindow->boardMinimap()->update();
+                m_basePixelsPerMm = scale;
+                m_currentPixelsPerMm = scale;
+                if (auto* sp = m_mainWindow->statsPanel())
+                    sp->setScale(m_currentPixelsPerMm);
+                if (m_trackingWorker)
+                    QMetaObject::invokeMethod(m_trackingWorker, "resetReference",
+                                              Qt::QueuedConnection);
+                m_mainWindow->updateStatusMessage(
+                    tr("Anchored on %1 — scale: %2 px/mm (refine with 2-component align if needed)")
+                        .arg(QString::fromStdString(m_anchorRef))
+                        .arg(scale, 0, 'f', 1));
+                spdlog::info("Anchored on {}: scale={:.2f} px/mm rot={:.1f}°",
+                             m_anchorRef, scale, m_config->microscopeAnchorRotationDeg());
+            } else {
+                m_mainWindow->updateStatusMessage(tr("Anchor failed"));
+                spdlog::error("Anchor: homography compute failed");
+            }
+            return;
+        }
+
         // ── 2-component alignment click handling ──
         if (m_alignOnComponents && (m_alignCompStep == 1 || m_alignCompStep == 3)) {
             cv::Point2f imgPt(static_cast<float>(imagePos.x()),
@@ -1745,6 +1977,7 @@ void Application::connectControlSignals()
             this, [this, bomPanel](const std::string& ref) {
         m_placedRefs.insert(ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
+        m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
         // Persist on every placement: a restart (app or device) resumes
         // exactly where the inspection stopped.
         saveInspectionState();
@@ -1848,6 +2081,141 @@ void Application::connectControlSignals()
     connect(inspPanel, &gui::InspectionPanel::exportRequested,
             this, &Application::onExport);
 
+    // ── Camera profile selector ─────────────────────────────────
+    connect(m_mainWindow.get(), &gui::MainWindow::cameraProfileChangeRequested,
+            this, [this](int idx) { switchProfile(idx); });
+    connect(this, &Application::cameraProfileChanged,
+            m_mainWindow.get(), &gui::MainWindow::setActiveProfile);
+
+    connect(m_mainWindow.get(), &gui::MainWindow::componentAnchorRequested,
+            this, [this]() { startComponentAnchor(); });
+
+    // ── BoardMinimap ────────────────────────────────────────────────
+    // anchorRequested(pcbPoint): treat as a 1-point anchor at that PCB position,
+    // centering the FOV on the clicked point.  Reuses the same similarity-transform
+    // logic that startComponentAnchor() / the CameraView click handler use.
+    connect(m_mainWindow->boardMinimap(), &gui::BoardMinimap::anchorRequested,
+            this, [this](cv::Point2f pcbPt) {
+        if (!m_ibomProject) return;
+        double scale = (m_currentPixelsPerMm > 0.0) ? m_currentPixelsPerMm
+                       : m_config->microscopeAnchorPixelsPerMm();
+        double rot  = m_config->microscopeAnchorRotationDeg() * CV_PI / 180.0;
+        double cosR = std::cos(rot) * scale;
+        double sinR = std::sin(rot) * scale;
+
+        // Center of the camera image
+        float iw = static_cast<float>(m_camera->resolution().width());
+        float ih = static_cast<float>(m_camera->resolution().height());
+        if (iw <= 0 || ih <= 0) { iw = 1920; ih = 1080; }
+        cv::Point2f imgCenter(iw / 2.f, ih / 2.f);
+
+        // Image origin: imgCenter = H * pcbPt  ⟹ tx = cx - (cosR*px - sinR*py)
+        double tx = imgCenter.x - (cosR * pcbPt.x - sinR * pcbPt.y);
+        double ty = imgCenter.y - (sinR * pcbPt.x + cosR * pcbPt.y);
+
+        auto& bb = m_ibomProject->boardInfo.boardBBox;
+        std::vector<cv::Point2f> pcbCorners = {
+            {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+            {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+        };
+        std::vector<cv::Point2f> imgCorners;
+        imgCorners.reserve(pcbCorners.size());
+        for (auto& pc : pcbCorners) {
+            imgCorners.push_back({
+                static_cast<float>(cosR * pc.x - sinR * pc.y + tx),
+                static_cast<float>(sinR * pc.x + cosR * pc.y + ty)
+            });
+        }
+        if (m_homography->compute(pcbCorners, imgCorners)) {
+            m_overlayRenderer->setHomography(*m_homography);
+            if (m_liveMode) m_baseHomography = m_homography->matrix().clone();
+            updateDynamicScale();
+            m_mainWindow->updateStatusMessage(tr("Minimap anchor applied"));
+            spdlog::info("Minimap anchor: PCB ({:.2f}, {:.2f}) → image center", pcbPt.x, pcbPt.y);
+        }
+    });
+
+    // ── Dev menu: FOV & Scale measurement dialog ─────────────────────
+    connect(m_mainWindow.get(), &gui::MainWindow::fovMeasureRequested,
+            this, [this]() {
+        gui::FovMeasureDialog::Metrics m;
+
+        // Camera & profile
+        const auto& profiles = m_config->profiles();
+        const int pidx = m_config->activeProfileIndex();
+        m.profileName = (pidx >= 0 && pidx < static_cast<int>(profiles.size()))
+            ? QString::fromStdString(profiles[pidx].name) : tr("(none)");
+        m.isMicroscope = (m_config->cameraBackend() == CameraBackend::V4L2);
+        m.backendName = m.isMicroscope
+            ? tr("V4L2 (microscope, index %1)").arg(m_config->cameraIndex())
+            : tr("RealSense D405 (fixed lens, no zoom)");
+        m.camWidth  = m_config->cameraWidth();
+        m.camHeight = m_config->cameraHeight();
+        if (m_camera) {
+            m.camWidth  = m_camera->resolution().width();
+            m.camHeight = m_camera->resolution().height();
+        }
+
+        // Calibration
+        m.calibrated  = m_calibration && m_calibration->isCalibrated();
+        m.calibRmsErr = m_calibration ? m_calibration->rmsError() : 0.0;
+
+        // Scale & FOV. The scale source depends on the backend: the D405 derives
+        // it live from depth (fx / distance); the microscope from the tracking
+        // homography, or the config fallback before the first anchor.
+        m.configAnchorPxPerMm = m_config->microscopeAnchorPixelsPerMm();
+        if (m_currentPixelsPerMm > 0.0) {
+            m.pixelsPerMm = m_currentPixelsPerMm;
+            m.scaleSource = (!m.isMicroscope
+                             && m_config->scaleMethod() == ScaleMethod::Depth)
+                ? tr("depth (fx / working distance)")
+                : tr("homography (live)");
+        } else if (m.isMicroscope
+                   && m_config->microscopeAnchorPixelsPerMm() > 0.0) {
+            m.pixelsPerMm = m_config->microscopeAnchorPixelsPerMm();
+            m.scaleSource = tr("config fallback (anchor_pixels_per_mm)");
+        }
+        if (m.pixelsPerMm > 0.0 && m.camWidth > 0) {
+            m.fovWidthMm  = m.camWidth  / m.pixelsPerMm;
+            m.fovHeightMm = m.camHeight / m.pixelsPerMm;
+        }
+
+        // iBOM components in current FOV
+        m.totalComponents = m_ibomProject
+            ? static_cast<int>(m_ibomProject->components.size()) : 0;
+        if (m_ibomProject && m_homography && m_homography->isValid()
+                && m.camWidth > 0 && m.camHeight > 0) {
+            // Map the four image corners to PCB space, find the bounding rect
+            cv::Point2f tl = m_homography->imageToPcb({0.f, 0.f});
+            cv::Point2f tr2 = m_homography->imageToPcb(
+                {static_cast<float>(m.camWidth), 0.f});
+            cv::Point2f br = m_homography->imageToPcb(
+                {static_cast<float>(m.camWidth),
+                 static_cast<float>(m.camHeight)});
+            cv::Point2f bl = m_homography->imageToPcb(
+                {0.f, static_cast<float>(m.camHeight)});
+            const float xMin = std::min({tl.x, tr2.x, br.x, bl.x});
+            const float xMax = std::max({tl.x, tr2.x, br.x, bl.x});
+            const float yMin = std::min({tl.y, tr2.y, br.y, bl.y});
+            const float yMax = std::max({tl.y, tr2.y, br.y, bl.y});
+            int count = 0;
+            for (const auto& c : m_ibomProject->components) {
+                const auto& bb = c.bbox;
+                // Component overlaps FOV if its bbox intersects the FOV rect
+                if (bb.maxX >= xMin && bb.minX <= xMax
+                        && bb.maxY >= yMin && bb.minY <= yMax)
+                    ++count;
+            }
+            m.componentsInFov = count;
+        }
+
+        auto* dlg = new gui::FovMeasureDialog(m, m_mainWindow.get());
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->exec();
+    });
+
     spdlog::info("Signal/slot connections established, FPS timer started.");
 }
 
@@ -1878,6 +2246,9 @@ void Application::loadIBomFile(const QString& path)
     // Feed to BOM panel
     m_mainWindow->bomPanel()->loadBomData(m_ibomProject->bomGroups, m_ibomProject->components);
 
+    // Feed to minimap
+    m_mainWindow->boardMinimap()->setIBomData(*m_ibomProject);
+
     // Remember for the File → Open Recent menu and startup auto-reload.
     m_config->setIBomFilePath(path.toStdString());
     m_config->addRecentIbomFile(path.toStdString());
@@ -1890,6 +2261,7 @@ void Application::loadIBomFile(const QString& path)
     if (!m_placedRefs.empty()) {
         for (const auto& ref : m_placedRefs)
             m_mainWindow->bomPanel()->setComponentState(ref, tr("Placed"));
+        m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
         spdlog::info("Restored {} placed components from a previous session",
                      m_placedRefs.size());
     }
@@ -2145,20 +2517,67 @@ void Application::runCalibration()
         return;
     }
 
+    // Save path (utils::dataDir() creates the dir). Needed up-front so a poor
+    // calibration can be discarded and the previous good one reloaded.
+    const QString dataDir  = QString::fromStdString(utils::dataDir().string());
+    const QString calibPath = dataDir + "/calibration.yml";
+
+    // ── Quality gate ────────────────────────────────────────────────
+    // calibrate() only returns < 0 when corners aren't found; a successful
+    // solve can still be garbage. A usable checkerboard calibration has an RMS
+    // reprojection error well under 1 px — anything above ~1.5 px means blurry
+    // corners, too steep an angle, or too little pose variation between shots
+    // (easy to hit with the microscope's narrow field). Applying/saving it
+    // would corrupt the undistort maps and px/mm and overwrite a good
+    // calibration, so default to discarding and restore the previous one.
+    constexpr double kMaxAcceptableRms = 1.5;  // px
+    if (error > kMaxAcceptableRms) {
+        spdlog::warn("Calibration RMS {:.2f} px exceeds {:.1f} px threshold — poor quality",
+                     error, kMaxAcceptableRms);
+        const auto choice = QMessageBox::warning(
+            m_mainWindow.get(), tr("Calibration Quality Poor"),
+            tr("Reprojection error is %1 px — a good calibration is under 1 px.\n\n"
+               "This usually means the checkerboard was out of focus, tilted too "
+               "far, or barely moved between the 5 shots (easy to hit with the "
+               "microscope's narrow field). Tilt the board to a different angle "
+               "for each shot and keep it sharp.\n\n"
+               "Keep this calibration anyway?").arg(error, 0, 'f', 2),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            // Restore the previous good calibration if one is on disk, and
+            // rebuild its undistort maps; otherwise the camera stays as it was.
+            if (QFileInfo::exists(calibPath) && m_calibration->load(calibPath.toStdString())) {
+                auto res = m_camera->resolution();
+                m_calibration->initUndistortMaps(cv::Size(res.width(), res.height()));
+                spdlog::info("Discarded poor calibration; restored previous from {}",
+                             calibPath.toStdString());
+            } else {
+                spdlog::warn("Discarded poor calibration; no previous one to restore");
+            }
+            m_mainWindow->updateStatusMessage(
+                tr("Calibration discarded — RMS %1 px too high (kept previous)")
+                .arg(error, 0, 'f', 2));
+            return;
+        }
+    }
+
     // Initialize undistortion maps for the current resolution
     auto res = m_camera->resolution();
     m_calibration->initUndistortMaps(cv::Size(res.width(), res.height()));
 
-    // Save calibration under the unified data dir (utils::dataDir() creates it).
-    QString dataDir = QString::fromStdString(utils::dataDir().string());
-    auto calibPath = dataDir + "/calibration.yml";
     QDir().mkpath(dataDir);
     m_calibration->save(calibPath.toStdString());
 
     spdlog::info("Calibration succeeded: error={:.4f}, pixels/mm={:.2f}, saved to {}",
                  error, m_calibration->pixelsPerMm(), calibPath.toStdString());
     m_basePixelsPerMm = m_calibration->pixelsPerMm();
-    m_currentPixelsPerMm = m_basePixelsPerMm * m_config->opticalMultiplier();
+    // A checkerboard calibration measures px/mm through the ENTIRE optical
+    // chain (sensor + every reducer/lens already in place), so its result is
+    // the true effective scale. Do NOT re-apply opticalMultiplier here — that
+    // would double-count the optics (e.g. 11.58 × 0.3 = 3.47 px/mm, which is
+    // physically meaningless). The multiplier is only a fallback for an
+    // un-calibrated nominal scale (see the settings-apply handler).
+    m_currentPixelsPerMm = m_basePixelsPerMm;
     if (auto* sp = m_mainWindow->statsPanel())
         sp->setScale(m_currentPixelsPerMm);
     m_mainWindow->updateStatusMessage(
