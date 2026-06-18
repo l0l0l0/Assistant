@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 38 | 2026-06-18 | Application.cpp / BoardLocator — Auto-Align D405 | ✅ RÉSOLU | [Auto-Align échoue sur D405 : scale px/mm périmé (calibration checkerboard à une autre distance/caméra) rejette le bon contour](#erreur-38--auto-align-echoue-sur-d405-scale-pxmm-perime) |
 | 37 | 2026-06-18 | Application.cpp / build Jetson | ✅ RÉSOLU | [Build Jetson échoue : variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`](#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard) |
 | 36 | 2026-06-18 | BoardLocator / Application — Auto-Align | ✅ RÉSOLU | [Audit Auto-Align : projet périmé dans le callback, pas de seuil de score, pas de filtre de couche, race avec alignement manuel](#erreur-36--audit-auto-align-projet-perime-pas-de-seuil-pas-de-filtre-de-couche-race) |
 | 35 | 2026-06-18 | TrackingWorker / ORB | ✅ RÉSOLU | [ORB tracking se verrouille sur le fond statique au lieu de la carte déplacée à la main — pas de masque de détection sur la zone carte](#erreur-35--orb-tracking-verrouille-sur-le-fond-statique-au-lieu-de-la-carte) |
@@ -1368,3 +1369,29 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 38 — Auto-Align échoue sur D405 : scale px/mm périmé
+
+**Date :** 2026-06-18
+**Composant :** `src/app/Application.cpp` (`autoAlignBoard()`), `src/overlay/BoardLocator.cpp` (`validateSize()`)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier test réel d'Auto-Align sur D405 (log utilisateur) :
+```
+BoardLocator: Depth: candidate quad area (381762 px^2) doesn't match the board
+outline at the known scale (32771 px^2) — make sure the whole board is in frame.
+Contour: no board-shaped quad found in the frame...
+Auto-Align failed: ...
+```
+Ratio aire ≈ 11.65× (≈ 3.4× en linéaire) — bien au-delà de `kAreaTolerance = 2.5`. La méthode profondeur a très probablement trouvé le **vrai** plan de la carte (c'est tout l'intérêt de la segmentation par profondeur), mais `validateSize()` l'a rejeté car le `expectedPixelsPerMm` passé à `BoardLocator::locate()` était faux.
+
+### Cause
+`autoAlignBoard()` calculait `expectedPixelsPerMm` depuis `m_currentPixelsPerMm`/`m_basePixelsPerMm`, eux-mêmes alimentés soit par la dernière calibration checkerboard sauvegardée (`m_calibration->pixelsPerMm()`, potentiellement faite avec une autre caméra ou à une autre distance de travail), soit par un live-update **uniquement si `Config::scaleMethod() == ScaleMethod::Depth`** (cf. handler `depthFrameReady`, ligne ~1382). Avec `scaleMethod` sur autre chose que `Depth` (valeur par défaut probable), aucun de ces deux chemins ne reflète l'échelle réelle de la D405 à sa distance de travail actuelle → écart de 3.4× exactement le genre d'erreur que `validateSize()` est censé éviter de laisser passer à l'envers (ici elle bloque un **vrai positif**).
+
+### Solution appliquée ✅
+- Nouveau membre `Application::m_lastDepthDistanceMm`, mis à jour **sans condition** sur `scaleMethod()` dans le handler `depthFrameReady` (juste après `sp->setDistance(distMm)`) — donc toujours disponible dès qu'un flux profondeur D405 arrive, indépendamment du réglage d'échelle choisi par l'utilisateur.
+- `autoAlignBoard()` calcule maintenant `expectedPixelsPerMm` en priorité via la géométrie sténopé (`fx / distance_mm`, `fx` via `RealSenseCapture::colorFx()`) quand une D405 + une distance valide sont disponibles — c'est exactement la même formule déjà utilisée par le live-update `ScaleMethod::Depth`, juste rendue disponible à Auto-Align sans dépendre de ce réglage. Fallback inchangé (`m_currentPixelsPerMm` puis `m_basePixelsPerMm`) si pas de D405/distance.
+
+### Leçon
+Une calibration checkerboard sauvegardée encode une distance de travail implicite — la réutiliser pour valider la taille d'un contour détecté à une distance différente (autre caméra, autre setup) peut rejeter un résultat **correct**. Quand une mesure de distance physique directe est disponible (profondeur D405), préférer la dériver à la volée plutôt que de faire confiance à un scale mis en cache, même récent.

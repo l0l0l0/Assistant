@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-06-18 (Auto-Align D405 : scale px/mm périmé rejetait le bon contour)
+
+> **2026-06-18 (suite 62)** : **premier test réel Auto-Align sur D405** — échec : `BoardLocator: Depth: candidate quad area (381762 px^2) doesn't match the board outline at the known scale (32771 px^2)`. Ratio ≈ 11.65× (≈3.4× linéaire), largement hors `kAreaTolerance=2.5` → la méthode profondeur avait très probablement trouvé le vrai plan de la carte mais `validateSize()` l'a rejeté car `expectedPixelsPerMm` était calculé depuis une calibration checkerboard potentiellement faite avec une autre caméra/distance, et le live-update par profondeur (`ppmm = fx/distance`) n'est appliqué que si `Config::scaleMethod() == Depth`. **Fix** : nouveau membre `Application::m_lastDepthDistanceMm`, mis à jour sans condition de `scaleMethod()` dans le handler `depthFrameReady` ; `autoAlignBoard()` calcule désormais `expectedPixelsPerMm` en priorité via `fx/distance` (D405) avant de retomber sur le scale caché. Voir [JETSON_ERREURS #38](JETSON_ERREURS.md#erreur-38--auto-align-echoue-sur-d405-scale-pxmm-perime). Fichiers : `src/app/Application.{h,cpp}`. ⚠️ Non compilé ici. **À revalider** : Auto-Align sur D405 doit accepter le contour trouvé par la méthode profondeur sans erreur de taille.
+
 ## État actuel — au 2026-06-18 (Fix build Jetson : `tr`/`tl` masquaient `QObject::tr()`)
 
 > **2026-06-18 (suite 61)** : **premier build réel sur Jetson** après le commit de l'audit Auto-Align (#36) — échec : `no match for call to '(const cv::Point_<float>) (const char [38])'` sur l'appel `tr("Auto-Align: aligned via %1...")` dans `autoAlignBoard()`. Cause : le fix #5 de l'audit avait introduit des locales `tl`/`tr` (`cv::Point2f`) dans le même lambda que l'appel `tr(...)` plus bas, masquant `QObject::tr()` pour le reste de la portée. Renommées en `cornerTL`/`cornerTR`. Voir [JETSON_ERREURS #37](JETSON_ERREURS.md#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard). Fichier : `src/app/Application.cpp`. Commit `063835e`. **À revalider** : rebuild complet doit passer sans cette erreur.

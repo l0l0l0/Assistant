@@ -221,6 +221,13 @@ private:
     ibom::camera::DepthFrameRef m_lastDepthFrame;
     bool m_autoAligning = false;  // guards against re-entrant Auto-Align clicks
 
+    // Median depth (mm) over the central ROI, refreshed by the RealSense
+    // depthFrameReady handler regardless of Config::scaleMethod() — lets
+    // autoAlignBoard() derive a fresh pixels-per-mm estimate from pinhole
+    // geometry (fx / distance) instead of relying on a possibly stale
+    // checkerboard calibration done at a different working distance/camera.
+    double m_lastDepthDistanceMm = 0.0;
+
     // Bumped at the start of every alignment-applying action (manual 4-point,
     // 2-component, anchor, and Auto-Align). Auto-Align's worker-thread result
     // captures the value in flight and skips applying itself if a newer

@@ -694,8 +694,24 @@ void Application::autoAlignBoard()
     const cv::Mat depthCopy = (m_lastDepthFrame && !m_lastDepthFrame->empty())
         ? m_lastDepthFrame->clone() : cv::Mat();
     const std::shared_ptr<const IBomProject> project = m_ibomProject;
-    const double expectedPixelsPerMm = m_currentPixelsPerMm > 0.0
-        ? m_currentPixelsPerMm : m_basePixelsPerMm;
+
+    // Prefer a fresh pixels-per-mm estimate from depth pinhole geometry
+    // (fx / distance) over the currently cached scale, which may come from a
+    // checkerboard calibration done at a different working distance or with
+    // a different camera entirely — that mismatch is exactly what makes
+    // BoardLocator::validateSize() reject a correctly-found board outline.
+    double expectedPixelsPerMm = 0.0;
+#ifdef IBOM_HAVE_REALSENSE
+    if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get())) {
+        const double fx = rs->colorFx();
+        if (fx > 0.0 && m_lastDepthDistanceMm > 0.0)
+            expectedPixelsPerMm = fx / m_lastDepthDistanceMm;
+    }
+#endif
+    if (expectedPixelsPerMm <= 0.0) {
+        expectedPixelsPerMm = m_currentPixelsPerMm > 0.0
+            ? m_currentPixelsPerMm : m_basePixelsPerMm;
+    }
     const uint64_t dispatchEpoch = ++m_alignmentEpoch;
 
     auto* watcher = new QFutureWatcher<overlay::BoardLocateResult>(this);
@@ -1377,6 +1393,7 @@ void Application::wireCameraSignals()
             const double distMm = vals[vals.size() / 2];
 
             if (auto* sp = m_mainWindow->statsPanel()) sp->setDistance(distMm);
+            m_lastDepthDistanceMm = distMm;
 
             // Auto px/mm from pinhole geometry: pixelsPerMm = fx / distance_mm.
             if (m_config->scaleMethod() == ScaleMethod::Depth) {
