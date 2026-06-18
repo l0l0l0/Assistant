@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-06-18 (README réécrit : Jetson-primary)
+
+> **2026-06-18 (suite 60)** : **utilisateur** (« il va falloir refaire le readme, tant de chose ont changé »). Le `README.md` racine était resté Windows-only et datait d'avant la migration Jetson + l'ajout de nombreux modules. Réécriture complète : (1) plateforme **Jetson AGX Orin (Linux + Docker) = cible active**, Windows déplacé en "legacy" (`windows-legacy`/tag `v0.1.0-windows-final`) avec liens vers les docs JETSON_*. (2) Fonctionnalités mises à jour : RealSense D405 (couleur+profondeur, self-cal, nuage de points), Auto-Align, ancrage microscope 1-point, BoardMinimap, Dataset Creator, moniteur de calibration, fallback MJPG GStreamer CPU, masquage zone carte du tracking ORB. (3) Architecture/threading mis à jour (RealSenseCapture, BoardLocator, DatasetCreator, nouveaux panneaux/dialogues GUI tous listés depuis l'arbo réelle `src/`). (4) Build : section Jetson (bootstrap + run_dev_shell + build_jetson) en premier, Windows déplacé en section "legacy". (5) Structure projet, roadmap, modèles IA (statut "câblé" pour ComponentDetector) actualisés. Tous les liens vérifiés (docs/AI_PIPELINE, DATASET_CREATOR_PLAN, JETSON_MIGRATION, AUTO_ALIGN_PLAN, scripts/*, models/README tous présents). Fichier : `README.md`.
+
 ## État actuel — au 2026-06-18 (Auto-Align : audit + correction de bugs post-MVP)
 
 > **2026-06-18 (suite 59)** : **utilisateur a demandé un audit de bugs sur le diff Auto-Align** (« peux tu faire un audit pour trouver des bugs » → « vas y »). Revue multi-angles (code-review skill, plusieurs angles en parallèle) sur `git diff origin/main HEAD` (9 fichiers, 695 lignes — `BoardLocator.{h,cpp}` neufs + `Application.{h,cpp}`, `ControlPanel.{h,cpp}`). **Bugs corrigés** :
