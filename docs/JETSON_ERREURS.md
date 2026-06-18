@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 35 | 2026-06-18 | TrackingWorker / ORB | ✅ RÉSOLU | [ORB tracking se verrouille sur le fond statique au lieu de la carte déplacée à la main — pas de masque de détection sur la zone carte](#erreur-35--orb-tracking-verrouille-sur-le-fond-statique-au-lieu-de-la-carte) |
 | 34 | 2026-06-17 | SettingsDialog / device combo | ✅ RÉSOLU | [Settings → Camera affiche "No camera detected" alors que la D405 streame — `enumerateCameras()` n'avait pas le même garde-fou que `Application::refreshCameraDeviceList()`](#erreur-34--settings-no-camera-detected-sur-d405-active) |
 | 33 | 2026-06-17 | IBomParser / minimap bbox | ✅ RÉSOLU | [Bounding boxes composants décalées/superposées sur la minimap — `bbox.pos` lu comme coin, `relpos`/`angle` iBOM ignorés](#erreur-33--bbox-composants-decalees-relposangle-ignores) |
 | 32 | 2026-06-17 | Application / device combo | ✅ RÉSOLU | [Combo Device montre le microscope alors que la D405 est active — énumération RealSense vide (device busy) → ancienne liste V4L2 conservée](#erreur-32--combo-device-montre-le-mauvais-backend) |
@@ -1296,3 +1297,25 @@ Dans `SettingsDialog::enumerateCameras()`, callback de fin d'énumération : si 
 
 ### Leçon
 Deux endroits enuméraient les caméras RealSense avec le même piège (`rs2::context` frais ≠ device visible si déjà ouvert ailleurs dans le process) mais un seul avait le garde-fou. Vérifier toutes les implémentations dupliquées d'une même logique d'énumération quand un bug de ce type est corrigé une fois.
+
+## ERREUR 35 — ORB tracking verrouillé sur le fond statique au lieu de la carte
+
+**Date :** 2026-06-18
+**Composant :** `src/overlay/TrackingWorker.cpp` (`processFrame()`)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Live Tracking Mode activé, alignement initial réussi (log : `Homography computed: 4/4 inliers, error: 0.000 px`, `Live tracking mode enabled`, `TrackingWorker: reference captured (179 keypoints)`), mais quand l'utilisateur prend la carte PCB dans la main et la déplace sous la caméra fixe, l'overlay reste figé à sa position d'origine au lieu de suivre le mouvement.
+
+### Cause
+`TrackingWorker::processFrame()` appelait `m_detector->detectAndCompute(small, cv::noArray(), kp, desc)` — ORB détecte des points-clés sur **toute l'image**, y compris le fond (table, câbles, accessoires) qui reste statique pendant que seule la carte bouge. `cv::findHomography` (RANSAC) retient le plus grand ensemble de correspondances internement cohérent : si le fond a une densité de points-clés comparable ou supérieure à celle de la carte, RANSAC verrouille sur le fond (transform quasi-identité) plutôt que sur le mouvement réel de la carte — d'où un overlay qui ne bouge jamais.
+
+### Solution appliquée ✅
+Masquage de la détection ORB à la zone de la carte :
+- Nouveau slot `TrackingWorker::setBoardPolygon(std::vector<cv::Point2f> pcbPoints)` — reçoit les 4 coins du bbox de la carte en coordonnées PCB, appelé une fois depuis `Application::loadIBomFile()` après chargement d'un iBOM (couvre aussi bien l'ouverture manuelle que le rechargement automatique au démarrage). Persiste à travers `resetReference()`/re-ancrages.
+- Nouvelle méthode privée `buildBoardMask(smallSize, downscale)` — projette le polygone via la dernière homographie connue (`m_lastHomography`, tenue à jour après chaque estimation réussie), l'agrandit ×1.6 depuis son centroïde (tolère le mouvement depuis la dernière estimation), remplit un masque `CV_8U` via `cv::fillConvexPoly`. Retourne un `Mat` vide si pas de polygone/homographie disponible → fallback détection non masquée (pas de régression avant le premier ancrage).
+- `detectAndCompute()` reçoit désormais ce masque au lieu de `cv::noArray()`.
+- Registration Qt cross-thread pour le nouveau type de paramètre : `Q_DECLARE_METATYPE(std::vector<cv::Point2f>)` + `qRegisterMetaType<std::vector<cv::Point2f>>("std::vector<cv::Point2f>")` dans `Application::initialize()` — chaîne exacte requise pour matcher le type qualifié du slot (CLAUDE.md piège #17).
+
+### Leçon
+Pour du tracking incrémental "objet tenu à la main sous caméra fixe", ne jamais laisser un détecteur de features tourner sans masque sur une scène contenant un fond statique potentiellement riche en texture — RANSAC n'a aucune notion sémantique de "l'objet d'intérêt", il optimise juste la cohérence du plus grand sous-ensemble.
