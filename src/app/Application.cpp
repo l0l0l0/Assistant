@@ -68,6 +68,7 @@
 Q_DECLARE_METATYPE(cv::Mat)
 Q_DECLARE_METATYPE(std::shared_ptr<const ibom::IBomProject>)
 Q_DECLARE_METATYPE(ibom::Layer)
+Q_DECLARE_METATYPE(std::vector<cv::Point2f>)
 
 namespace ibom {
 
@@ -114,6 +115,7 @@ bool Application::initialize()
     qRegisterMetaType<std::shared_ptr<const IBomProject>>(
         "std::shared_ptr<const ibom::IBomProject>");
     qRegisterMetaType<ibom::Layer>("ibom::Layer");
+    qRegisterMetaType<std::vector<cv::Point2f>>("std::vector<cv::Point2f>");
 
     // Logging is already initialized in main(); just flush on info for diagnostics
     spdlog::flush_on(spdlog::level::info);
@@ -2311,6 +2313,22 @@ void Application::loadIBomFile(const QString& path)
 
     // Feed to minimap
     m_mainWindow->boardMinimap()->setIBomData(*m_ibomProject);
+
+    // Feed the board outline to the live tracker so it can mask ORB
+    // detection to the board area (avoids the background — table, cables —
+    // outvoting the board's own keypoints when the board is moved by hand
+    // under a fixed camera; see TrackingWorker::setBoardPolygon).
+    if (m_trackingWorker) {
+        auto& bb = m_ibomProject->boardInfo.boardBBox;
+        std::vector<cv::Point2f> pcbCorners = {
+            {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+            {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+        };
+        QMetaObject::invokeMethod(m_trackingWorker, "setBoardPolygon", Qt::QueuedConnection,
+            Q_ARG(std::vector<cv::Point2f>, pcbCorners));
+    }
 
     // Remember for the File → Open Recent menu and startup auto-reload.
     m_config->setIBomFilePath(path.toStdString());

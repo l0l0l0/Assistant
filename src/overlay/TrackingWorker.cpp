@@ -52,7 +52,49 @@ void TrackingWorker::setIncrementalMode(bool enabled, double driftThresholdPx)
 void TrackingWorker::setBaseHomography(cv::Mat h)
 {
     m_baseHomography = h.clone();
+    m_lastHomography = h.clone();  // best estimate available until tracking emits one
     resetReference();  // reference must be recaptured against new base
+}
+
+void TrackingWorker::setBoardPolygon(std::vector<cv::Point2f> pcbPoints)
+{
+    m_pcbPolygon = std::move(pcbPoints);
+}
+
+cv::Mat TrackingWorker::buildBoardMask(const cv::Size& smallSize, float downscale) const
+{
+    if (m_pcbPolygon.empty() || m_lastHomography.empty())
+        return {};
+
+    std::vector<cv::Point2f> imgPoly;
+    try {
+        cv::perspectiveTransform(m_pcbPolygon, imgPoly, m_lastHomography);
+    } catch (const cv::Exception&) {
+        return {};
+    }
+    if (imgPoly.empty())
+        return {};
+
+    // Grow the polygon outward from its centroid to tolerate motion since
+    // the homography estimate this mask is built from — the board may have
+    // moved between the last update and this frame.
+    cv::Point2f centroid(0.f, 0.f);
+    for (const auto& p : imgPoly) centroid += p;
+    centroid *= (1.0f / static_cast<float>(imgPoly.size()));
+    constexpr float kMarginScale = 1.6f;
+
+    std::vector<cv::Point> maskPoly;
+    maskPoly.reserve(imgPoly.size());
+    for (const auto& p : imgPoly) {
+        cv::Point2f grown = centroid + (p - centroid) * kMarginScale;
+        // Scale into the downscaled detection frame's coordinate space.
+        maskPoly.emplace_back(cv::saturate_cast<int>(grown.x * downscale),
+                               cv::saturate_cast<int>(grown.y * downscale));
+    }
+
+    cv::Mat mask = cv::Mat::zeros(smallSize, CV_8U);
+    cv::fillConvexPoly(mask, maskPoly, cv::Scalar(255));
+    return mask;
 }
 
 void TrackingWorker::resetReference()
@@ -153,10 +195,16 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
             small = gray;
 
         const float invScale = (m_downscale > 0.0f) ? (1.0f / m_downscale) : 1.0f;
+        const float fwdScale = (m_downscale > 0.0f && m_downscale < 1.0f) ? m_downscale : 1.0f;
+
+        // Restrict detection to the board's projected area (grown by a
+        // margin) so a static background can't outvote the board's own
+        // keypoints in RANSAC — see setBoardPolygon().
+        cv::Mat mask = buildBoardMask(small.size(), fwdScale);
 
         std::vector<cv::KeyPoint> kp;
         cv::Mat desc;
-        m_detector->detectAndCompute(small, cv::noArray(), kp, desc);
+        m_detector->detectAndCompute(small, mask, kp, desc);
 
         // Rescale keypoint positions back to original-resolution coords.
         for (auto& k : kp) {
@@ -210,6 +258,7 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
     double reprojErr = medianReprojError(srcPts, dstPts, frameH, inlierMask, inliers);
 
     cv::Mat combined = frameH * m_baseHomography;
+    m_lastHomography = combined.clone();
     emit homographyUpdated(combined, inliers, reprojErr);
 }
 
@@ -267,6 +316,7 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
 
     // Compose: PCB → prev_image → current_image.
     m_cumulativeH = deltaH * m_cumulativeH;
+    m_lastHomography = m_cumulativeH.clone();
 
     // Advance the reference to the current frame.
     m_prevKeypoints   = kp;

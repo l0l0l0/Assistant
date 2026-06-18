@@ -60,6 +60,15 @@ public slots:
     /// the per-frame delta after each successful tracking update.
     void setBaseHomography(cv::Mat h);
 
+    /// Set the board outline in PCB coordinates (board bbox corners are
+    /// enough). Used to mask ORB detection to the board area only — without
+    /// this, keypoints from a static background (table, cables) can
+    /// outnumber the board's own keypoints when the board is moved by hand
+    /// under a fixed camera, and RANSAC locks onto the *background* (near-
+    /// identity transform) instead of the board's actual motion. Call once
+    /// after an iBOM is loaded; persists across resetReference()/re-anchors.
+    void setBoardPolygon(std::vector<cv::Point2f> pcbPoints);
+
     /// Drop the current reference frame; the next processFrame() becomes
     /// the new reference. Also resets incremental drift accumulation.
     void resetReference();
@@ -103,12 +112,26 @@ private:
                                     int& inlierCount);
     void setState(State s);
 
+    /// Build an ORB detection mask covering the board, projected through the
+    /// last known homography into `smallSize` (the downscaled detection
+    /// frame), grown by a margin to tolerate the motion since that estimate.
+    /// Returns an empty Mat if the board polygon or a homography estimate
+    /// isn't available yet (caller falls back to unmasked detection).
+    cv::Mat buildBoardMask(const cv::Size& smallSize, float downscale) const;
+
     cv::Ptr<cv::Feature2D>         m_detector;
     cv::Ptr<cv::DescriptorMatcher> m_matcher;
 
     cv::Mat                   m_refDescriptors;
     std::vector<cv::KeyPoint> m_refKeypoints;
     cv::Mat                   m_baseHomography;
+
+    // Board outline in PCB coords (bbox corners) + best current estimate of
+    // the PCB->image homography, used only to mask ORB detection (see
+    // setBoardPolygon doc comment). Updated after every successful estimate
+    // so the mask tracks the board as it moves.
+    std::vector<cv::Point2f> m_pcbPolygon;
+    cv::Mat                  m_lastHomography;
 
     int    m_minMatchCount      = 10;
     double m_loweRatio          = 0.75;
