@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-06-18 (Fix build Jetson : `tr`/`tl` masquaient `QObject::tr()`)
+
+> **2026-06-18 (suite 61)** : **premier build réel sur Jetson** après le commit de l'audit Auto-Align (#36) — échec : `no match for call to '(const cv::Point_<float>) (const char [38])'` sur l'appel `tr("Auto-Align: aligned via %1...")` dans `autoAlignBoard()`. Cause : le fix #5 de l'audit avait introduit des locales `tl`/`tr` (`cv::Point2f`) dans le même lambda que l'appel `tr(...)` plus bas, masquant `QObject::tr()` pour le reste de la portée. Renommées en `cornerTL`/`cornerTR`. Voir [JETSON_ERREURS #37](JETSON_ERREURS.md#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard). Fichier : `src/app/Application.cpp`. Commit `063835e`. **À revalider** : rebuild complet doit passer sans cette erreur.
+
 ## État actuel — au 2026-06-18 (README réécrit : Jetson-primary)
 
 > **2026-06-18 (suite 60)** : **utilisateur** (« il va falloir refaire le readme, tant de chose ont changé »). Le `README.md` racine était resté Windows-only et datait d'avant la migration Jetson + l'ajout de nombreux modules. Réécriture complète : (1) plateforme **Jetson AGX Orin (Linux + Docker) = cible active**, Windows déplacé en "legacy" (`windows-legacy`/tag `v0.1.0-windows-final`) avec liens vers les docs JETSON_*. (2) Fonctionnalités mises à jour : RealSense D405 (couleur+profondeur, self-cal, nuage de points), Auto-Align, ancrage microscope 1-point, BoardMinimap, Dataset Creator, moniteur de calibration, fallback MJPG GStreamer CPU, masquage zone carte du tracking ORB. (3) Architecture/threading mis à jour (RealSenseCapture, BoardLocator, DatasetCreator, nouveaux panneaux/dialogues GUI tous listés depuis l'arbo réelle `src/`). (4) Build : section Jetson (bootstrap + run_dev_shell + build_jetson) en premier, Windows déplacé en section "legacy". (5) Structure projet, roadmap, modèles IA (statut "câblé" pour ComponentDetector) actualisés. Tous les liens vérifiés (docs/AI_PIPELINE, DATASET_CREATOR_PLAN, JETSON_MIGRATION, AUTO_ALIGN_PLAN, scripts/*, models/README tous présents). Fichier : `README.md`.

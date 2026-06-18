@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 37 | 2026-06-18 | Application.cpp / build Jetson | ✅ RÉSOLU | [Build Jetson échoue : variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`](#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard) |
 | 36 | 2026-06-18 | BoardLocator / Application — Auto-Align | ✅ RÉSOLU | [Audit Auto-Align : projet périmé dans le callback, pas de seuil de score, pas de filtre de couche, race avec alignement manuel](#erreur-36--audit-auto-align-projet-perime-pas-de-seuil-pas-de-filtre-de-couche-race) |
 | 35 | 2026-06-18 | TrackingWorker / ORB | ✅ RÉSOLU | [ORB tracking se verrouille sur le fond statique au lieu de la carte déplacée à la main — pas de masque de détection sur la zone carte](#erreur-35--orb-tracking-verrouille-sur-le-fond-statique-au-lieu-de-la-carte) |
 | 34 | 2026-06-17 | SettingsDialog / device combo | ✅ RÉSOLU | [Settings → Camera affiche "No camera detected" alors que la D405 streame — `enumerateCameras()` n'avait pas le même garde-fou que `Application::refreshCameraDeviceList()`](#erreur-34--settings-no-camera-detected-sur-d405-active) |
@@ -1342,3 +1343,28 @@ Pas un bug rapporté par l'utilisateur — trouvé par un audit demandé explici
 
 ### Leçon
 Un `shared_ptr` capturé par valeur dans une lambda de thread d'arrière-plan garde l'objet en vie (pas de UAF), mais ne garantit pas la cohérence **logique** si le code de complétion mélange ensuite des lectures sur "la copie capturée" et sur "le membre live" qui a pu changer pendant l'attente — toujours lire exclusivement depuis la copie capturée une fois qu'on a basculé sur ce pattern.
+
+## ERREUR 37 — Variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`
+
+**Date :** 2026-06-18
+**Composant :** `src/app/Application.cpp` (`autoAlignBoard()`)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier build réel sur Jetson après le commit de l'audit Auto-Align (#36) :
+```
+error: no match for call to ‘(const cv::Point_<float>) (const char [38])’
+  tr("Auto-Align: aligned via %1 (score %2)")
+```
+Pas détecté ici (pas de toolchain Qt6/OpenCV dans ce conteneur) — remonté seulement au premier build sur la machine Jetson.
+
+### Cause
+Le fix #5 de l'audit #36 (calcul direct du scale px/mm depuis la nouvelle homographie) introduisait deux variables locales `tl`/`tr` (`cv::Point2f`) dans le lambda `finished` de `autoAlignBoard()`. `tr` masque la fonction membre `QObject::tr()` pour le **reste de la portée du lambda** — l'appel `tr("Auto-Align: aligned via %1...")` quelques lignes plus bas tente alors d'appeler l'opérateur `()` sur le `cv::Point2f` local, qui n'existe pas.
+
+Le code existant ailleurs dans le fichier (ex: handler 4-points manuel, ligne ~2058) utilise le même nom `tr` mais sans casser, car la variable y est déclarée dans un sous-bloc `if/else` qui se termine **avant** le prochain appel à `tr(...)`, donc pas de masquage au moment de l'appel — piège purement dépendant de la portée, pas du nom en lui-même.
+
+### Solution appliquée ✅
+Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
+
+### Leçon
+Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
