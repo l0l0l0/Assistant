@@ -780,18 +780,24 @@ void RealSenseCapture::captureLoop()
                                             "still valid).");
                         } else if (lastErr.find("Not enough") != std::string::npos) {
                             // librealsense's own message is e.g. "Not enough depth
-                            // pixels! (Fill_Factor_LOW)" — too few valid stereo
-                            // samples during the 256x144 calibration capture.
-                            // Same root cause as low Depth fill% elsewhere: glare/
-                            // reflection or the target outside the D405's short
-                            // working range.
-                            hint += QString("\n\nNot enough valid depth pixels during "
-                                            "calibration (low fill factor) — usually "
-                                            "glare/reflection off a glossy board or the "
-                                            "target being outside the D405's short working "
-                                            "range (~7-50cm). Reduce glare, angle the light, "
-                                            "or move to a matte/textured surface and retry "
-                                            "(factory calibration is still valid meanwhile).");
+                            // pixels! (Fill_Factor_LOW)". OCC runs on its own
+                            // 256x144@90 profile (not the live stream) and samples
+                            // a central region — so a healthy live "Depth fill %"
+                            // does NOT mean OCC will pass. Intel's requirement is a
+                            // flat, textured surface filling the field of view at a
+                            // moderate distance; a small/tilted board at the D405's
+                            // near limit (~7cm) won't satisfy it.
+                            hint += QString("\n\nOn-chip calibration needs the camera "
+                                            "pointed straight at a FLAT, TEXTURED surface "
+                                            "that FILLS the whole frame (e.g. a textured "
+                                            "wall or a printed sheet), at a moderate "
+                                            "distance — not a small or tilted board at "
+                                            "very close range. Note this is independent "
+                                            "of the live \"Depth fill %\": OCC uses its own "
+                                            "low-res stream.\n\nThis step is OPTIONAL — it "
+                                            "only reduces depth noise. The factory "
+                                            "calibration is valid and Auto-Align / the "
+                                            "overlay work without it.");
                         }
                         emit onChipCalibrationFinished(false, 0.f, hint);
                     }
