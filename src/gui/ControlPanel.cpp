@@ -222,6 +222,13 @@ QGroupBox* ControlPanel::createCalibrationGroup()
     connect(m_btnAlignComps, &QPushButton::clicked, this, &ControlPanel::alignOnComponentsRequested);
     layout->addWidget(m_btnAlignComps);
 
+    m_btnAutoAlign = new QPushButton(tr("Auto-Align (Beta)"));
+    m_btnAutoAlign->setToolTip(tr("Automatically locate the board outline in the current frame "
+                                  "and orient the overlay to match — no clicking required. Works "
+                                  "best with the whole board visible (depth-assisted on RealSense)."));
+    connect(m_btnAutoAlign, &QPushButton::clicked, this, &ControlPanel::autoAlignRequested);
+    layout->addWidget(m_btnAutoAlign);
+
     m_liveMode = new QCheckBox(tr("Live Tracking Mode"));
     m_liveMode->setToolTip(tr("Track PCB movement in real-time using feature matching"));
     connect(m_liveMode, &QCheckBox::toggled, this, &ControlPanel::liveModeChanged);

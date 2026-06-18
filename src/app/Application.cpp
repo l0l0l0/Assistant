@@ -24,6 +24,7 @@
 #include "overlay/Homography.h"
 #include "overlay/HeatmapRenderer.h"
 #include "overlay/TrackingWorker.h"
+#include "overlay/BoardLocator.h"
 #include "features/PickAndPlace.h"
 #include "features/Measurement.h"
 #include "features/SnapshotHistory.h"
@@ -57,6 +58,8 @@
 #include <QUrl>
 #include <QDateTime>
 #include <QFile>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
@@ -670,6 +673,80 @@ void Application::startComponentAnchor()
                  m_anchorRef, m_anchorPcb.x, m_anchorPcb.y);
 }
 
+void Application::autoAlignBoard()
+{
+    if (m_autoAligning) return;  // already running, ignore re-clicks
+    if (!m_lastColorFrame || m_lastColorFrame->empty()) {
+        m_mainWindow->updateStatusMessage(tr("Auto-Align: no camera frame available yet"));
+        return;
+    }
+
+    // Cancel any other interactive picking mode.
+    m_alignOnComponents = false;
+    m_alignCompStep = 0;
+    m_pickingHomographyPoints = false;
+    m_anchorMode = false;
+
+    m_autoAligning = true;
+    m_mainWindow->updateStatusMessage(tr("Auto-Align: locating board outline..."));
+
+    const cv::Mat colorCopy = m_lastColorFrame->clone();
+    const cv::Mat depthCopy = (m_lastDepthFrame && !m_lastDepthFrame->empty())
+        ? m_lastDepthFrame->clone() : cv::Mat();
+    const std::shared_ptr<const IBomProject> project = m_ibomProject;
+    const double expectedPixelsPerMm = m_currentPixelsPerMm > 0.0
+        ? m_currentPixelsPerMm : m_basePixelsPerMm;
+
+    auto* watcher = new QFutureWatcher<overlay::BoardLocateResult>(this);
+    connect(watcher, &QFutureWatcher<overlay::BoardLocateResult>::finished, this,
+            [this, watcher]() {
+        const overlay::BoardLocateResult result = watcher->result();
+        watcher->deleteLater();
+        m_autoAligning = false;
+
+        if (!result.found || !m_ibomProject) {
+            m_mainWindow->updateStatusMessage(
+                tr("Auto-Align failed: %1").arg(QString::fromStdString(result.message)));
+            spdlog::warn("Auto-Align failed: {}", result.message);
+            return;
+        }
+
+        auto& bb = m_ibomProject->boardInfo.boardBBox;
+        const std::vector<cv::Point2f> pcbCorners = {
+            {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+            {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+        };
+
+        if (!m_homography->compute(pcbCorners, result.imageCorners)) {
+            m_mainWindow->updateStatusMessage(tr("Auto-Align: homography computation failed"));
+            return;
+        }
+
+        m_overlayRenderer->setHomography(*m_homography);
+        m_baseHomography = m_homography->matrix().clone();
+        if (m_mainWindow->boardMinimap())
+            m_mainWindow->boardMinimap()->update();
+
+        updateDynamicScale();
+        m_basePixelsPerMm = m_currentPixelsPerMm;
+
+        if (m_trackingWorker)
+            QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
+
+        m_mainWindow->updateStatusMessage(
+            tr("Auto-Align: aligned via %1 (score %2)")
+                .arg(QString::fromStdString(result.method))
+                .arg(result.score, 0, 'f', 2));
+        spdlog::info("Auto-Align succeeded via {} (score {:.2f})", result.method, result.score);
+    });
+
+    watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project, expectedPixelsPerMm]() {
+        return overlay::BoardLocator::locate(colorCopy, depthCopy, *project, expectedPixelsPerMm);
+    }));
+}
+
 void Application::refreshCameraDeviceList()
 {
     QStringList cameraNames;
@@ -947,6 +1024,10 @@ void Application::wireCameraSignals()
             [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef) mutable {
         if (!frameRef || frameRef->empty()) return;
         const cv::Mat& frame = *frameRef;
+
+        // Cached for on-demand use by Auto-Align (autoAlignBoard()). Zero-copy:
+        // frameRef is an immutable shared view, so holding it is cheap.
+        m_lastColorFrame = frameRef;
 
         // The minimap's FOV rectangle is sized from m_config's nominal
         // resolution at startup, but the actual camera (e.g. RealSense
@@ -1238,6 +1319,9 @@ void Application::wireCameraSignals()
             // Note: the depth-view image is produced by rs2::colorizer on the
             // capture thread (colorizedDepthReady), not here — better histogram
             // equalization than a fixed-range colormap.
+
+            // Cached for on-demand use by Auto-Align (autoAlignBoard()).
+            m_lastDepthFrame = depth;
 
             // Throttle to ~3 Hz — distance/scale change slowly on a fixed rig.
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -1729,6 +1813,22 @@ void Application::connectControlSignals()
         m_mainWindow->updateStatusMessage(
             tr("Select the FIRST component in the BOM panel (choose 2 components far apart)"));
         spdlog::info("2-component alignment started");
+    });
+
+    // ── Auto-Align (board outline detection) ────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::autoAlignRequested,
+            this, [this]() {
+        if (!m_ibomProject) {
+            QMessageBox::information(m_mainWindow.get(), tr("Auto-Align"),
+                tr("Load an iBOM file first."));
+            return;
+        }
+        if (!m_camera->isCapturing()) {
+            QMessageBox::information(m_mainWindow.get(), tr("Auto-Align"),
+                tr("Start the camera first."));
+            return;
+        }
+        autoAlignBoard();
     });
 
     connect(m_mainWindow->cameraView(), &gui::CameraView::clicked,

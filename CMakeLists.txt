@@ -144,6 +144,7 @@ set(SOURCES
     src/overlay/ComponentOverlay.cpp
     src/overlay/HeatmapRenderer.cpp
     src/overlay/TrackingWorker.cpp
+    src/overlay/BoardLocator.cpp
 
     # GUI
     src/gui/MainWindow.cpp
@@ -215,6 +216,7 @@ set(HEADERS
     src/overlay/ComponentOverlay.h
     src/overlay/HeatmapRenderer.h
     src/overlay/TrackingWorker.h
+    src/overlay/BoardLocator.h
 
     # GUI
     src/gui/MainWindow.h

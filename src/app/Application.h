@@ -11,6 +11,8 @@
 #include <thread>
 #include <unordered_set>
 
+#include "camera/ICameraSource.h"  // for ibom::camera::FrameRef/DepthFrameRef
+
 namespace ibom {
 
 class Config;
@@ -124,6 +126,11 @@ private:
     /// The next image click sets the homography from that single correspondence,
     /// using the live scale (or the configured microscope fallback) and rotation.
     void startComponentAnchor();
+    /// Locate the board outline in the most recent camera frame (BoardLocator)
+    /// and, on success, set the homography from it directly — no clicking
+    /// required. Runs on a worker thread (QtConcurrent) since edge detection +
+    /// orientation scoring can take tens of ms. See docs/AUTO_ALIGN_PLAN.md.
+    void autoAlignBoard();
     /// Enumerate devices for the active backend and refresh the ControlPanel.
     void refreshCameraDeviceList();
     /// Open the dynamic RealSense sensor-controls panel (from ControlPanel or
@@ -205,6 +212,14 @@ private:
     // Calibration image collection
     std::vector<cv::Mat> m_calibImages;
     bool m_collectingCalibImages = false;
+
+    // Most recent color/depth frames, cached for on-demand use (Auto-Align —
+    // see autoAlignBoard()). Both are immutable shared views (zero-copy), so
+    // simply holding the shared_ptr is safe across the throttled frameReady
+    // lambda's lifetime; no clone needed.
+    ibom::camera::FrameRef      m_lastColorFrame;
+    ibom::camera::DepthFrameRef m_lastDepthFrame;
+    bool m_autoAligning = false;  // guards against re-entrant Auto-Align clicks
 
     // Selected component ref for overlay highlight
     std::string m_selectedRef;
