@@ -745,9 +745,9 @@ void Application::autoAlignBoard()
         // so the displayed px/mm always reflects this alignment regardless of
         // Config::scaleMethod().
         const double pcbW = bb.width();
-        const auto tl = m_homography->pcbToImage({static_cast<float>(bb.minX), static_cast<float>(bb.minY)});
-        const auto tr = m_homography->pcbToImage({static_cast<float>(bb.maxX), static_cast<float>(bb.minY)});
-        const double pixW = cv::norm(cv::Point2f(tl.x - tr.x, tl.y - tr.y));
+        const auto cornerTL = m_homography->pcbToImage({static_cast<float>(bb.minX), static_cast<float>(bb.minY)});
+        const auto cornerTR = m_homography->pcbToImage({static_cast<float>(bb.maxX), static_cast<float>(bb.minY)});
+        const double pixW = cv::norm(cv::Point2f(cornerTL.x - cornerTR.x, cornerTL.y - cornerTR.y));
         if (pcbW > 0.0) {
             m_basePixelsPerMm = pixW / pcbW;
             m_currentPixelsPerMm = m_basePixelsPerMm;
