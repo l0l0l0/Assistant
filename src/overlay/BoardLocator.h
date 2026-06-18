@@ -66,10 +66,15 @@ public:
     ///                   calibration or depth-derived px/mm), 0 if unknown.
     ///                   Used to sanity-check candidate quad size; without
     ///                   it the contour fallback is far less reliable.
+    /// @param activeLayer  Which side of the board the camera is looking at —
+    ///                   only this layer's components are rendered when
+    ///                   scoring candidate orientations (mirrors the
+    ///                   convention used by OverlayRenderer::setActiveLayer()).
     static BoardLocateResult locate(const cv::Mat& colorBgr,
                                      const cv::Mat& depth16u,
                                      const ibom::IBomProject& project,
-                                     double expectedPixelsPerMm);
+                                     double expectedPixelsPerMm,
+                                     ibom::Layer activeLayer = ibom::Layer::Front);
 
 private:
     static bool locateViaDepth(const cv::Mat& depth16u,
@@ -98,7 +103,8 @@ private:
     static BoardLocateResult disambiguate(const cv::RotatedRect& rect,
                                            const cv::Mat& colorBgr,
                                            const ibom::IBomProject& project,
-                                           const std::string& method);
+                                           const std::string& method,
+                                           ibom::Layer activeLayer);
 
     /// Gray + blur + Canny + dilate — real edges in the frame, computed once
     /// and reused for all 8 orientation candidates.
@@ -110,7 +116,8 @@ private:
     static double scoreOrientation(const cv::Mat& dilatedEdges,
                                     const ibom::IBomProject& project,
                                     const std::vector<cv::Point2f>& pcbCorners,
-                                    const std::vector<cv::Point2f>& imgCorners);
+                                    const std::vector<cv::Point2f>& imgCorners,
+                                    ibom::Layer activeLayer);
 };
 
 } // namespace ibom::overlay

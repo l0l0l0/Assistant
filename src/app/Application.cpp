@@ -696,22 +696,33 @@ void Application::autoAlignBoard()
     const std::shared_ptr<const IBomProject> project = m_ibomProject;
     const double expectedPixelsPerMm = m_currentPixelsPerMm > 0.0
         ? m_currentPixelsPerMm : m_basePixelsPerMm;
+    const uint64_t dispatchEpoch = ++m_alignmentEpoch;
 
     auto* watcher = new QFutureWatcher<overlay::BoardLocateResult>(this);
     connect(watcher, &QFutureWatcher<overlay::BoardLocateResult>::finished, this,
-            [this, watcher]() {
+            [this, watcher, project, dispatchEpoch]() {
         const overlay::BoardLocateResult result = watcher->result();
         watcher->deleteLater();
         m_autoAligning = false;
 
-        if (!result.found || !m_ibomProject) {
+        if (dispatchEpoch != m_alignmentEpoch) {
+            // Another alignment action (manual or a second Auto-Align click)
+            // already landed while this detection was running — applying this
+            // now-stale result would clobber the newer one.
+            spdlog::info("Auto-Align: discarding stale result (newer alignment already applied)");
+            return;
+        }
+
+        if (!result.found) {
             m_mainWindow->updateStatusMessage(
                 tr("Auto-Align failed: %1").arg(QString::fromStdString(result.message)));
             spdlog::warn("Auto-Align failed: {}", result.message);
             return;
         }
 
-        auto& bb = m_ibomProject->boardInfo.boardBBox;
+        // Use the project captured at dispatch time, not the live m_ibomProject,
+        // in case the user loaded a different iBOM while detection was running.
+        const auto& bb = project->boardInfo.boardBBox;
         const std::vector<cv::Point2f> pcbCorners = {
             {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
             {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
@@ -729,8 +740,20 @@ void Application::autoAlignBoard()
         if (m_mainWindow->boardMinimap())
             m_mainWindow->boardMinimap()->update();
 
-        updateDynamicScale();
-        m_basePixelsPerMm = m_currentPixelsPerMm;
+        // Compute scale directly from the new homography (mirrors the manual
+        // 4-corner handler's fallback) rather than via updateDynamicScale(),
+        // so the displayed px/mm always reflects this alignment regardless of
+        // Config::scaleMethod().
+        const double pcbW = bb.width();
+        const auto tl = m_homography->pcbToImage({static_cast<float>(bb.minX), static_cast<float>(bb.minY)});
+        const auto tr = m_homography->pcbToImage({static_cast<float>(bb.maxX), static_cast<float>(bb.minY)});
+        const double pixW = cv::norm(cv::Point2f(tl.x - tr.x, tl.y - tr.y));
+        if (pcbW > 0.0) {
+            m_basePixelsPerMm = pixW / pcbW;
+            m_currentPixelsPerMm = m_basePixelsPerMm;
+            if (auto* sp = m_mainWindow->statsPanel())
+                sp->setScale(m_currentPixelsPerMm);
+        }
 
         if (m_trackingWorker)
             QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
@@ -743,7 +766,8 @@ void Application::autoAlignBoard()
     });
 
     watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project, expectedPixelsPerMm]() {
-        return overlay::BoardLocator::locate(colorCopy, depthCopy, *project, expectedPixelsPerMm);
+        return overlay::BoardLocator::locate(colorCopy, depthCopy, *project, expectedPixelsPerMm,
+                                              ibom::Layer::Front);
     }));
 }
 
@@ -1869,6 +1893,7 @@ void Application::connectControlSignals()
                     static_cast<float>(sinR * p.x + cosR * p.y + ty)});
             }
 
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbCorners, imgCorners)) {
                 m_overlayRenderer->setHomography(*m_homography);
                 m_mainWindow->boardMinimap()->update();
@@ -1958,6 +1983,7 @@ void Application::connectControlSignals()
                     imgCorners.push_back({ix, iy});
                 }
 
+                ++m_alignmentEpoch;
                 if (m_homography->compute(pcbCorners, imgCorners)) {
                     m_overlayRenderer->setHomography(*m_homography);
                     m_basePixelsPerMm = scale;
@@ -2013,6 +2039,7 @@ void Application::connectControlSignals()
                 {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}   // BL
             };
 
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbPts, m_homographyImagePoints)) {
                 m_overlayRenderer->setHomography(*m_homography);
                 spdlog::info("Manual homography computed successfully (error={:.3f}px)",
@@ -2275,6 +2302,7 @@ void Application::connectControlSignals()
                 static_cast<float>(sinR * pc.x + cosR * pc.y + ty)
             });
         }
+        ++m_alignmentEpoch;
         if (m_homography->compute(pcbCorners, imgCorners)) {
             m_overlayRenderer->setHomography(*m_homography);
             if (m_liveMode) m_baseHomography = m_homography->matrix().clone();
@@ -2470,6 +2498,7 @@ void Application::loadIBomFile(const QString& path)
                 {ox, oy}, {ox + bw * scale, oy},
                 {ox + bw * scale, oy + bh * scale}, {ox, oy + bh * scale}
             };
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbPts, imgPts)) {
                 m_overlayRenderer->setHomography(*m_homography);
                 spdlog::info("Auto-homography computed: board {:.1f}x{:.1f} → scale {:.2f}", bw, bh, scale);

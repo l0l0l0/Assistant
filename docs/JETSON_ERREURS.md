@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 36 | 2026-06-18 | BoardLocator / Application — Auto-Align | ✅ RÉSOLU | [Audit Auto-Align : projet périmé dans le callback, pas de seuil de score, pas de filtre de couche, race avec alignement manuel](#erreur-36--audit-auto-align-projet-perime-pas-de-seuil-pas-de-filtre-de-couche-race) |
 | 35 | 2026-06-18 | TrackingWorker / ORB | ✅ RÉSOLU | [ORB tracking se verrouille sur le fond statique au lieu de la carte déplacée à la main — pas de masque de détection sur la zone carte](#erreur-35--orb-tracking-verrouille-sur-le-fond-statique-au-lieu-de-la-carte) |
 | 34 | 2026-06-17 | SettingsDialog / device combo | ✅ RÉSOLU | [Settings → Camera affiche "No camera detected" alors que la D405 streame — `enumerateCameras()` n'avait pas le même garde-fou que `Application::refreshCameraDeviceList()`](#erreur-34--settings-no-camera-detected-sur-d405-active) |
 | 33 | 2026-06-17 | IBomParser / minimap bbox | ✅ RÉSOLU | [Bounding boxes composants décalées/superposées sur la minimap — `bbox.pos` lu comme coin, `relpos`/`angle` iBOM ignorés](#erreur-33--bbox-composants-decalees-relposangle-ignores) |
@@ -1319,3 +1320,25 @@ Masquage de la détection ORB à la zone de la carte :
 
 ### Leçon
 Pour du tracking incrémental "objet tenu à la main sous caméra fixe", ne jamais laisser un détecteur de features tourner sans masque sur une scène contenant un fond statique potentiellement riche en texture — RANSAC n'a aucune notion sémantique de "l'objet d'intérêt", il optimise juste la cohérence du plus grand sous-ensemble.
+
+## ERREUR 36 — Audit Auto-Align : projet périmé, pas de seuil, pas de filtre de couche, race
+
+**Date :** 2026-06-18
+**Composant :** `src/overlay/BoardLocator.{h,cpp}`, `src/app/Application.{h,cpp}`
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Pas un bug rapporté par l'utilisateur — trouvé par un audit demandé explicitement (« peux tu faire un audit pour trouver des bugs ») sur le diff Auto-Align (`git diff origin/main HEAD`, 9 fichiers/695 lignes), via une revue multi-angles (code-review skill).
+
+### Causes et corrections
+1. **Projet iBOM périmé** — le callback `finished` de la lambda Auto-Align lisait le membre live `m_ibomProject` (peut changer ou devenir nul pendant la détection sur thread worker, si l'utilisateur charge un autre iBOM en attendant) au lieu de la copie `project` capturée au moment du dispatch. → `pcbCorners` reconstruit depuis `project->boardInfo.boardBBox`, `project` ajouté à la capture lambda.
+2. **`result.found` toujours vrai** — `BoardLocator::disambiguate()` n'appliquait aucun seuil minimal sur le score d'orientation ; un iBOM sans `boardOutline` ni composants sur la couche active fait que tous les 8 candidats scorent exactement 0.0, et le premier "gagne par défaut" (`bestScore` initialisé à -1.0) → reporté comme succès. → constante `kMinAcceptableScore = 0.10`, `result.found = !bestImgCorners.empty() && bestScore >= kMinAcceptableScore`.
+3. **Filtre de couche manquant** — `scoreOrientation()` rendait tous les composants (front+back) alors qu'`OverlayRenderer` ne rend que `m_activeLayer` ; dilue le score sur une carte double-face. → paramètre `ibom::Layer activeLayer` propagé `locate()`→`disambiguate()`→`scoreOrientation()`, filtre `if (comp.layer != activeLayer) continue;`.
+4. **Race avec un alignement manuel concurrent** — aucune notion d'ordre entre le résultat Auto-Align (arrivant après un délai sur thread worker) et un alignement manuel déclenché pendant ce délai ; le dernier à arriver écrasait l'autre silencieusement. → compteur `Application::m_alignmentEpoch`, incrémenté à chaque alignement appliqué, capturé au dispatch d'Auto-Align et vérifié dans le callback avant d'appliquer le résultat.
+5. **Échelle px/mm pas toujours rafraîchie** — `updateDynamicScale()` peut être un no-op selon `Config::scaleMethod()`. → calcul géométrique direct depuis la nouvelle homographie (même fallback que le handler 4-points manuel).
+
+### Non corrigé (limitation acceptée)
+`validateSize()` reste un no-op quand `expectedPixelsPerMm <= 0` (app jamais calibrée) — le fallback contour perd son principal garde-fou anti-faux-positif dans ce cas. Le seuil de score (point 2 ci-dessus) reste un second filet de sécurité. Documenté dans `docs/AUTO_ALIGN_PLAN.md` ("Risks") plutôt que corrigé ici.
+
+### Leçon
+Un `shared_ptr` capturé par valeur dans une lambda de thread d'arrière-plan garde l'objet en vie (pas de UAF), mais ne garantit pas la cohérence **logique** si le code de complétion mélange ensuite des lectures sur "la copie capturée" et sur "le membre live" qui a pu changer pendant l'attente — toujours lire exclusivement depuis la copie capturée une fois qu'on a basculé sur ce pattern.

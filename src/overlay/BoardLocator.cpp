@@ -26,6 +26,14 @@ constexpr double kAreaTolerance = 2.5;
 // of the iBOM-implied aspect ratio.
 constexpr double kAspectTolerance = 1.6;
 
+// Minimum edge-agreement score (see scoreOrientation()) for a disambiguated
+// orientation to be reported as found=true. Below this, every one of the 8
+// candidates scored too low to trust (e.g. an iBOM with no boardOutline and
+// no active-layer components — predictedPixels stays 0 and every candidate
+// scores exactly 0.0, which would otherwise win "by default" since the
+// search starts from bestScore = -1.0).
+constexpr double kMinAcceptableScore = 0.10;
+
 } // namespace
 
 cv::Mat BoardLocator::computeEdgeMap(const cv::Mat& colorBgr)
@@ -214,7 +222,8 @@ bool BoardLocator::locateViaContour(const cv::Mat& colorBgr,
 double BoardLocator::scoreOrientation(const cv::Mat& dilatedEdges,
                                        const ibom::IBomProject& project,
                                        const std::vector<cv::Point2f>& pcbCorners,
-                                       const std::vector<cv::Point2f>& imgCorners)
+                                       const std::vector<cv::Point2f>& imgCorners,
+                                       ibom::Layer activeLayer)
 {
     Homography h;
     if (!h.compute(pcbCorners, imgCorners)) return 0.0;
@@ -231,6 +240,11 @@ double BoardLocator::scoreOrientation(const cv::Mat& dilatedEdges,
     }
 
     for (const auto& comp : project.components) {
+        // Only render the side of the board the camera is actually looking
+        // at — mirrors OverlayRenderer's own active-layer filter. Mixing in
+        // the opposite layer's (mirrored) footprints would dilute the score
+        // of the correct orientation on a double-sided board.
+        if (comp.layer != activeLayer) continue;
         const auto corners = h.transformRect(static_cast<float>(comp.bbox.minX),
                                               static_cast<float>(comp.bbox.minY),
                                               static_cast<float>(comp.bbox.width()),
@@ -253,7 +267,8 @@ double BoardLocator::scoreOrientation(const cv::Mat& dilatedEdges,
 BoardLocateResult BoardLocator::disambiguate(const cv::RotatedRect& rect,
                                               const cv::Mat& colorBgr,
                                               const ibom::IBomProject& project,
-                                              const std::string& method)
+                                              const std::string& method,
+                                              ibom::Layer activeLayer)
 {
     BoardLocateResult result;
     result.method = method;
@@ -288,7 +303,7 @@ BoardLocateResult BoardLocator::disambiguate(const cv::RotatedRect& rect,
             std::vector<cv::Point2f> candidate(4);
             for (int i = 0; i < 4; ++i) candidate[i] = base[(i + shift) % 4];
 
-            const double score = scoreOrientation(edges, project, pcbCorners, candidate);
+            const double score = scoreOrientation(edges, project, pcbCorners, candidate, activeLayer);
             if (score > bestScore) {
                 bestScore = score;
                 bestImgCorners = candidate;
@@ -296,7 +311,7 @@ BoardLocateResult BoardLocator::disambiguate(const cv::RotatedRect& rect,
         }
     }
 
-    result.found = !bestImgCorners.empty();
+    result.found = !bestImgCorners.empty() && bestScore >= kMinAcceptableScore;
     result.imageCorners = bestImgCorners;
     result.score = std::max(0.0, bestScore);
 
@@ -304,9 +319,13 @@ BoardLocateResult BoardLocator::disambiguate(const cv::RotatedRect& rect,
     if (result.found) {
         std::snprintf(buf, sizeof(buf), "Board located via %s, edge-agreement score %.2f",
                       method.c_str(), result.score);
-    } else {
+    } else if (bestImgCorners.empty()) {
         std::snprintf(buf, sizeof(buf), "Board outline found via %s but orientation scoring failed",
                       method.c_str());
+    } else {
+        std::snprintf(buf, sizeof(buf),
+                      "Board outline found via %s but best orientation score %.2f is below threshold %.2f",
+                      method.c_str(), bestScore, kMinAcceptableScore);
     }
     result.message = buf;
     return result;
@@ -315,7 +334,8 @@ BoardLocateResult BoardLocator::disambiguate(const cv::RotatedRect& rect,
 BoardLocateResult BoardLocator::locate(const cv::Mat& colorBgr,
                                         const cv::Mat& depth16u,
                                         const ibom::IBomProject& project,
-                                        double expectedPixelsPerMm)
+                                        double expectedPixelsPerMm,
+                                        ibom::Layer activeLayer)
 {
     BoardLocateResult result;
 
@@ -355,7 +375,7 @@ BoardLocateResult BoardLocator::locate(const cv::Mat& colorBgr,
         }
     }
 
-    auto disambiguated = disambiguate(rect, colorBgr, project, method);
+    auto disambiguated = disambiguate(rect, colorBgr, project, method, activeLayer);
     spdlog::info("BoardLocator: {}", disambiguated.message);
     return disambiguated;
 }

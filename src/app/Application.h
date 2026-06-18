@@ -221,6 +221,12 @@ private:
     ibom::camera::DepthFrameRef m_lastDepthFrame;
     bool m_autoAligning = false;  // guards against re-entrant Auto-Align clicks
 
+    // Bumped at the start of every alignment-applying action (manual 4-point,
+    // 2-component, anchor, and Auto-Align). Auto-Align's worker-thread result
+    // captures the value in flight and skips applying itself if a newer
+    // alignment already landed by the time it finishes.
+    uint64_t m_alignmentEpoch = 0;
+
     // Selected component ref for overlay highlight
     std::string m_selectedRef;
 
