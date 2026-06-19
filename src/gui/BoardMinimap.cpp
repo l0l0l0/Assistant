@@ -191,12 +191,22 @@ void BoardMinimap::paintEvent(QPaintEvent*)
             if (comp.layer != m_activeLayer) break;  // pads below: front/back only
 
 
-            // Pad outlines (thin) + pin 1 (filled red dot).
+            // Pad outlines (thin) + pin 1 (prominent red "click here" marker:
+            // filled dot + ring + crosshair). The user relies on this red pin
+            // — rather than a green target — when marking pin 1 in multi-align.
             for (const auto& pad : comp.pads) {
                 QPointF c = pcbToWidget(pad.position.x, pad.position.y);
                 if (pad.isPin1) {
-                    p.setPen(QPen(QColor(255, 70, 70), 1.2f));
-                    p.setBrush(QColor(255, 70, 70, 220));
+                    // Dark halo so the red stays visible over yellow pad dots.
+                    p.setPen(QPen(QColor(0, 0, 0, 160), 3.0));
+                    p.setBrush(Qt::NoBrush);
+                    p.drawEllipse(c, 6.0, 6.0);
+                    p.setPen(QPen(QColor(255, 70, 70), 2.0f));
+                    p.drawEllipse(c, 6.0, 6.0);
+                    p.drawLine(QPointF(c.x() - 8, c.y()), QPointF(c.x() + 8, c.y()));
+                    p.drawLine(QPointF(c.x(), c.y() - 8), QPointF(c.x(), c.y() + 8));
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(QColor(255, 70, 70, 230));
                     p.drawEllipse(c, 3.0, 3.0);
                 } else {
                     p.setPen(QPen(QColor(255, 220, 50, 200), 0.8f));

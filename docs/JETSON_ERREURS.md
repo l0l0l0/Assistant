@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 48 | 2026-06-19 | Application.cpp — sélection PCB Map | ✅ RÉSOLU | [Clic sur la PCB Map ne sélectionne pas le composant visé : recherche par centre le plus proche (`c.position`) peu fiable sur carte dense → hit-test bbox](#erreur-48--clic-pcb-map-ne-selectionne-pas-le-bon-composant-nearest-center-peu-fiable) |
 | 47 | 2026-06-19 | TrackingWorker.cpp — Live Tracking | ✅ RÉSOLU | [Overlay "vibre" pixel par pixel en Live Tracking sur scène statique — homographie refaite de zéro chaque frame sans lissage temporel](#erreur-47--overlay-vibre-en-live-tracking-sur-scene-statique-pas-de-lissage) |
 | 46 | 2026-06-19 | Application.cpp — overlay caméra | ✅ RÉSOLU | [« Reset Alignment ne fait rien » : l'overlay est dessiné seulement si `m_homography->isValid()`, donc quand l'homographie devient invalide le bloc est sauté et la dernière image d'overlay reste figée à l'écran (jamais effacée)](#erreur-46--reset-alignment-ne-fait-rien-overlay-fige) |
 | 45 | 2026-06-19 | IBomParser.cpp — détection pin 1 | ✅ RÉSOLU | [`pin1` lu uniquement comme booléen alors que l'iBOM l'encode en entier → pin 1 jamais détectée pour les parts dont le pad pin 1 n'est pas nommé "1" (ex. ESP32 U7)](#erreur-45--pin1-ibom-entier-non-detecte) |
@@ -1378,6 +1379,26 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 48 — Clic PCB Map ne sélectionne pas le bon composant (nearest-center peu fiable)
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` — handler `BoardMinimap::anchorRequested`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+« On ne peut toujours pas cliquer sur le composant dans la map pour le sélectionner » : cliquer sur une part dans la PCB Map ne sélectionne pas (ou sélectionne un mauvais) composant, en multi-align comme en sélection simple.
+
+### Cause
+Les deux chemins de clic minimap (branche multi-align + branche RealSense) cherchaient le composant dont le **centre** (`c.position`) était le plus proche du point cliqué (`std::hypot` min). Sur une carte dense, le centre d'un gros composant voisin peut être plus proche du clic que le petit composant qu'on vise pile dessus → mauvaise sélection, impression que « ça ne marche pas ».
+
+### Solution appliquée
+Nouveau helper `Application::componentAtPcb(cv::Point2f)` : **hit-test bbox** d'abord — parmi les composants Front dont la bbox **contient** le point cliqué, prendre le **plus petit** (le plus spécifique) ; repli sur le centre le plus proche uniquement si le clic tombe sur du board nu (aucune bbox ne contient le point). Utilisé dans les deux chemins. Fichiers `src/app/Application.{h,cpp}`.
+
+### Leçon
+Pour « cliquer sur un objet pour le sélectionner », tester l'**appartenance géométrique** (point-dans-bbox/polygone) avant de retomber sur une distance au centre. Le nearest-center seul échoue dès que les objets ont des tailles très différentes et se touchent.
+
+---
 
 ## ERREUR 47 — Overlay vibre en Live Tracking sur scène statique (pas de lissage)
 

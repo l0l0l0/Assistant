@@ -18,6 +18,7 @@ namespace ibom {
 class Config;
 enum class CameraBackend;
 struct IBomProject;
+struct Component;
 class IBomParser;
 
 namespace gui {
@@ -321,6 +322,12 @@ private:
     /// target — no need to cancel. No-op if the component is unusable for the
     /// chosen method (e.g. pin-1 method on a part with no pin-1 pad).
     void beginMarkComponent(const std::string& ref);
+
+    /// Resolve a PCB-coordinate point (e.g. a PCB Map click) to a component:
+    /// the smallest Front-layer component whose bbox contains the point, or
+    /// the nearest component centre if the click lands on bare board. Returns
+    /// nullptr when no iBOM is loaded. Used by the minimap selection paths.
+    const Component* componentAtPcb(cv::Point2f pcbPt) const;
 
     /// Create (lazily) and show the persistent non-modal multi-align panel,
     /// wiring its method/finish/cancel signals to the alignment flow.

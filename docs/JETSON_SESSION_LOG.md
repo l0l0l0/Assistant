@@ -11,6 +11,16 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Multi-Comp : pin 1 en rouge + sélection composant fiable sur la PCB Map)
+
+> **2026-06-19 (suite 83)** : **2 retours utilisateur**. (a) « pour le choix des pins je préférais la pin en rouge plutôt que la cible verte » ; (b) « on ne peut toujours pas cliquer sur le composant dans la map pour le sélectionner ».
+>
+> **Fix (a)** : pour la méthode **Pin 1**, ne plus poser d'anneau vert (`setClickTargets({})`) — on s'appuie sur le **marqueur rouge de la pin 1** déjà dessiné pour le composant sélectionné sur la PCB Map. Ce marqueur est rendu **plus proéminent** : halo noir + anneau rouge `(255,70,70)` rayon 6 + croix + point plein central, au lieu d'un simple petit point rayon 3. Texte de statut mis à jour (« the RED pin on the PCB Map » au lieu de « green target »). Les méthodes opposite-pads / body-corners gardent les cibles vertes (2 points, numérotées). Fichiers : `src/app/Application.cpp` (case 1 de `beginMarkComponent`), `src/gui/BoardMinimap.cpp` (rendu pin 1).
+>
+> **Fix (b)** [JETSON_ERREURS #48](JETSON_ERREURS.md#erreur-48--clic-pcb-map-ne-selectionne-pas-le-bon-composant-nearest-center-peu-fiable) : la sélection au clic sur la PCB Map prenait le composant dont le **centre** (`c.position`) était le plus proche du point cliqué — peu fiable sur carte dense (le centre d'un gros voisin peut être plus proche qu'un petit composant qu'on vise pile dessus). Nouveau helper `Application::componentAtPcb(pcbPt)` : **hit-test bbox** d'abord (le plus petit composant Front dont la bbox **contient** le point — donc cliquer *sur* la part la sélectionne), repli sur le centre le plus proche seulement si le clic tombe sur du board nu. Utilisé dans les 2 chemins de clic minimap (multi-align + sélection RealSense). Fichiers : `src/app/Application.{h,cpp}`.
+>
+> ⚠️ **Non compilé/testé ici** (pas de toolchain Qt6/OpenCV). **À valider au prochain build Jetson** : en Multi-Comp, méthode Pin 1 → marqueur rouge proéminent sur la pin 1, plus d'anneau vert ; cliquer *sur* un composant dans la PCB Map (multi-align **et** hors multi-align sur D405) le sélectionne fiablement même sur zone dense.
+
 ## État actuel — au 2026-06-19 (Live Tracking : overlay qui "vibre" à l'arrêt — smoothing homographie)
 
 > **2026-06-19 (suite 82)** : **retour utilisateur** (2 captures montrant le live tracking bien aligné : 4/4 inliers, erreur 0.000px, "Multi-align OK") — « c'est pas mal le live tracking mais ça vibre après si je ne bouge rien ». **Diagnostic** (lecture `TrackingWorker.{h,cpp}`) : chaque frame recalcule **de zéro** une homographie via ORB+RANSAC (`processReference`/`processIncremental`), sans aucun lissage temporel. Même sur une scène parfaitement statique, le bruit de localisation sub-pixel des keypoints ORB fait varier légèrement le fit RANSAC d'une frame à l'autre → l'overlay "vibre" visuellement de quelques pixels alors que rien ne bouge physiquement. Aucune logique existante n'amortit ce bruit ni ne distingue "petit bruit" de "vrai mouvement".

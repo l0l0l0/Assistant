@@ -787,6 +787,34 @@ void Application::showMultiAlignDialog()
     m_multiAlignDialog->activateWindow();
 }
 
+const Component* Application::componentAtPcb(cv::Point2f pcbPt) const
+{
+    if (!m_ibomProject) return nullptr;
+
+    // Prefer a component whose bbox actually contains the click — this makes
+    // "click the part on the PCB Map to select it" reliable even on a dense
+    // board, where the nearest *center* can belong to a bigger neighbour. When
+    // several overlap the point, take the smallest (most specific) one. Only
+    // when the click lands on bare board do we fall back to nearest-center.
+    const Component* hit = nullptr;
+    double hitArea = std::numeric_limits<double>::max();
+    const Component* nearest = nullptr;
+    double bestDist = std::numeric_limits<double>::max();
+
+    for (const auto& c : m_ibomProject->components) {
+        if (c.layer != ibom::Layer::Front) continue;  // matches the rendered overlay
+        const auto& bb = c.bbox;
+        if (pcbPt.x >= bb.minX && pcbPt.x <= bb.maxX &&
+            pcbPt.y >= bb.minY && pcbPt.y <= bb.maxY) {
+            const double area = (bb.maxX - bb.minX) * (bb.maxY - bb.minY);
+            if (area < hitArea) { hitArea = area; hit = &c; }
+        }
+        const double d = std::hypot(c.position.x - pcbPt.x, c.position.y - pcbPt.y);
+        if (d < bestDist) { bestDist = d; nearest = &c; }
+    }
+    return hit ? hit : nearest;
+}
+
 void Application::beginMarkComponent(const std::string& ref)
 {
     if (!m_ibomProject) return;
@@ -831,9 +859,13 @@ void Application::beginMarkComponent(const std::string& ref)
         m_alignMultiHaveCorner1 = false;
         m_alignMultiAwaitClick  = true;
         m_alignMultiRef = ref;
-        m_mainWindow->boardMinimap()->setClickTargets({m_alignMultiPcb});
+        // Pin 1 is already drawn as the prominent RED marker on the PCB Map
+        // (the selected component's pin-1 pad). The user asked to rely on that
+        // red pin rather than a separate green target ring for the pin method,
+        // so don't add a green click target here.
+        m_mainWindow->boardMinimap()->setClickTargets({});
         setStatus(
-            tr("Click PIN 1 of %1 in the image (green target in the PCB Map). "
+            tr("Click PIN 1 of %1 in the image (the RED pin on the PCB Map). "
                "Or pick another component to switch.").arg(qref));
         break;
     }
@@ -2824,28 +2856,13 @@ void Application::connectControlSignals()
         // panel, but without leaving the camera view. Switching is free
         // (beginMarkComponent re-arms), so a wrong pick needs no cancel.
         if (m_alignMulti) {
-            const Component* nearest = nullptr;
-            double bestDist = std::numeric_limits<double>::max();
-            for (const auto& c : m_ibomProject->components) {
-                if (c.layer != ibom::Layer::Front) continue;
-                const double d = std::hypot(c.position.x - pcbPt.x,
-                                            c.position.y - pcbPt.y);
-                if (d < bestDist) { bestDist = d; nearest = &c; }
-            }
-            if (nearest) beginMarkComponent(nearest->reference);
+            const Component* pick = componentAtPcb(pcbPt);
+            if (pick) beginMarkComponent(pick->reference);
             return;
         }
 
         if (m_config->cameraBackend() == CameraBackend::RealSense) {
-            const Component* nearest = nullptr;
-            double bestDist = std::numeric_limits<double>::max();
-            for (const auto& c : m_ibomProject->components) {
-                if (c.layer != ibom::Layer::Front) continue;  // matches rendered layer
-                const double dx = c.position.x - pcbPt.x;
-                const double dy = c.position.y - pcbPt.y;
-                const double d = std::hypot(dx, dy);
-                if (d < bestDist) { bestDist = d; nearest = &c; }
-            }
+            const Component* nearest = componentAtPcb(pcbPt);
             if (!nearest) return;
             m_selectedRef = nearest->reference;
             if (m_overlayRenderer)
