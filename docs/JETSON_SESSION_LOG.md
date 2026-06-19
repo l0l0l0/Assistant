@@ -11,6 +11,21 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Live Tracking : overlay qui "vibre" à l'arrêt — smoothing homographie)
+
+> **2026-06-19 (suite 82)** : **retour utilisateur** (2 captures montrant le live tracking bien aligné : 4/4 inliers, erreur 0.000px, "Multi-align OK") — « c'est pas mal le live tracking mais ça vibre après si je ne bouge rien ». **Diagnostic** (lecture `TrackingWorker.{h,cpp}`) : chaque frame recalcule **de zéro** une homographie via ORB+RANSAC (`processReference`/`processIncremental`), sans aucun lissage temporel. Même sur une scène parfaitement statique, le bruit de localisation sub-pixel des keypoints ORB fait varier légèrement le fit RANSAC d'une frame à l'autre → l'overlay "vibre" visuellement de quelques pixels alors que rien ne bouge physiquement. Aucune logique existante n'amortit ce bruit ni ne distingue "petit bruit" de "vrai mouvement".
+>
+> **Fix** : nouvelle méthode `TrackingWorker::smoothHomography(rawH)` — projette `m_pcbPolygon` (les 4 coins du board bbox, déjà alimentés via `setBoardPolygon()` pour le masque ORB) à travers la **dernière estimée lissée** et la **nouvelle estimée brute**, mesure le déplacement max des coins projetés, puis :
+> - déplacement ≤ 1.5px → bruit, blend très amorti (poids 0.15 sur la nouvelle estimée)
+> - déplacement ≥ 12px → vrai mouvement, blend = 1.0 (nouvelle estimée intégrale, pas de lag)
+> - entre les deux → rampe linéaire du poids
+>
+> Les points lissés sont ensuite refit en une homographie via `cv::findHomography(..., method=0)` (DLT least-squares, pas de RANSAC nécessaire — 4 points propres). Le lissage s'applique **uniquement à la valeur émise** (`homographyUpdated`) — les accumulateurs internes (`m_cumulativeH`, `m_lastHomography` utilisé pour le masque ORB) restent sur l'estimée brute, pour éviter de composer une erreur de lissage dans le suivi incrémental. Repli sans lissage si `m_pcbPolygon` a moins de 4 points (pas de référence géométrique). Reset dans `resetReference()` (nouveau membre `m_smoothedHomography`). Appliqué aux 3 points d'émission : `processReference`, le snap "hybrid" et la composition incrémentale normale dans `processIncremental`.
+>
+> Fichiers : `src/overlay/TrackingWorker.h` (nouveau membre `m_smoothedHomography`, déclaration `smoothHomography()`), `src/overlay/TrackingWorker.cpp` (implémentation + 3 sites d'appel).
+>
+> ⚠️ **Non compilé/testé ici** (pas de toolchain Qt6/OpenCV). **À valider au prochain build Jetson** : activer Live Tracking sur une carte alignée, ne plus bouger la caméra/carte pendant 10-15s → l'overlay doit rester visuellement stable (plus de tremblement pixel par pixel) ; puis déplacer franchement la caméra → l'overlay doit suivre sans lag perceptible (vérifier que le seuil de snap à 12px n'introduit pas de retard gênant en usage réel — à ajuster si besoin).
+
 ## État actuel — au 2026-06-19 (Multi-Comp : panneau non-modal persistant + fix "Reset ne fait rien")
 
 > **2026-06-19 (suite 81)** : **3 retours utilisateur** (capture : le QMessageBox modal de choix de méthode était ouvert, bloquant). (a) « quand je veux sélectionner le deuxième je n'ai plus la boîte de dialogue » ; (b) « je ne peux pas choisir non plus sur la mini map » ; (c) « j'aimerais aussi pour choisir corner, pin1, double pin dans la même configuration » ; + (d) « le reset alignement ne fait rien ».

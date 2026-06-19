@@ -129,6 +129,18 @@ private:
     /// isn't available yet (caller falls back to unmasked detection).
     cv::Mat buildBoardMask(const cv::Size& smallSize, float downscale) const;
 
+    /// Temporally smooth a freshly-fit homography to suppress visible overlay
+    /// "vibration" on a static scene. Raw per-frame ORB/RANSAC fits wobble by
+    /// a few pixels even with zero physical motion (keypoint localization
+    /// noise); without damping that wobble is fully visible in the overlay.
+    /// Projects m_pcbPolygon through the previous smoothed estimate and the
+    /// new raw one, exponentially blends the two point sets, then refits a
+    /// homography from the blend — so small noise is damped while a genuine
+    /// large displacement (real motion) still snaps through immediately
+    /// (the blend factor saturates toward the new points past a px threshold).
+    /// Falls back to returning `rawH` unchanged if no board polygon is set.
+    cv::Mat smoothHomography(const cv::Mat& rawH);
+
     cv::Ptr<cv::Feature2D>         m_detector;
     cv::Ptr<cv::DescriptorMatcher> m_matcher;
 
@@ -142,6 +154,12 @@ private:
     // so the mask tracks the board as it moves.
     std::vector<cv::Point2f> m_pcbPolygon;
     cv::Mat                  m_lastHomography;
+
+    // Previous *smoothed* estimate, used as the blend anchor in
+    // smoothHomography(). Separate from m_lastHomography (which mirrors the
+    // raw/best current estimate used for mask projection) so smoothing always
+    // damps against the last value actually emitted to consumers.
+    cv::Mat m_smoothedHomography;
 
     int    m_minMatchCount      = 10;
     double m_loweRatio          = 0.75;

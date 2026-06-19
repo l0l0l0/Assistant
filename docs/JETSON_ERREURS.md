@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 47 | 2026-06-19 | TrackingWorker.cpp — Live Tracking | ✅ RÉSOLU | [Overlay "vibre" pixel par pixel en Live Tracking sur scène statique — homographie refaite de zéro chaque frame sans lissage temporel](#erreur-47--overlay-vibre-en-live-tracking-sur-scene-statique-pas-de-lissage) |
 | 46 | 2026-06-19 | Application.cpp — overlay caméra | ✅ RÉSOLU | [« Reset Alignment ne fait rien » : l'overlay est dessiné seulement si `m_homography->isValid()`, donc quand l'homographie devient invalide le bloc est sauté et la dernière image d'overlay reste figée à l'écran (jamais effacée)](#erreur-46--reset-alignment-ne-fait-rien-overlay-fige) |
 | 45 | 2026-06-19 | IBomParser.cpp — détection pin 1 | ✅ RÉSOLU | [`pin1` lu uniquement comme booléen alors que l'iBOM l'encode en entier → pin 1 jamais détectée pour les parts dont le pad pin 1 n'est pas nommé "1" (ex. ESP32 U7)](#erreur-45--pin1-ibom-entier-non-detecte) |
 | 44 | 2026-06-19 | BoardLocator.cpp — Auto-Align | ✅ RÉSOLU | [Auto-Align via profondeur "réussit" à score faible (0.13) sur carte coplanaire → overlay décalé ; la feuille blanche sous la carte ne servait à rien car le contour 2D n'était jamais essayé](#erreur-44--auto-align-depth-faible-score-contour-jamais-essaye) |
@@ -1377,6 +1378,32 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 47 — Overlay vibre en Live Tracking sur scène statique (pas de lissage)
+
+**Date** : 2026-06-19
+**Composant** : `TrackingWorker.cpp` — Live Tracking (ORB+RANSAC)
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Retour utilisateur (après confirmation que le live tracking fonctionne bien : 4/4 inliers, erreur 0.000px) : « c'est pas mal le live tracking mais ça vibre après si je ne bouge rien ». L'overlay tremble visiblement de quelques pixels alors que la caméra et la carte sont parfaitement immobiles.
+
+### Cause
+`processReference()` et `processIncremental()` recalculent une homographie **entièrement nouvelle** à chaque frame traitée (ORB + BFMatcher + `cv::findHomography` RANSAC), sans aucun lissage temporel ni comparaison avec l'estimée précédente. Même sur une scène strictement statique, le bruit de localisation sub-pixel des keypoints ORB (et la sélection aléatoire des inliers par RANSAC) fait varier légèrement le fit d'une frame à l'autre. Cette variation, bien que faible en pixels, est directement visible sur l'overlay qui suit cette homographie à chaque update.
+
+### Solution appliquée
+Nouvelle méthode `TrackingWorker::smoothHomography(rawH)` appliquée uniquement à la **valeur émise** (`homographyUpdated`), pas aux accumulateurs internes (`m_cumulativeH`, `m_lastHomography`) :
+1. Projette `m_pcbPolygon` (4 coins du board bbox, déjà disponibles via `setBoardPolygon()`) à travers la dernière estimée **lissée** (`m_smoothedHomography`) et la nouvelle estimée **brute**.
+2. Mesure le déplacement max des coins projetés entre les deux.
+3. Déplacement ≤ 1.5px → bruit, blend très amorti (poids 0.15 sur la nouvelle estimée) ; ≥ 12px → vrai mouvement, blend = 1.0 (aucun lag) ; entre les deux → rampe linéaire.
+4. Refit une homographie via `cv::findHomography(pcbPolygon, blendedPts, method=0)` (DLT least-squares).
+
+Repli sans lissage si `m_pcbPolygon` a moins de 4 points. Reset dans `resetReference()`. Fichiers `src/overlay/TrackingWorker.{h,cpp}`.
+
+### Leçon
+Une estimée géométrique (homographie, pose...) recalculée indépendamment à chaque frame depuis des données bruitées (keypoints, RANSAC) **vibrera visuellement** même sans mouvement réel, sauf lissage temporel explicite. Le lissage doit comparer un déplacement géométrique concret (ici : déplacement des coins projetés en pixels) plutôt que les coefficients bruts de la matrice — moyenner des matrices d'homographie élément par élément n'a pas de sens géométrique direct.
+
+---
 
 ## ERREUR 46 — « Reset Alignment ne fait rien » (overlay figé)
 

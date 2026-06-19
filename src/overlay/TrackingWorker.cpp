@@ -114,7 +114,68 @@ void TrackingWorker::resetReference()
     m_cumulativeH      = cv::Mat();
     m_accumulatedDrift = 0.0;
     m_lostFrames       = 0;
+    m_smoothedHomography = cv::Mat();
     setState(State::Lost);
+}
+
+cv::Mat TrackingWorker::smoothHomography(const cv::Mat& rawH)
+{
+    if (rawH.empty() || m_pcbPolygon.size() < 4)
+        return rawH;
+
+    if (m_smoothedHomography.empty()) {
+        m_smoothedHomography = rawH.clone();
+        return rawH;
+    }
+
+    std::vector<cv::Point2f> prevPts, newPts;
+    try {
+        cv::perspectiveTransform(m_pcbPolygon, prevPts, m_smoothedHomography);
+        cv::perspectiveTransform(m_pcbPolygon, newPts, rawH);
+    } catch (const cv::Exception&) {
+        m_smoothedHomography = rawH.clone();
+        return rawH;
+    }
+
+    // Max corner displacement between the previous smoothed estimate and the
+    // fresh raw one. Small values are sensor/keypoint noise on an otherwise
+    // static scene; large values are real motion.
+    double maxDisp = 0.0;
+    for (size_t i = 0; i < prevPts.size(); ++i)
+        maxDisp = std::max(maxDisp, cv::norm(newPts[i] - prevPts[i]));
+
+    // Below kNoiseFloorPx: heavily damp (mostly trust the previous estimate).
+    // Above kSnapPx: trust the new estimate fully (don't lag real motion).
+    // In between: linearly ramp the blend weight given to the new estimate.
+    constexpr double kNoiseFloorPx = 1.5;
+    constexpr double kSnapPx       = 12.0;
+    constexpr double kMinAlpha     = 0.15;  // weight on new pts at/below the noise floor
+
+    double alpha;
+    if (maxDisp <= kNoiseFloorPx)
+        alpha = kMinAlpha;
+    else if (maxDisp >= kSnapPx)
+        alpha = 1.0;
+    else
+        alpha = kMinAlpha + (1.0 - kMinAlpha) * (maxDisp - kNoiseFloorPx) / (kSnapPx - kNoiseFloorPx);
+
+    std::vector<cv::Point2f> blended(prevPts.size());
+    for (size_t i = 0; i < prevPts.size(); ++i)
+        blended[i] = prevPts[i] * (1.0 - alpha) + newPts[i] * alpha;
+
+    cv::Mat smoothed;
+    try {
+        smoothed = cv::findHomography(m_pcbPolygon, blended, 0 /* least-squares, no RANSAC */);
+    } catch (const cv::Exception&) {
+        smoothed = cv::Mat();
+    }
+    if (smoothed.empty() || smoothed.rows != 3 || smoothed.cols != 3) {
+        m_smoothedHomography = rawH.clone();
+        return rawH;
+    }
+
+    m_smoothedHomography = smoothed;
+    return smoothed;
 }
 
 void TrackingWorker::setState(State s)
@@ -265,7 +326,7 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
 
     cv::Mat combined = frameH * m_baseHomography;
     m_lastHomography = combined.clone();
-    emit homographyUpdated(combined, inliers, reprojErr);
+    emit homographyUpdated(smoothHomography(combined), inliers, reprojErr);
 }
 
 void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
@@ -332,7 +393,7 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
                     m_accumulatedDrift = 0.0;
                     m_lostFrames       = 0;
                     setState(State::Locked);
-                    emit homographyUpdated(combined, rInliers, rErr);
+                    emit homographyUpdated(smoothHomography(combined), rInliers, rErr);
                     spdlog::debug("TrackingWorker[hybrid]: anchor re-locked, "
                                   "inliers={}/{} err={:.2f}px (drift reset)",
                                   rInliers, rSrc.size(), rErr);
@@ -382,7 +443,7 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
     m_accumulatedDrift += reprojErr;
     setState(m_accumulatedDrift > m_reanchorDriftPx ? State::Drifting : State::Locked);
 
-    emit homographyUpdated(m_cumulativeH.clone(), inliers, reprojErr);
+    emit homographyUpdated(smoothHomography(m_cumulativeH), inliers, reprojErr);
 
     spdlog::debug("TrackingWorker[incr]: inliers={}/{} err={:.2f}px drift={:.1f}px state={}",
                   inliers, srcPts.size(), reprojErr, m_accumulatedDrift,
