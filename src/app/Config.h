@@ -202,6 +202,15 @@ public:
     double microscopeReanchorDriftPx() const { return m_microscopeReanchorDriftPx; }
     void setMicroscopeReanchorDriftPx(double v) { m_microscopeReanchorDriftPx = v; }
 
+    /// Hybrid drift correction (beta). When enabled, incremental tracking also
+    /// keeps the original anchor keyframe and, whenever that view is still
+    /// recognizable in the current frame, snaps the cumulative homography back
+    /// to the drift-free reference estimate. Combines the responsiveness of
+    /// frame→frame tracking with the zero long-term drift of reference
+    /// matching. No effect outside incremental mode.
+    bool hybridDriftCorrection() const { return m_hybridDriftCorrection; }
+    void setHybridDriftCorrection(bool v) { m_hybridDriftCorrection = v; }
+
     // --- Checkboxes (BOM tracking) ---
     const std::vector<std::string>& checkboxColumns() const { return m_checkboxColumns; }
     void setCheckboxColumns(const std::vector<std::string>& cols) { m_checkboxColumns = cols; }
@@ -316,6 +325,7 @@ private:
     double m_microscopeAnchorRotationDeg = 0.0;   // assumed board rotation
     bool   m_microscopeIncremental       = false; // frame→frame tracking (narrow FOV)
     double m_microscopeReanchorDriftPx   = 40.0;  // drift threshold → re-anchor hint
+    bool   m_hybridDriftCorrection       = true;  // beta: snap back to anchor keyframe
 
     // BOM
     std::vector<std::string> m_checkboxColumns = {"Sourced", "Placed"};

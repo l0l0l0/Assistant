@@ -49,6 +49,12 @@ void TrackingWorker::setIncrementalMode(bool enabled, double driftThresholdPx)
                  enabled, m_reanchorDriftPx);
 }
 
+void TrackingWorker::setHybridCorrection(bool enabled)
+{
+    m_hybrid = enabled;
+    spdlog::info("TrackingWorker: hybrid drift correction={}", enabled);
+}
+
 void TrackingWorker::setBaseHomography(cv::Mat h)
 {
     m_baseHomography = h.clone();
@@ -278,6 +284,13 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
         m_accumulatedDrift = 0.0;
         m_lostFrames       = 0;
         m_hasReference     = true;
+        // Keep this first frame as the drift-free anchor keyframe so hybrid
+        // correction can later snap back to it (see processIncremental's
+        // hybrid path). The base homography maps PCB→this frame's image, so
+        // matching a future frame against this keyframe yields a drift-free
+        // PCB→current estimate.
+        m_refKeypoints   = kp;
+        m_refDescriptors = desc.clone();
         setState(State::Locked);
         emit referenceCaptured(static_cast<int>(m_prevKeypoints.size()));
         // Don't emit homographyUpdated here: no match/RANSAC has happened yet,
@@ -287,6 +300,46 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
         spdlog::info("TrackingWorker: incremental anchor bootstrapped ({} keypoints)",
                      m_prevKeypoints.size());
         return;
+    }
+
+    // ── Hybrid drift correction (beta) ────────────────────────────────
+    // Before the (drift-prone) frame→frame step, try to recognize the
+    // original anchor keyframe directly in the current frame. When it matches
+    // confidently, the resulting PCB→current estimate carries NO accumulated
+    // drift, so we snap to it and reset the drift counter. When the board has
+    // moved too far for the anchor to be recognizable, this silently fails and
+    // we fall through to incremental composition.
+    if (m_hybrid && !m_refDescriptors.empty() && !m_baseHomography.empty() &&
+        !desc.empty() && kp.size() >= static_cast<size_t>(m_minMatchCount)) {
+        std::vector<cv::Point2f> rSrc, rDst;
+        matchPoints(m_refDescriptors, m_refKeypoints, desc, kp, rSrc, rDst);
+        if (rSrc.size() >= static_cast<size_t>(m_minMatchCount)) {
+            cv::Mat rMask;
+            cv::Mat refH = cv::findHomography(rSrc, rDst, cv::RANSAC,
+                                              m_ransacThreshold, rMask);
+            if (!refH.empty() && refH.rows == 3 && refH.cols == 3) {
+                int rInliers = 0;
+                const double rErr = medianReprojError(rSrc, rDst, refH, rMask, rInliers);
+                // Trust it as drift-free only when the fit is both well-
+                // supported and tight — a weak/loose anchor match would inject
+                // a worse estimate than the incremental one it replaces.
+                if (rInliers >= m_minMatchCount && rErr <= m_ransacThreshold) {
+                    cv::Mat combined = refH * m_baseHomography;
+                    m_cumulativeH      = combined.clone();
+                    m_lastHomography   = combined.clone();
+                    m_prevKeypoints    = kp;
+                    m_prevDescriptors  = desc.clone();
+                    m_accumulatedDrift = 0.0;
+                    m_lostFrames       = 0;
+                    setState(State::Locked);
+                    emit homographyUpdated(combined, rInliers, rErr);
+                    spdlog::debug("TrackingWorker[hybrid]: anchor re-locked, "
+                                  "inliers={}/{} err={:.2f}px (drift reset)",
+                                  rInliers, rSrc.size(), rErr);
+                    return;
+                }
+            }
+        }
     }
 
     // Match against the previous frame (small motion → high overlap).

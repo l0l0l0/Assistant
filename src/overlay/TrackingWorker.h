@@ -56,6 +56,16 @@ public slots:
     ///        state flips to Drifting (invites a re-anchor).
     void setIncrementalMode(bool enabled, double driftThresholdPx);
 
+    /// Enable hybrid drift correction (beta). Only affects incremental mode.
+    /// When on, the worker keeps the original anchor keyframe captured at
+    /// bootstrap and, whenever that view is recognizable in the current frame
+    /// (enough confident inliers), snaps the cumulative homography back to the
+    /// drift-free reference estimate (refH * base) and zeroes the accumulated
+    /// drift. Between such corrections it falls back to frame→frame
+    /// composition, so it stays responsive over large motion while shedding
+    /// long-term drift the moment the anchor reappears.
+    void setHybridCorrection(bool enabled);
+
     /// Set the PCB→reference_image homography. Emitted back combined with
     /// the per-frame delta after each successful tracking update.
     void setBaseHomography(cv::Mat h);
@@ -141,6 +151,7 @@ private:
 
     // Incremental (frame→frame) tracking state.
     bool                      m_incremental      = false;
+    bool                      m_hybrid           = true;  // beta drift correction
     double                    m_reanchorDriftPx  = 40.0;
     cv::Mat                   m_prevDescriptors;          // previous frame
     std::vector<cv::KeyPoint> m_prevKeypoints;

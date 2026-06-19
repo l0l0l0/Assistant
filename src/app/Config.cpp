@@ -201,6 +201,7 @@ bool Config::load(const std::string& path)
             m_microscopeAnchorRotationDeg = mic.value("anchor_rotation_deg", m_microscopeAnchorRotationDeg);
             m_microscopeIncremental       = mic.value("incremental", m_microscopeIncremental);
             m_microscopeReanchorDriftPx   = mic.value("reanchor_drift_px", m_microscopeReanchorDriftPx);
+            m_hybridDriftCorrection       = mic.value("hybrid_drift_correction", m_hybridDriftCorrection);
         }
 
         // BOM
@@ -340,7 +341,8 @@ bool Config::save(const std::string& path) const
             {"anchor_pixels_per_mm", m_microscopeAnchorPixelsPerMm},
             {"anchor_rotation_deg",  m_microscopeAnchorRotationDeg},
             {"incremental",          m_microscopeIncremental},
-            {"reanchor_drift_px",    m_microscopeReanchorDriftPx}
+            {"reanchor_drift_px",    m_microscopeReanchorDriftPx},
+            {"hybrid_drift_correction", m_hybridDriftCorrection}
         };
 
         // BOM

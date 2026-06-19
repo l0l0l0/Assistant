@@ -394,6 +394,8 @@ void Application::createSubsystems()
         Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                       && m_config->microscopeIncremental()),
         Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
+        Q_ARG(bool, m_config->hybridDriftCorrection()));
 
     // Dataset capture worker on its own thread — JPEG writes + label
     // projection must never block the GUI (same pattern as tracking).
@@ -630,6 +632,9 @@ void Application::switchProfile(int profileIndex)
             Qt::QueuedConnection,
             Q_ARG(bool,   incremental),
             Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+        QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection",
+            Qt::QueuedConnection,
+            Q_ARG(bool, m_config->hybridDriftCorrection()));
     }
 
     emit cameraProfileChanged(profileIndex);
@@ -1750,6 +1755,8 @@ void Application::connectControlSignals()
                 Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                               && m_config->microscopeIncremental()),
                 Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
+                Q_ARG(bool, m_config->hybridDriftCorrection()));
         }
         spdlog::info("Settings applied (camera={}, ORB={}, interval={}ms, RANSAC={:.1f}, downscale={:.2f})",
                      newIdx, m_config->orbKeypoints(), m_config->trackingIntervalMs(),
