@@ -237,9 +237,13 @@ void OverlayRenderer::drawSelectionEmphasis(QPainter& painter, const Component& 
             painter.setBrush(QBrush(fill));
             painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 6.0, 6.0);
         } else {
+            // Filled dark red so it covers the cyan regular-pad rendering
+            // underneath (otherwise the cyan shows through and the part looks
+            // blue, not red).
+            QColor padFill = accent; padFill.setAlpha(220);
             painter.setPen(QPen(accent, 1));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 3.0, 3.0);
+            painter.setBrush(QBrush(padFill));
+            painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 3.5, 3.5);
         }
     }
 }
