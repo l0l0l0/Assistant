@@ -59,6 +59,18 @@ QImage OverlayRenderer::render(const cv::Mat& frame, const std::string& selected
         if (m_showLabels || isHighlighted) drawComponentLabel(painter, comp);
     }
 
+    // Selected/highlighted components get a strong always-on-top emphasis so a
+    // small SMD part is unmistakable on the live image even if pads/pin1 toggles
+    // are off (used when picking alignment landmarks). Drawn last = on top.
+    painter.setOpacity(1.0f);
+    for (const auto& comp : m_project.components) {
+        if (comp.layer != m_activeLayer) continue;
+        const bool isHighlighted = (comp.reference == selectedRef) ||
+            std::find(m_highlightedRefs.begin(), m_highlightedRefs.end(),
+                      comp.reference) != m_highlightedRefs.end();
+        if (isHighlighted) drawSelectionEmphasis(painter, comp);
+    }
+
     painter.end();
 
     emit overlayUpdated();
@@ -182,6 +194,48 @@ void OverlayRenderer::drawPin1Marker(QPainter& painter, const Component& comp)
         painter.setBrush(QBrush(pin1Fill));
         painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 5.0, 5.0);
         break;
+    }
+}
+
+void OverlayRenderer::drawSelectionEmphasis(QPainter& painter, const Component& comp)
+{
+    const QColor accent(255, 220, 50);  // bright yellow — the "selected" colour
+
+    // 1) Bright bounding box around the component body.
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(accent, 2.5));
+    if (m_homography.isValid()) {
+        auto corners = m_homography.transformRect(
+            static_cast<float>(comp.bbox.minX),
+            static_cast<float>(comp.bbox.minY),
+            static_cast<float>(comp.bbox.width()),
+            static_cast<float>(comp.bbox.height()));
+        QPolygonF polygon;
+        for (const auto& pt : corners) polygon << QPointF(pt.x, pt.y);
+        painter.drawPolygon(polygon);
+    } else {
+        painter.drawRect(QRectF(comp.bbox.minX, comp.bbox.minY,
+                                comp.bbox.width(), comp.bbox.height()));
+    }
+
+    // 2) Every pad (so orientation is readable), pin 1 in red and larger.
+    for (const auto& pad : comp.pads) {
+        cv::Point2f imgPos = m_homography.isValid()
+            ? m_homography.pcbToImage(cv::Point2f(static_cast<float>(pad.position.x),
+                                                  static_cast<float>(pad.position.y)))
+            : cv::Point2f(static_cast<float>(pad.position.x),
+                          static_cast<float>(pad.position.y));
+        if (pad.isPin1) {
+            QColor pin1 = ibom::gui::theme::padPin1Color();
+            painter.setPen(QPen(pin1, 2));
+            QColor fill = pin1; fill.setAlpha(180);
+            painter.setBrush(QBrush(fill));
+            painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 6.0, 6.0);
+        } else {
+            painter.setPen(QPen(accent, 1));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 3.0, 3.0);
+        }
     }
 }
 

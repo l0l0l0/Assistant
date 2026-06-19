@@ -164,10 +164,26 @@ void BoardMinimap::paintEvent(QPaintEvent*)
     // read the part's orientation and locate pin 1 on the real board before
     // clicking in the camera image (crucial for irregular footprints like an
     // ESP32 module where "the body" is otherwise ambiguous).
+    //
+    // Also draw a fixed-size halo + crosshair at the component's center,
+    // independent of its actual bbox size: a small SMD part's highlighted
+    // rect above can be 1-2px on a dense/crowded board and effectively
+    // invisible — the halo guarantees the selection is always spottable.
     if (!m_selectedRef.empty()) {
         for (const auto& comp : m_project.components) {
             if (comp.reference != m_selectedRef) continue;
-            if (comp.layer != m_activeLayer) break;
+
+            QPointF center = pcbToWidget(comp.bbox.center().x, comp.bbox.center().y);
+            const QColor halo(255, 220, 50);
+
+            p.setPen(QPen(halo, 1.5));
+            p.setBrush(Qt::NoBrush);
+            p.drawLine(QPointF(center.x() - 10, center.y()), QPointF(center.x() + 10, center.y()));
+            p.drawLine(QPointF(center.x(), center.y() - 10), QPointF(center.x(), center.y() + 10));
+            p.drawEllipse(center, 6.0, 6.0);
+
+            if (comp.layer != m_activeLayer) break;  // pads below: front/back only
+
 
             // Pad outlines (thin) + pin 1 (filled red dot).
             for (const auto& pad : comp.pads) {

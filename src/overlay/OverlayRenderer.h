@@ -61,6 +61,11 @@ private:
     void drawComponentLabel(QPainter& painter, const Component& comp);
     void drawComponentPads(QPainter& painter, const Component& comp);
     void drawPin1Marker(QPainter& painter, const Component& comp);
+    /// Strong, always-on-top emphasis for the selected/highlighted component:
+    /// a bright box, every pad, and the pin-1 marker — drawn regardless of the
+    /// pads/pin1 visibility toggles so the part is unmistakable on the live
+    /// image (used when picking landmarks for alignment).
+    void drawSelectionEmphasis(QPainter& painter, const Component& comp);
     void drawBoardOutline(QPainter& painter);
     QColor stateColor(const std::string& ref) const;
 
