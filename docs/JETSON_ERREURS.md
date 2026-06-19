@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 46 | 2026-06-19 | Application.cpp — overlay caméra | ✅ RÉSOLU | [« Reset Alignment ne fait rien » : l'overlay est dessiné seulement si `m_homography->isValid()`, donc quand l'homographie devient invalide le bloc est sauté et la dernière image d'overlay reste figée à l'écran (jamais effacée)](#erreur-46--reset-alignment-ne-fait-rien-overlay-fige) |
 | 45 | 2026-06-19 | IBomParser.cpp — détection pin 1 | ✅ RÉSOLU | [`pin1` lu uniquement comme booléen alors que l'iBOM l'encode en entier → pin 1 jamais détectée pour les parts dont le pad pin 1 n'est pas nommé "1" (ex. ESP32 U7)](#erreur-45--pin1-ibom-entier-non-detecte) |
 | 44 | 2026-06-19 | BoardLocator.cpp — Auto-Align | ✅ RÉSOLU | [Auto-Align via profondeur "réussit" à score faible (0.13) sur carte coplanaire → overlay décalé ; la feuille blanche sous la carte ne servait à rien car le contour 2D n'était jamais essayé](#erreur-44--auto-align-depth-faible-score-contour-jamais-essaye) |
 | 43 | 2026-06-19 | Application — sortie process | 🔴 OUVERT | [Segmentation fault au moment de quitter l'app (après "Application exiting with code 0") — non investigué](#erreur-43--segfault-a-la-sortie-de-lapplication) |
@@ -1376,6 +1377,26 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 46 — « Reset Alignment ne fait rien » (overlay figé)
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` — pipeline de rendu de l'overlay caméra
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Cliquer le bouton « Reset Alignment » ne change rien visuellement : l'overlay (pads/silkscreen jaunes) reste affiché exactement au même endroit sur l'image caméra.
+
+### Cause
+Dans le handler de frame, le bloc qui dessine l'overlay et appelle `cameraView()->setOverlayImage(overlay)` est gardé par `if (m_ibomProject && m_homography && m_homography->isValid())`. Reset appelle `m_homography->reset()` → `isValid()` devient `false` → le bloc est **entièrement sauté**. Or `CameraView` conserve sa dernière `m_overlay` (image membre) et continue de la peindre à chaque `paintEvent` : comme `setOverlayImage()` n'est plus jamais rappelé, **la dernière image d'overlay reste figée** à l'écran. Reset modifiait bien l'état interne mais l'affichage ne se mettait jamais à jour → impression que « ça ne fait rien ».
+
+### Solution appliquée
+Ajout d'un `else if (!m_pickingHomographyPoints)` après le bloc overlay : quand il n'y a pas d'homographie valide, pousser une image transparente `setOverlayImage(QImage())` pour **effacer** l'overlay résiduel. Le cas `m_pickingHomographyPoints` est exclu car le picking 4-points dessine son propre overlay juste après. Fichier `src/app/Application.cpp`.
+
+### Leçon
+Un widget qui met en cache une image (`m_overlay`) doit être **explicitement** vidé quand la source disparaît : un `if` qui saute le push laisse la dernière image affichée. Toujours prévoir le chemin « plus rien à afficher », pas seulement « voici la nouvelle image ».
+
+---
 
 ## ERREUR 45 — `pin1` iBOM (entier) non détecté
 

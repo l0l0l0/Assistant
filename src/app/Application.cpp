@@ -8,6 +8,7 @@
 #include "gui/BomPanel.h"
 #include "gui/InspectionWizard.h"
 #include "gui/AlignmentWizard.h"
+#include "gui/MultiAlignDialog.h"
 #include "gui/InspectionPanel.h"
 #include "camera/ICameraSource.h"
 #include "camera/CameraCapture.h"
@@ -744,8 +745,46 @@ void Application::setMultiAlignUIState(bool collecting)
     m_mainWindow->controlPanel()->setAlignMultiActive(collecting);
     if (m_alignWizard) m_alignWizard->setMultiAlignCollecting(collecting);
     // Leaving collection (finish or cross-cancel) clears any pending click
-    // targets drawn on the PCB Map.
-    if (!collecting) m_mainWindow->boardMinimap()->setClickTargets({});
+    // targets drawn on the PCB Map and closes the multi-align panel.
+    if (!collecting) {
+        m_mainWindow->boardMinimap()->setClickTargets({});
+        if (m_multiAlignDialog) m_multiAlignDialog->hide();
+    }
+}
+
+void Application::showMultiAlignDialog()
+{
+    if (!m_multiAlignDialog) {
+        m_multiAlignDialog = new gui::MultiAlignDialog(m_mainWindow.get());
+
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::methodChanged,
+                this, [this](int method) {
+            m_alignMultiMethod = method;
+            // Re-arm the currently selected component with the new method so the
+            // change takes effect immediately (and updates the PCB Map targets).
+            if (m_alignMulti && !m_selectedRef.empty())
+                beginMarkComponent(m_selectedRef);
+        });
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::finishRequested,
+                this, [this]() { applyMultiAlignment(); });
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::cancelRequested,
+                this, [this]() {
+            if (!m_alignMulti) return;
+            m_alignMulti = false;
+            m_alignMultiAwaitClick = false;
+            m_alignMultiHaveCorner1 = false;
+            setMultiAlignUIState(false);   // clears PCB Map targets + button text
+            if (m_multiAlignDialog) m_multiAlignDialog->hide();
+            m_mainWindow->updateStatusMessage(tr("Multi-align cancelled"));
+        });
+    }
+    m_multiAlignDialog->setMethod(m_alignMultiMethod);
+    m_multiAlignDialog->setSelectedComponent(QString());
+    m_multiAlignDialog->setStatus(tr("Pick a component to begin."));
+    m_multiAlignDialog->setMarkedCount(0);
+    m_multiAlignDialog->show();
+    m_multiAlignDialog->raise();
+    m_multiAlignDialog->activateWindow();
 }
 
 void Application::beginMarkComponent(const std::string& ref)
@@ -763,6 +802,15 @@ void Application::beginMarkComponent(const std::string& ref)
     if (auto* bom = m_mainWindow->bomPanel()) bom->highlightComponent(ref);
 
     const QString qref = QString::fromStdString(ref);
+    if (m_multiAlignDialog) {
+        m_multiAlignDialog->setSelectedComponent(qref);
+        m_multiAlignDialog->setMethod(m_alignMultiMethod);
+    }
+    // Push a message to both the status bar and (if open) the multi-align panel.
+    auto setStatus = [this](const QString& s) {
+        m_mainWindow->updateStatusMessage(s);
+        if (m_multiAlignDialog) m_multiAlignDialog->setStatus(s);
+    };
 
     switch (m_alignMultiMethod) {
     case 1: {  // Pin 1 — single click, anchored to the iBOM pin-1 pad.
@@ -772,9 +820,9 @@ void Application::beginMarkComponent(const std::string& ref)
             // Don't arm — let the user pick another component without cancelling.
             m_alignMultiAwaitClick = false;
             m_mainWindow->boardMinimap()->setClickTargets({});
-            m_mainWindow->updateStatusMessage(
+            setStatus(
                 tr("%1 has no pin-1 pad in the iBOM — pick another component, or "
-                   "restart multi-align with the 'opposite pads' / 'corners' method.")
+                   "switch to the 'opposite pads' / 'body corners' method.")
                 .arg(qref));
             return;
         }
@@ -784,7 +832,7 @@ void Application::beginMarkComponent(const std::string& ref)
         m_alignMultiAwaitClick  = true;
         m_alignMultiRef = ref;
         m_mainWindow->boardMinimap()->setClickTargets({m_alignMultiPcb});
-        m_mainWindow->updateStatusMessage(
+        setStatus(
             tr("Click PIN 1 of %1 in the image (green target in the PCB Map). "
                "Or pick another component to switch.").arg(qref));
         break;
@@ -793,9 +841,9 @@ void Application::beginMarkComponent(const std::string& ref)
         if (comp->pads.size() < 2) {
             m_alignMultiAwaitClick = false;
             m_mainWindow->boardMinimap()->setClickTargets({});
-            m_mainWindow->updateStatusMessage(
+            setStatus(
                 tr("%1 has fewer than 2 pads — pick another component, or use the "
-                   "'corners' / 'pin 1' method.").arg(qref));
+                   "'body corners' / 'pin 1' method.").arg(qref));
             return;
         }
         // Find the pair of pads with the largest separation (footprint corners).
@@ -816,7 +864,7 @@ void Application::beginMarkComponent(const std::string& ref)
         m_mainWindow->boardMinimap()->setClickTargets({
             cv::Point2f(static_cast<float>(pa->position.x), static_cast<float>(pa->position.y)),
             cv::Point2f(static_cast<float>(pb->position.x), static_cast<float>(pb->position.y))});
-        m_mainWindow->updateStatusMessage(
+        setStatus(
             tr("Click the two green target pads of %1 in the image (opposite "
                "corners of the footprint), in any order. Or pick another "
                "component to switch.").arg(qref));
@@ -832,7 +880,7 @@ void Application::beginMarkComponent(const std::string& ref)
         m_mainWindow->boardMinimap()->setClickTargets({
             cv::Point2f(static_cast<float>(comp->bbox.minX), static_cast<float>(comp->bbox.minY)),
             cv::Point2f(static_cast<float>(comp->bbox.maxX), static_cast<float>(comp->bbox.maxY))});
-        m_mainWindow->updateStatusMessage(
+        setStatus(
             tr("Click the two green target corners of %1's body in the image "
                "(order doesn't matter). Or pick another component to switch.").arg(qref));
         break;
@@ -1599,6 +1647,13 @@ void Application::wireCameraSignals()
             }
             painter.end();
             m_mainWindow->cameraView()->setOverlayImage(overlay);
+        } else if (!m_pickingHomographyPoints) {
+            // No valid homography (e.g. after Reset Alignment): the block above
+            // is skipped, so without this the LAST overlay image would stay
+            // frozen on screen and Reset would appear to "do nothing". Push a
+            // transparent overlay to actually clear it. (Skip while picking
+            // 4-corner points — that path draws its own feedback overlay below.)
+            m_mainWindow->cameraView()->setOverlayImage(QImage());
         }
 
         // Draw alignment point picking visual feedback
@@ -2216,42 +2271,22 @@ void Application::connectControlSignals()
                 tr("Start the camera first."));
             return;
         }
-        // Choose the marking method ONCE for the whole session — afterwards a
-        // component selection (BOM panel or minimap) arms the click directly,
-        // with no per-component popup blocking re-selection.
-        QMessageBox methodBox(m_mainWindow.get());
-        methodBox.setWindowTitle(tr("Multi-Component Alignment"));
-        methodBox.setText(tr("How will you mark each component?"));
-        methodBox.setInformativeText(tr(
-            "• Opposite pads — click the 2 farthest-apart pads (most precise; "
-            "ideal for resistors/capacitors)\n"
-            "• Pin 1 — single click on pin 1 (precise for ICs/connectors)\n"
-            "• Body corners — click 2 opposite corners of the body (eyeballed)\n\n"
-            "You can pick components from the BOM panel OR the PCB Map, and switch "
-            "freely before clicking."));
-        QPushButton* padsBtn    = methodBox.addButton(tr("Opposite Pads (recommended)"), QMessageBox::AcceptRole);
-        QPushButton* pin1Btn    = methodBox.addButton(tr("Pin 1"), QMessageBox::AcceptRole);
-        QPushButton* cornersBtn = methodBox.addButton(tr("Body Corners"), QMessageBox::AcceptRole);
-        methodBox.addButton(QMessageBox::Cancel);
-        methodBox.exec();
-        if (methodBox.clickedButton() == padsBtn)         m_alignMultiMethod = 2;
-        else if (methodBox.clickedButton() == pin1Btn)    m_alignMultiMethod = 1;
-        else if (methodBox.clickedButton() == cornersBtn) m_alignMultiMethod = 0;
-        else return;  // Cancel → don't start
-
         m_pickingHomographyPoints = false;
         m_alignOnComponents = false;
         m_alignMulti = true;
         m_alignMultiAwaitClick = false;
         m_alignMultiHaveCorner1 = false;
+        m_alignMultiMethod = gui::MultiAlignDialog::OppositePads;  // default
         m_alignMultiPcbPts.clear();
         m_alignMultiImgPts.clear();
         m_alignMultiRefs.clear();
+        m_selectedRef.clear();
         setMultiAlignUIState(true);
         m_mainWindow->showBomPanel();
+        showMultiAlignDialog();  // persistent, non-modal: method choice + progress
         m_mainWindow->updateStatusMessage(
-            tr("Multi-align: pick a component in the BOM panel or the PCB Map "
-               "(mark ≥2 spread out; ≥4 for perspective). Click the button again to finish."));
+            tr("Multi-align: pick a component in the BOM panel or the PCB Map, "
+               "choose how to mark it, then click the green target(s) in the image."));
         spdlog::info("Multi-component alignment started (method {})", m_alignMultiMethod);
     });
 
@@ -2335,14 +2370,21 @@ void Application::connectControlSignals()
             }
             m_alignMultiAwaitClick = false;
             m_alignMultiHaveCorner1 = false;
+            m_selectedRef.clear();  // so a method change doesn't re-arm a finished one
             m_mainWindow->boardMinimap()->setClickTargets({});  // done with this component
             const int n = static_cast<int>(m_alignMultiImgPts.size());
-            m_mainWindow->updateStatusMessage(
-                tr("Marked %1 component(s). Select another, or click "
-                   "'Align: Multi-Comp' again to finish%2.")
+            const QString msg =
+                tr("Marked %1 component(s). Pick another (BOM panel or PCB Map), "
+                   "or press 'Finish && Align'%2.")
                 .arg(n)
-                .arg(n >= 4 ? tr(" (≥4: perspective)")
-                   : n >= 2 ? tr(" (≥2: ok, 4 better)") : QString()));
+                .arg(n >= 4 ? tr(" — ≥4: perspective corrected")
+                   : n >= 2 ? tr(" — ≥2 OK, 4 is better") : QString());
+            m_mainWindow->updateStatusMessage(msg);
+            if (m_multiAlignDialog) {
+                m_multiAlignDialog->setMarkedCount(n);
+                m_multiAlignDialog->setSelectedComponent(QString());
+                m_multiAlignDialog->setStatus(msg);
+            }
             spdlog::info("Multi-align: marked {} ({} total)", m_alignMultiRef, n);
             return;
         }

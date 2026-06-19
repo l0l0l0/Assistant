@@ -24,6 +24,7 @@ namespace gui {
 class MainWindow;
 class CalibrationMonitorDialog;
 class AlignmentWizard;
+class MultiAlignDialog;
 }
 
 namespace camera {
@@ -293,6 +294,9 @@ private:
     // When non-null and visible, alignment-completion sites forward their
     // human-readable summary to it via reportAlignmentResult().
     gui::AlignmentWizard* m_alignWizard = nullptr;
+    // Persistent non-modal panel driving the multi-component alignment flow
+    // (method choice + live progress). Created lazily on first use.
+    gui::MultiAlignDialog* m_multiAlignDialog = nullptr;
     /// Forward an alignment summary to the wizard (if any) and the status bar.
     void reportAlignmentResult(const QString& summary);
     /// Keep the ControlPanel button and (if open) the wizard's run page in sync
@@ -317,6 +321,10 @@ private:
     /// target — no need to cancel. No-op if the component is unusable for the
     /// chosen method (e.g. pin-1 method on a part with no pin-1 pad).
     void beginMarkComponent(const std::string& ref);
+
+    /// Create (lazily) and show the persistent non-modal multi-align panel,
+    /// wiring its method/finish/cancel signals to the alignment flow.
+    void showMultiAlignDialog();
 
     // Live tracking mode — ORB work happens on m_trackingThread via m_trackingWorker.
     bool     m_liveMode = false;
