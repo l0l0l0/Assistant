@@ -11,6 +11,15 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Plan d'amélioration Live Tracking — docs/LIVE_TRACKING_PLAN.md)
+
+> **2026-06-19 (suite 85)** : **demande utilisateur** — « est-ce qu'on peut encore améliorer le live tracking… fais-moi un plan de propositions », puis « j'aimerais un plan md, et regarde aussi sur le net… peut-être aussi utiliser le GPU du Jetson ». **Livré** : nouveau document **[docs/LIVE_TRACKING_PLAN.md](LIVE_TRACKING_PLAN.md)** — diagnostic des 3 sources de jitter (RANSAC randomisé, keypoints ORB quantifiés ×2 au downscale, sur-paramétrisation 8 DDL vs carte plane), revue d'état de l'art (recherche web : **1€ Filter** CHI 2012, motion smoothing IPOL 2017, optical flow LK planaire, ORB/optical-flow GPU sur Jetson), et **plan en 3 phases** :
+> - **Phase 1** (faible risque) : détection scène statique → ne pas ré-estimer (tue le jitter à l'arrêt) ; `USAC_MAGSAC` déterministe ; `cornerSubPix` sur les matches ; gating qualité + hystérésis (fige au lieu de sauter).
+> - **Phase 2** : 1€ Filter sur pose décomposée (tx,ty,θ,scale) ; modèle de mouvement adaptatif (similitude/affine/homographie auto) ; distribution spatiale des keypoints.
+> - **Phase 3** : optical flow LK sub-pixel ; CLAHE anti-glare ; **accélération GPU** (`cv::cuda::ORB` / matcher / `SparsePyrLKOpticalFlow`).
+>
+> **Vérif faite** : OpenCV Jetson est compilé `WITH_CUDA=ON` + `opencv_contrib` arch 8.7 (`docker/base.Dockerfile`) → modules `cudafeatures2d`/`cudaoptflow` **disponibles**, la piste GPU est viable. Le doc liste aussi les réglages à exposer (Config/SettingsDialog) et un protocole de validation Jetson. **Aucune modif code** dans cette suite (planification pure). Recommandation : implémenter Phase 1 d'abord, une phase à la fois (validation matériel obligatoire — pas de toolchain ici). Fichier : `docs/LIVE_TRACKING_PLAN.md`.
+
 ## État actuel — au 2026-06-19 (Multi-Comp : méthode "pads opposés" en rouge comme pin 1)
 
 > **2026-06-19 (suite 84)** : **retour utilisateur** — « attention il y a aussi le choix avec pin opposée qui doit avoir le même graphisme que pin 1 ». **Fix** : les cibles de clic de la PCB Map peuvent désormais être colorées — `BoardMinimap::setClickTargets()` prend un paramètre `QColor` (défaut vert). Le rendu des cibles utilise maintenant **le même graphisme que le marqueur pin 1** (halo noir + anneau coloré + croix + **point central plein**). La méthode **opposite pads** passe `QColor(255,70,70)` → 2 marqueurs **rouges** identiques au pin 1 (numérotés 1/2). La méthode **body corners** garde le vert (ce ne sont pas des pads). Texte de statut mis à jour (« two RED target pads »). Fichiers : `src/gui/BoardMinimap.{h,cpp}` (param couleur + dot central), `src/app/Application.cpp` (opposite-pads passe rouge, include `<QColor>`). ⚠️ **Non compilé/testé ici**. **À valider** : méthode opposite-pads → 2 anneaux rouges (même style que pin 1) sur les 2 pads extrêmes.
