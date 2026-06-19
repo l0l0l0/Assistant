@@ -27,7 +27,11 @@ void TrackingWorker::configure(int orbKeypoints,
                                int intervalMs,
                                float downscale)
 {
-    m_detector        = cv::ORB::create(std::max(50, orbKeypoints));
+    // Detect more candidates than we keep so bucketKeypoints() has something
+    // to distribute spatially (ORB's own top-N is response-ranked and tends to
+    // cluster). Target = requested count; detector cap = 2× target.
+    m_targetKeypoints = std::max(50, orbKeypoints);
+    m_detector        = cv::ORB::create(m_targetKeypoints * 2);
     m_minMatchCount   = std::max(4, minMatchCount);
     m_loweRatio       = std::clamp(loweRatio, 0.1, 0.99);
     m_ransacThreshold = ransacThreshold;
@@ -50,6 +54,17 @@ void TrackingWorker::setIncrementalMode(bool enabled, double driftThresholdPx)
     resetReference();
     spdlog::info("TrackingWorker: incremental={}, reanchorDrift={:.1f}px",
                  enabled, m_reanchorDriftPx);
+}
+
+void TrackingWorker::setStabilization(int model, double oneEuroMinCutoff,
+                                      double oneEuroBeta)
+{
+    m_model            = static_cast<Model>(std::clamp(model, 0, 3));
+    m_oneEuroMinCutoff = std::max(0.001, oneEuroMinCutoff);
+    m_oneEuroBeta      = std::max(0.0, oneEuroBeta);
+    m_cornerFilters.clear();  // recreated lazily with the new parameters
+    spdlog::info("TrackingWorker stabilization: model={}, 1€ minCutoff={:.3f}, beta={:.3f}",
+                 static_cast<int>(m_model), m_oneEuroMinCutoff, m_oneEuroBeta);
 }
 
 void TrackingWorker::setHybridCorrection(bool enabled)
@@ -117,11 +132,113 @@ void TrackingWorker::resetReference()
     m_cumulativeH      = cv::Mat();
     m_accumulatedDrift = 0.0;
     m_lostFrames       = 0;
-    m_smoothedHomography = cv::Mat();
     m_lastEmittedH       = cv::Mat();
     m_staticFrames       = 0;
     m_lowQualityFrames   = 0;
+    m_cornerFilters.clear();
     setState(State::Lost);
+}
+
+cv::Mat TrackingWorker::estimateModel(const std::vector<cv::Point2f>& src,
+                                      const std::vector<cv::Point2f>& dst,
+                                      int& inliers, double& reprojErr)
+{
+    inliers = 0;
+    reprojErr = 1e9;
+    if (src.size() < 4 || src.size() != dst.size())
+        return {};
+
+    auto fitHomog = [&](int& inl, double& er) -> cv::Mat {
+        cv::Mat mask;
+        cv::Mat H = cv::findHomography(src, dst, cv::USAC_MAGSAC,
+                                       m_ransacThreshold, mask);
+        if (H.empty() || H.rows != 3 || H.cols != 3) { inl = 0; er = 1e9; return {}; }
+        er = medianReprojError(src, dst, H, mask, inl);
+        return H;
+    };
+    auto fitAffine = [&](bool partial, int& inl, double& er) -> cv::Mat {
+        cv::Mat mask;
+        cv::Mat A = partial
+            ? cv::estimateAffinePartial2D(src, dst, mask, cv::RANSAC, m_ransacThreshold)
+            : cv::estimateAffine2D(src, dst, mask, cv::RANSAC, m_ransacThreshold);
+        if (A.empty() || A.rows != 2 || A.cols != 3) { inl = 0; er = 1e9; return {}; }
+        cv::Mat A64; A.convertTo(A64, CV_64F);
+        cv::Mat H = cv::Mat::eye(3, 3, CV_64F);
+        A64.copyTo(H(cv::Rect(0, 0, 3, 2)));
+        er = medianReprojError(src, dst, H, mask, inl);
+        return H;
+    };
+
+    switch (m_model) {
+    case Model::Homography: return fitHomog(inliers, reprojErr);
+    case Model::Affine:     return fitAffine(false, inliers, reprojErr);
+    case Model::Similarity: return fitAffine(true,  inliers, reprojErr);
+    case Model::Auto:
+    default: {
+        int si = 0, hi = 0; double se = 1e9, he = 1e9;
+        cv::Mat S = fitAffine(true, si, se);
+        cv::Mat H = fitHomog(hi, he);
+        // Keep the simpler (steadier) similarity unless the homography is
+        // clearly better — notably lower error and at least as many inliers.
+        const bool homogBetter = !H.empty() && he < se * 0.7 && hi >= si;
+        if (!S.empty() && !homogBetter) { inliers = si; reprojErr = se; return S; }
+        if (!H.empty())                 { inliers = hi; reprojErr = he; return H; }
+        inliers = si; reprojErr = se; return S;
+    }
+    }
+}
+
+void TrackingWorker::bucketKeypoints(std::vector<cv::KeyPoint>& kp, cv::Mat& desc,
+                                     const cv::Size& imgSize) const
+{
+    if (m_targetKeypoints <= 0 || static_cast<int>(kp.size()) <= m_targetKeypoints)
+        return;
+    if (imgSize.width <= 0 || imgSize.height <= 0) return;
+
+    constexpr int kCols = 8, kRows = 6;
+    const int cells = kCols * kRows;
+    const int perCell = std::max(1, m_targetKeypoints / cells);
+
+    // Strongest first.
+    std::vector<int> order(kp.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+    std::sort(order.begin(), order.end(),
+              [&](int a, int b) { return kp[a].response > kp[b].response; });
+
+    std::vector<int> cellCount(cells, 0);
+    std::vector<int> kept;
+    kept.reserve(m_targetKeypoints);
+    const double cw = static_cast<double>(imgSize.width)  / kCols;
+    const double ch = static_cast<double>(imgSize.height) / kRows;
+
+    for (int idx : order) {
+        if (static_cast<int>(kept.size()) >= m_targetKeypoints) break;
+        int cx = std::clamp(static_cast<int>(kp[idx].pt.x / cw), 0, kCols - 1);
+        int cy = std::clamp(static_cast<int>(kp[idx].pt.y / ch), 0, kRows - 1);
+        int c = cy * kCols + cx;
+        if (cellCount[c] >= perCell) continue;  // cell full — spread out
+        cellCount[c]++;
+        kept.push_back(idx);
+    }
+    // Top up with the next strongest globally if cells didn't fill the target.
+    if (static_cast<int>(kept.size()) < m_targetKeypoints) {
+        std::vector<char> taken(kp.size(), 0);
+        for (int i : kept) taken[i] = 1;
+        for (int idx : order) {
+            if (static_cast<int>(kept.size()) >= m_targetKeypoints) break;
+            if (!taken[idx]) kept.push_back(idx);
+        }
+    }
+
+    std::vector<cv::KeyPoint> newKp;
+    newKp.reserve(kept.size());
+    cv::Mat newDesc(static_cast<int>(kept.size()), desc.cols, desc.type());
+    for (size_t i = 0; i < kept.size(); ++i) {
+        newKp.push_back(kp[kept[i]]);
+        desc.row(kept[i]).copyTo(newDesc.row(static_cast<int>(i)));
+    }
+    kp = std::move(newKp);
+    desc = newDesc;
 }
 
 double TrackingWorker::cornerDisp(const cv::Mat& a, const cv::Mat& b) const
@@ -193,58 +310,38 @@ cv::Mat TrackingWorker::smoothHomography(const cv::Mat& rawH)
     if (rawH.empty() || m_pcbPolygon.size() < 4)
         return rawH;
 
-    if (m_smoothedHomography.empty()) {
-        m_smoothedHomography = rawH.clone();
-        return rawH;
-    }
-
-    std::vector<cv::Point2f> prevPts, newPts;
+    std::vector<cv::Point2f> newPts;
     try {
-        cv::perspectiveTransform(m_pcbPolygon, prevPts, m_smoothedHomography);
         cv::perspectiveTransform(m_pcbPolygon, newPts, rawH);
     } catch (const cv::Exception&) {
-        m_smoothedHomography = rawH.clone();
         return rawH;
     }
+    const size_t n = newPts.size();
 
-    // Max corner displacement between the previous smoothed estimate and the
-    // fresh raw one. Small values are sensor/keypoint noise on an otherwise
-    // static scene; large values are real motion.
-    double maxDisp = 0.0;
-    for (size_t i = 0; i < prevPts.size(); ++i)
-        maxDisp = std::max(maxDisp, cv::norm(newPts[i] - prevPts[i]));
+    // One 1€ filter per corner coordinate (x and y). The speed-adaptive cutoff
+    // crushes jitter when the corners are nearly still and opens up instantly
+    // on real motion — better jitter/lag trade-off than the old fixed EMA.
+    if (m_cornerFilters.size() != n * 2) {
+        m_cornerFilters.assign(
+            n * 2, OneEuroFilter(m_oneEuroMinCutoff, m_oneEuroBeta));
+    }
+    const double t = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
-    // Below kNoiseFloorPx: heavily damp (mostly trust the previous estimate).
-    // Above kSnapPx: trust the new estimate fully (don't lag real motion).
-    // In between: linearly ramp the blend weight given to the new estimate.
-    constexpr double kNoiseFloorPx = 1.5;
-    constexpr double kSnapPx       = 12.0;
-    constexpr double kMinAlpha     = 0.15;  // weight on new pts at/below the noise floor
-
-    double alpha;
-    if (maxDisp <= kNoiseFloorPx)
-        alpha = kMinAlpha;
-    else if (maxDisp >= kSnapPx)
-        alpha = 1.0;
-    else
-        alpha = kMinAlpha + (1.0 - kMinAlpha) * (maxDisp - kNoiseFloorPx) / (kSnapPx - kNoiseFloorPx);
-
-    std::vector<cv::Point2f> blended(prevPts.size());
-    for (size_t i = 0; i < prevPts.size(); ++i)
-        blended[i] = prevPts[i] * (1.0 - alpha) + newPts[i] * alpha;
+    std::vector<cv::Point2f> filt(n);
+    for (size_t i = 0; i < n; ++i) {
+        filt[i].x = static_cast<float>(m_cornerFilters[2 * i].filter(newPts[i].x, t));
+        filt[i].y = static_cast<float>(m_cornerFilters[2 * i + 1].filter(newPts[i].y, t));
+    }
 
     cv::Mat smoothed;
     try {
-        smoothed = cv::findHomography(m_pcbPolygon, blended, 0 /* least-squares, no RANSAC */);
+        smoothed = cv::findHomography(m_pcbPolygon, filt, 0 /* least-squares */);
     } catch (const cv::Exception&) {
-        smoothed = cv::Mat();
-    }
-    if (smoothed.empty() || smoothed.rows != 3 || smoothed.cols != 3) {
-        m_smoothedHomography = rawH.clone();
         return rawH;
     }
-
-    m_smoothedHomography = smoothed;
+    if (smoothed.empty() || smoothed.rows != 3 || smoothed.cols != 3)
+        return rawH;
     return smoothed;
 }
 
@@ -349,6 +446,10 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
             k.pt.y *= invScale;
         }
 
+        // Spatially distribute keypoints (full-res coords) so the fit is
+        // well-conditioned across the whole board, not dominated by a cluster.
+        bucketKeypoints(kp, desc, gray.size());
+
         // Sub-pixel refinement on the full-res gray image — cuts the
         // quantization jitter ORB carries (worse after the ×downscale
         // upscaling). Done before matching so descriptors keep their indices.
@@ -388,16 +489,14 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
     if (srcPts.size() < static_cast<size_t>(m_minMatchCount))
         return;
 
-    cv::Mat inlierMask;
-    cv::Mat frameH = cv::findHomography(srcPts, dstPts, cv::USAC_MAGSAC,
-                                        m_ransacThreshold, inlierMask);
-    if (frameH.empty() || frameH.rows != 3 || frameH.cols != 3)
-        return;
     if (m_baseHomography.empty())
         return;
 
     int inliers = 0;
-    double reprojErr = medianReprojError(srcPts, dstPts, frameH, inlierMask, inliers);
+    double reprojErr = 0.0;
+    cv::Mat frameH = estimateModel(srcPts, dstPts, inliers, reprojErr);
+    if (frameH.empty() || frameH.rows != 3 || frameH.cols != 3)
+        return;
 
     cv::Mat combined = frameH * m_baseHomography;
     m_lastHomography = combined.clone();
@@ -450,12 +549,10 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
         std::vector<cv::Point2f> rSrc, rDst;
         matchPoints(m_refDescriptors, m_refKeypoints, desc, kp, rSrc, rDst);
         if (rSrc.size() >= static_cast<size_t>(m_minMatchCount)) {
-            cv::Mat rMask;
-            cv::Mat refH = cv::findHomography(rSrc, rDst, cv::USAC_MAGSAC,
-                                              m_ransacThreshold, rMask);
+            int rInliers = 0;
+            double rErr = 0.0;
+            cv::Mat refH = estimateModel(rSrc, rDst, rInliers, rErr);
             if (!refH.empty() && refH.rows == 3 && refH.cols == 3) {
-                int rInliers = 0;
-                const double rErr = medianReprojError(rSrc, rDst, refH, rMask, rInliers);
                 // Trust it as drift-free only when the fit is both well-
                 // supported and tight — a weak/loose anchor match would inject
                 // a worse estimate than the incremental one it replaces.

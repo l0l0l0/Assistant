@@ -81,6 +81,9 @@ private:
     QDoubleSpinBox* m_matchRatio        = nullptr;
     QDoubleSpinBox* m_ransacThreshold   = nullptr;
     QDoubleSpinBox* m_trackingDownscale = nullptr;
+    QComboBox*      m_trackingModel     = nullptr;
+    QDoubleSpinBox* m_oneEuroMinCutoff  = nullptr;
+    QDoubleSpinBox* m_oneEuroBeta       = nullptr;
     QCheckBox*      m_microscopeIncremental = nullptr;
     QDoubleSpinBox* m_reanchorDrift     = nullptr;
 

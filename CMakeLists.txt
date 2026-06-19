@@ -218,6 +218,7 @@ set(HEADERS
     src/overlay/ComponentOverlay.h
     src/overlay/HeatmapRenderer.h
     src/overlay/TrackingWorker.h
+    src/overlay/OneEuroFilter.h
     src/overlay/BoardLocator.h
 
     # GUI

@@ -11,6 +11,19 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Live Tracking — Phase 2 : 1€ Filter + modèle adaptatif + bucketing keypoints)
+
+> **2026-06-19 (suite 87)** : **implémentation Phase 2** du [plan](LIVE_TRACKING_PLAN.md) (« go phase 2 »).
+> - **2.1 1€ Filter** : nouveau header-only `src/overlay/OneEuroFilter.h` (filtre passe-bas à coupure adaptative à la vitesse, CHI 2012). `smoothHomography()` réécrit : au lieu de l'EMA à seuils (suite 82), filtre désormais **les 8 coordonnées des 4 coins board** avec un 1€ Filter chacun, puis refit l'homographie. Coupure basse au repos (jitter écrasé), s'ouvre instantanément en mouvement (pas de lag). Paramètres `m_oneEuroMinCutoff`/`m_oneEuroBeta`.
+> - **2.2 Modèle de mouvement adaptatif** : nouveau `estimateModel()` (enum `Model` : Auto/Similarity/Affine/Homography) routé dans `processReference` + le re-lock hybrid. `Auto` fit **similitude ET homographie** et garde la similitude sauf si l'homographie est nettement meilleure (err < 0.7× ET ≥ autant d'inliers) → évite que le bruit fuie en fausse perspective sur carte plane. **Défaut = Homography (legacy, sûr)** : comportement inchangé tant que l'utilisateur ne choisit pas un autre modèle. Delta incrémental laissé en homographie (hors scope, risque compo).
+> - **2.3 Distribution des keypoints** : `bucketKeypoints()` — grille 8×6, garde les plus forts par cellule (détecteur configuré à 2× la cible pour avoir le choix) → fit mieux conditionné sur toute la carte, moins de wobble aux bords.
+>
+> **Plomberie** : nouveau slot `TrackingWorker::setStabilization(model, minCutoff, beta)` invoqué aux 2 sites configure de `Application`. Config : champs `m_trackingModel`(=3)/`m_oneEuroMinCutoff`(=1.0)/`m_oneEuroBeta`(=0.02) + accesseurs + JSON load/save (`model`/`one_euro_min_cutoff`/`one_euro_beta`). SettingsDialog onglet Tracking : combo **Motion model** + spinbox **min cutoff (Hz)** + **beta**, avec tooltips. `OneEuroFilter.h` ajouté à `CMakeLists.txt`. Filtres remis à zéro dans `resetReference()` + à chaque `setStabilization`.
+>
+> Fichiers : `src/overlay/OneEuroFilter.h` (nouveau), `src/overlay/TrackingWorker.{h,cpp}`, `src/app/Config.{h,cpp}`, `src/app/Application.cpp`, `src/gui/SettingsDialog.{h,cpp}`, `CMakeLists.txt`.
+>
+> ⚠️ **Non compilé/testé ici** (pas de toolchain Qt6/OpenCV). **À valider au prochain build Jetson** : (1) défaut (Homography + 1€) → overlay au moins aussi stable qu'avant, plus fluide en mouvement ; (2) passer Motion model → **Auto** ou **Similarity** sur la carte plane → tester si l'overlay est plus stable aux bords (et qu'un point de vue incliné reste correct en Auto) ; (3) ajuster min cutoff (baisser = plus stable au repos) / beta (monter = moins de lag) ; (4) surveiller le FPS (estimateModel en Auto fait 2 fits ; bucketing détecte 2× plus de keypoints — si trop lourd, repasser model=Homography et/ou baisser orbKeypoints). Si régression visible, model=Homography + beta défaut = comportement Phase 1.
+
 ## État actuel — au 2026-06-19 (Live Tracking — Phase 1 implémentée : statique + MAGSAC + subpix + gating)
 
 > **2026-06-19 (suite 86)** : **implémentation Phase 1** du [plan Live Tracking](LIVE_TRACKING_PLAN.md) (« go » utilisateur). 4 changements dans `src/overlay/TrackingWorker.{h,cpp}` :

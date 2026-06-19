@@ -253,6 +253,37 @@ void SettingsDialog::createTrackingTab(QTabWidget* tabs)
                                         "Smaller = faster but less robust."));
     form->addRow(tr("Downscale:"), m_trackingDownscale);
 
+    m_trackingModel = new QComboBox;
+    m_trackingModel->addItem(tr("Auto (similarity / homography)"), 0);
+    m_trackingModel->addItem(tr("Similarity (4 DOF — steadiest, flat board)"), 1);
+    m_trackingModel->addItem(tr("Affine (6 DOF)"), 2);
+    m_trackingModel->addItem(tr("Homography (8 DOF — full perspective)"), 3);
+    m_trackingModel->setToolTip(
+        tr("Motion model fitted for the overlay. A flat board seen ~perpendicular "
+           "only needs a similarity; the full homography then lets noise leak into "
+           "spurious perspective (edge wobble). Auto keeps the simpler model when it "
+           "fits comparably well."));
+    form->addRow(tr("Motion model:"), m_trackingModel);
+
+    m_oneEuroMinCutoff = new QDoubleSpinBox;
+    m_oneEuroMinCutoff->setRange(0.1, 10.0);
+    m_oneEuroMinCutoff->setSingleStep(0.1);
+    m_oneEuroMinCutoff->setDecimals(2);
+    m_oneEuroMinCutoff->setSuffix(" Hz");
+    m_oneEuroMinCutoff->setToolTip(
+        tr("1€ filter baseline cutoff. Lower = steadier overlay at rest, but more "
+           "lag on motion."));
+    form->addRow(tr("Smoothing min cutoff:"), m_oneEuroMinCutoff);
+
+    m_oneEuroBeta = new QDoubleSpinBox;
+    m_oneEuroBeta->setRange(0.0, 1.0);
+    m_oneEuroBeta->setSingleStep(0.01);
+    m_oneEuroBeta->setDecimals(3);
+    m_oneEuroBeta->setToolTip(
+        tr("1€ filter speed coupling. Higher = less lag during motion (but a bit "
+           "more jitter)."));
+    form->addRow(tr("Smoothing beta:"), m_oneEuroBeta);
+
     m_microscopeIncremental = new QCheckBox(
         tr("Incremental frame→frame tracking (microscope)"));
     m_microscopeIncremental->setToolTip(
@@ -457,6 +488,12 @@ void SettingsDialog::loadFromConfig()
     m_matchRatio->setValue(m_config.matchDistanceRatio());
     m_ransacThreshold->setValue(m_config.ransacThreshold());
     m_trackingDownscale->setValue(static_cast<double>(m_config.trackingDownscale()));
+    {
+        int mi = m_trackingModel->findData(m_config.trackingModel());
+        m_trackingModel->setCurrentIndex(mi >= 0 ? mi : 0);
+    }
+    m_oneEuroMinCutoff->setValue(m_config.oneEuroMinCutoff());
+    m_oneEuroBeta->setValue(m_config.oneEuroBeta());
     m_microscopeIncremental->setChecked(m_config.microscopeIncremental());
     m_reanchorDrift->setValue(m_config.microscopeReanchorDriftPx());
 
@@ -542,6 +579,9 @@ void SettingsDialog::accept()
     m_config.setMatchDistanceRatio(m_matchRatio->value());
     m_config.setRansacThreshold(m_ransacThreshold->value());
     m_config.setTrackingDownscale(static_cast<float>(m_trackingDownscale->value()));
+    m_config.setTrackingModel(m_trackingModel->currentData().toInt());
+    m_config.setOneEuroMinCutoff(m_oneEuroMinCutoff->value());
+    m_config.setOneEuroBeta(m_oneEuroBeta->value());
     m_config.setMicroscopeIncremental(m_microscopeIncremental->isChecked());
     m_config.setMicroscopeReanchorDriftPx(m_reanchorDrift->value());
 

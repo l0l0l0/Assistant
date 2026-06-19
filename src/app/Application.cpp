@@ -395,6 +395,10 @@ void Application::createSubsystems()
         Q_ARG(double, m_config->ransacThreshold()),
         Q_ARG(int,    m_config->trackingIntervalMs()),
         Q_ARG(float,  m_config->trackingDownscale()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setStabilization", Qt::QueuedConnection,
+        Q_ARG(int,    m_config->trackingModel()),
+        Q_ARG(double, m_config->oneEuroMinCutoff()),
+        Q_ARG(double, m_config->oneEuroBeta()));
     QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
         Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                       && m_config->microscopeIncremental()),
@@ -2130,6 +2134,10 @@ void Application::connectControlSignals()
                 Q_ARG(double, m_config->ransacThreshold()),
                 Q_ARG(int,    m_config->trackingIntervalMs()),
                 Q_ARG(float,  m_config->trackingDownscale()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setStabilization", Qt::QueuedConnection,
+                Q_ARG(int,    m_config->trackingModel()),
+                Q_ARG(double, m_config->oneEuroMinCutoff()),
+                Q_ARG(double, m_config->oneEuroBeta()));
             QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
                 Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                               && m_config->microscopeIncremental()),

@@ -175,6 +175,19 @@ public:
     float trackingDownscale() const { return m_trackingDownscale; }
     void  setTrackingDownscale(float d) { m_trackingDownscale = d; }
 
+    /// Motion model fitted for live tracking (Phase 2, see LIVE_TRACKING_PLAN.md):
+    /// 0=auto, 1=similarity, 2=affine, 3=homography. Default 3 (legacy).
+    int  trackingModel() const { return m_trackingModel; }
+    void setTrackingModel(int m) { m_trackingModel = m; }
+
+    /// 1€ filter parameters for overlay stabilization. minCutoff: baseline
+    /// cutoff (Hz) — lower = steadier at rest. beta: speed coupling — higher
+    /// = less lag during motion.
+    double oneEuroMinCutoff() const { return m_oneEuroMinCutoff; }
+    void   setOneEuroMinCutoff(double v) { m_oneEuroMinCutoff = v; }
+    double oneEuroBeta() const { return m_oneEuroBeta; }
+    void   setOneEuroBeta(double v) { m_oneEuroBeta = v; }
+
     // --- Calibration ---
     int  calibBoardCols() const { return m_calibBoardCols; }
     void setCalibBoardCols(int n) { m_calibBoardCols = n; }
@@ -328,6 +341,9 @@ private:
     double m_matchDistanceRatio = 0.75;   // Lowe's ratio (lower = stricter)
     double m_ransacThreshold    = 3.0;
     float  m_trackingDownscale  = 0.5f;   // 1.0 = full res, 0.5 = half (default)
+    int    m_trackingModel      = 3;      // 0 auto / 1 sim / 2 affine / 3 homography
+    double m_oneEuroMinCutoff   = 1.0;    // Hz
+    double m_oneEuroBeta        = 0.02;
 
     // Calibration (microscope-friendly defaults: small 5cm card)
     int   m_calibBoardCols  = 7;    // inner corners cols

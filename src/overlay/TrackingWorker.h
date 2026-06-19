@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "camera/CameraCapture.h"  // for ibom::camera::FrameRef
+#include "overlay/OneEuroFilter.h"
 
 namespace ibom::overlay {
 
@@ -37,6 +38,13 @@ public:
     /// no Qt metatype registration is needed.
     enum class State { Locked = 0, Drifting = 1, Lost = 2 };
 
+    /// Motion model fitted for the PCB→image estimate (Phase 2). A flat board
+    /// seen ~perpendicular only needs a similarity (4 DOF); fitting the full
+    /// 8-DOF homography then lets noise leak into spurious perspective, which
+    /// reads as overlay wobble at the edges. `Auto` fits both and keeps the
+    /// simpler one when it explains the data comparably well.
+    enum class Model { Auto = 0, Similarity = 1, Affine = 2, Homography = 3 };
+
 public slots:
     /// Configure detector + matching parameters. Recreates ORB detector
     /// with the requested keypoint count.
@@ -55,6 +63,12 @@ public slots:
     /// @param driftThresholdPx accumulated reprojection error past which the
     ///        state flips to Drifting (invites a re-anchor).
     void setIncrementalMode(bool enabled, double driftThresholdPx);
+
+    /// Configure Phase-2 stabilization (docs/LIVE_TRACKING_PLAN.md):
+    /// @param model         motion model fitted (Model cast to int).
+    /// @param oneEuroMinCutoff baseline cutoff (Hz) of the 1€ corner filter.
+    /// @param oneEuroBeta   speed coupling of the 1€ corner filter.
+    void setStabilization(int model, double oneEuroMinCutoff, double oneEuroBeta);
 
     /// Enable hybrid drift correction (beta). Only affects incremental mode.
     /// When on, the worker keeps the original anchor keyframe captured at
@@ -153,6 +167,22 @@ private:
     /// when an update was actually emitted.
     bool emitHomography(const cv::Mat& rawH, int inliers, double reprojErr);
 
+    /// Fit the PCB→image (or ref→cur) point correspondence with the configured
+    /// motion model and return it as a 3×3 matrix. Fills inliers + median
+    /// reprojection error. `Auto` fits a similarity and a homography and keeps
+    /// the similarity unless the homography is clearly better. Returns an empty
+    /// Mat on failure.
+    cv::Mat estimateModel(const std::vector<cv::Point2f>& src,
+                          const std::vector<cv::Point2f>& dst,
+                          int& inliers, double& reprojErr);
+
+    /// Spatially distribute keypoints: keep the strongest per grid cell so the
+    /// fit is well-conditioned across the whole board instead of dominated by a
+    /// dense cluster. Subsets `kp` and the matching `desc` rows in place. No-op
+    /// when there are fewer keypoints than the target.
+    void bucketKeypoints(std::vector<cv::KeyPoint>& kp, cv::Mat& desc,
+                         const cv::Size& imgSize) const;
+
     /// Refine keypoint positions to sub-pixel on the full-resolution gray
     /// image (cv::cornerSubPix) — reduces the quantization jitter that ORB
     /// keypoints carry, especially after the ×downscale upscaling. No-op on
@@ -173,17 +203,18 @@ private:
     std::vector<cv::Point2f> m_pcbPolygon;
     cv::Mat                  m_lastHomography;
 
-    // Previous *smoothed* estimate, used as the blend anchor in
-    // smoothHomography(). Separate from m_lastHomography (which mirrors the
-    // raw/best current estimate used for mask projection) so smoothing always
-    // damps against the last value actually emitted to consumers.
-    cv::Mat m_smoothedHomography;
-
     // Phase-1 stabilization state (see docs/LIVE_TRACKING_PLAN.md).
     cv::Mat m_lastEmittedH;            // last pose actually sent to consumers
     int     m_staticFrames     = 0;    // consecutive frames judged "not moving"
     int     m_lowQualityFrames = 0;    // consecutive frames below the inlier gate
     double  m_staticThreshPx   = 0.8;  // corner motion below this ⇒ scene static
+
+    // Phase-2 stabilization (docs/LIVE_TRACKING_PLAN.md).
+    Model   m_model            = Model::Homography;  // safe default = legacy
+    double  m_oneEuroMinCutoff = 1.0;  // Hz
+    double  m_oneEuroBeta      = 0.02;
+    std::vector<OneEuroFilter> m_cornerFilters;  // 2 per board corner (x,y)
+    int     m_targetKeypoints  = 0;    // bucketing target (0 = disabled)
 
     int    m_minMatchCount      = 10;
     double m_loweRatio          = 0.75;
