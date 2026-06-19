@@ -359,4 +359,11 @@ void ControlPanel::setCameraBackendUI(bool isRealSense)
     }
 }
 
+void ControlPanel::setAlignMultiActive(bool active)
+{
+    if (!m_btnAlignMulti) return;
+    m_btnAlignMulti->setText(active ? tr("Finish Align: Multi-Comp")
+                                     : tr("Align: Multi-Comp (Beta)"));
+}
+
 } // namespace ibom::gui

@@ -47,6 +47,9 @@ public:
     /// Disables/relabels the calibration button when RealSense is active
     /// (factory intrinsics are embedded in the SDK — no checkerboard needed).
     void setCameraBackendUI(bool isRealSense);
+    /// Toggle the Multi-Comp button's label between "start" and "finish" so the
+    /// user knows clicking it again ends the landmark-collection step.
+    void setAlignMultiActive(bool active);
 
 signals:
     void overlayOpacityChanged(float opacity);

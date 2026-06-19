@@ -295,6 +295,9 @@ private:
     gui::AlignmentWizard* m_alignWizard = nullptr;
     /// Forward an alignment summary to the wizard (if any) and the status bar.
     void reportAlignmentResult(const QString& summary);
+    /// Keep the ControlPanel button and (if open) the wizard's run page in sync
+    /// with whether multi-component landmark collection is in progress.
+    void setMultiAlignUIState(bool collecting);
 
     // Live tracking mode — ORB work happens on m_trackingThread via m_trackingWorker.
     bool     m_liveMode = false;

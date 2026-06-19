@@ -156,6 +156,11 @@ public:
 
     QString result() const { return m_result; }
 
+    void setCollecting(bool collecting) {
+        m_startBtn->setText(collecting ? tr("Finish Multi-Component align")
+                                        : tr("Start Multi-Component align"));
+    }
+
 private:
     AlignmentWizard* m_wiz;
     QLabel*  m_instructions = nullptr;
@@ -230,6 +235,11 @@ void AlignmentWizard::reportResult(const QString& summary)
 {
     m_result = summary;
     if (m_runPage) m_runPage->setResult(summary);
+}
+
+void AlignmentWizard::setMultiAlignCollecting(bool collecting)
+{
+    if (m_runPage) m_runPage->setCollecting(collecting);
 }
 
 } // namespace ibom::gui

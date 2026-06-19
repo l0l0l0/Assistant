@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <QTimer>
 #include <QLabel>
+#include <QDockWidget>
 #include <memory>
 
 class QStackedWidget;
@@ -46,6 +47,10 @@ public:
     StatsPanel*       statsPanel()       { return m_statsPanel; }
     DatasetPanel*     datasetPanel()     { return m_datasetPanel; }
     BoardMinimap*     boardMinimap()     { return m_boardMinimap; }
+
+    /// Raise the BOM dock to the front (e.g. when starting a component-based
+    /// alignment flow, so the user doesn't have to find the tab manually).
+    void showBomPanel();
 
     void setDarkMode(bool dark);
     void updateFpsDisplay(double fps);
@@ -131,6 +136,7 @@ private:
     ViewModeBar*      m_viewModeBar      = nullptr;
     bool              m_pointCloudActive = false;
     BomPanel*         m_bomPanel         = nullptr;
+    QDockWidget*      m_bomDock          = nullptr;
     ControlPanel*     m_controlPanel     = nullptr;
     InspectionWizard* m_inspectionWizard = nullptr;
     InspectionPanel*  m_inspectionPanel  = nullptr;

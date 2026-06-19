@@ -132,6 +132,11 @@ void MainWindow::updateStatusMessage(const QString& msg)
     m_statusLabel->setText(msg);
 }
 
+void MainWindow::showBomPanel()
+{
+    if (m_bomDock) m_bomDock->raise();
+}
+
 void MainWindow::updateAiStatus(bool ready, const QString& message)
 {
     m_aiLabel->setText(message);
@@ -429,6 +434,7 @@ void MainWindow::createDockWidgets()
     bomDock->setObjectName("BomDock");
     bomDock->setWidget(m_bomPanel);
     addDockWidget(Qt::RightDockWidgetArea, bomDock);
+    m_bomDock = bomDock;
 
     // Control panel (right, stacked under BOM)
     m_controlPanel = new ControlPanel(this);

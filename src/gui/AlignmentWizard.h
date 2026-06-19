@@ -44,6 +44,11 @@ public:
     /// human-readable summary, marks the run page complete, and surfaces the text.
     void reportResult(const QString& summary);
 
+    /// For the Multi-Component method: toggle the run page's button between
+    /// "Start" and "Finish" while landmarks are being collected, mirroring the
+    /// ControlPanel button.
+    void setMultiAlignCollecting(bool collecting);
+
     /// Currently selected method (valid from the run page onward).
     int selectedMethod() const { return m_method; }
     bool backendIsRealSense() const { return m_isRealSense; }

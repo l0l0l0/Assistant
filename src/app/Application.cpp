@@ -688,12 +688,19 @@ void Application::reportAlignmentResult(const QString& summary)
         m_alignWizard->reportResult(summary);
 }
 
+void Application::setMultiAlignUIState(bool collecting)
+{
+    m_mainWindow->controlPanel()->setAlignMultiActive(collecting);
+    if (m_alignWizard) m_alignWizard->setMultiAlignCollecting(collecting);
+}
+
 void Application::applyMultiAlignment()
 {
     // Stop collecting regardless of outcome.
     m_alignMulti = false;
     m_alignMultiAwaitClick = false;
     m_alignMultiHaveCorner1 = false;
+    setMultiAlignUIState(false);
 
     const auto& pcb = m_alignMultiPcbPts;
     const auto& img = m_alignMultiImgPts;
@@ -2033,6 +2040,7 @@ void Application::connectControlSignals()
         }
         m_alignOnComponents = false;  // cancel any 2-comp align in progress
         m_alignMulti = false;         // cancel any multi-comp align in progress
+        setMultiAlignUIState(false);
         m_pickingHomographyPoints = true;
         m_homographyImagePoints.clear();
         m_mainWindow->updateStatusMessage(
@@ -2055,6 +2063,8 @@ void Application::connectControlSignals()
         }
         m_pickingHomographyPoints = false;  // cancel any 4-corner align
         m_alignMulti = false;               // cancel any multi-comp align
+        setMultiAlignUIState(false);
+        m_mainWindow->showBomPanel();
         m_alignOnComponents = true;
         m_alignCompStep = 0;
         m_mainWindow->updateStatusMessage(
@@ -2090,6 +2100,8 @@ void Application::connectControlSignals()
         m_alignMultiPcbPts.clear();
         m_alignMultiImgPts.clear();
         m_alignMultiRefs.clear();
+        setMultiAlignUIState(true);
+        m_mainWindow->showBomPanel();
         m_mainWindow->updateStatusMessage(
             tr("Multi-align: select a component in the BOM panel "
                "(mark ≥2 spread out; ≥4 for perspective). Click the button again to finish."));
