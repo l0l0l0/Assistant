@@ -15,6 +15,8 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 43 | 2026-06-19 | Application — sortie process | 🔴 OUVERT | [Segmentation fault au moment de quitter l'app (après "Application exiting with code 0") — non investigué](#erreur-43--segfault-a-la-sortie-de-lapplication) |
+| 42 | 2026-06-19 | Application.cpp / BoardMinimap | ✅ RÉSOLU | [Clic minimap déplaçait tout l'overlay sur D405 (anchor 1-point pensé pour microscope FOV étroit) au lieu de surligner le composant](#erreur-42--clic-minimap-deplace-loverlay-sur-realsense-au-lieu-de-highlighter) |
 | 41 | 2026-06-18 | BoardLocator.cpp — Auto-Align depth | 🟡 CONTOURNÉ | [Auto-Align D405 intermittent : carte posée à plat sur une surface coplanaire → le plan de profondeur englobe carte + table (2.5×), rejet par `validateSize()`](#erreur-41--auto-align-d405-carte-coplanaire-avec-la-table) |
 | 40 | 2026-06-18 | StatsPanel.cpp — Inspection Progress | 🔴 OUVERT | [`StatsPanel::setTotalComponents()` jamais appelé — le panneau Inspection Progress affiche toujours "No inspection data" / 0%](#erreur-40--settotalcomponents-jamais-appele--inspection-progress-toujours-a-zero) |
 | 39 | 2026-06-18 | BoardLocator.cpp / Application.cpp / RealSenseCapture.cpp / StatsPanel.cpp — D405 glare | ✅ RÉSOLU | [Distance/Auto-Align/self-cal faux sous glare D405 — depth fill bas non détecté](#erreur-39--distanceauto-alignself-cal-faux-sous-glare-d405) |
@@ -1372,6 +1374,53 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 43 — Segfault à la sortie de l'application
+
+**Date** : 2026-06-19
+**Composant** : `Application` — arrêt/destruction
+**Statut** : 🔴 OUVERT
+
+### Symptôme
+Dans le log terminal fourni par l'utilisateur, juste après la fermeture normale de la fenêtre :
+```
+[09:21:11.877] [info] [:] Application exiting with code 0
+QMainWindow::saveState(): 'objectName' not set for QToolBar 0xaaaaef79a040 'Main'
+Segmentation fault (core dumped)
+```
+Le message « exiting with code 0 » et le warning Qt sortent **avant** le crash — donc `main()` est sorti proprement, et le segfault survient pendant le déroulement des destructeurs/cleanup process (probablement lié à l'ordre de destruction des `QThread`s : `m_trackingThread`/`m_datasetThread`, ou à un objet Qt détruit après son parent).
+
+### Cause
+Non investigué. Pistes à explorer la prochaine fois que ça se reproduit :
+- Ordre de destruction `Application::~Application()` vs `QApplication` (créée dans `main.cpp` avant `Application`, donc devrait être détruite après — à vérifier que rien dans `~Application()` ne déclenche un signal/slot Qt après que `QApplication` a commencé sa propre destruction).
+- Les deux `QThread` dédiés (`m_trackingThread`, `m_datasetThread`) : `quit()`/`wait()` bien appelés avant la destruction du worker (`deleteLater` sur `finished`) ? Un `deleteLater` qui n'a pas le temps de s'exécuter avant la fin de la boucle d'événements peut laisser un objet Qt à moitié détruit.
+- Corrélation avec le warning `QMainWindow::saveState(): 'objectName' not set for QToolBar 'Main'` — possible mais pas confirmé ; ce warning seul ne devrait pas crasher.
+
+### Solution appliquée
+Aucune — pas encore reproduit/isolé. Noté ici uniquement parce que l'utilisateur en a fourni le log, par souci de ne pas le perdre.
+
+### Leçon
+Si ce crash se reproduit et qu'on a le temps d'investiguer : lancer sous `gdb`/`valgrind --tool=memcheck` au moment du `Stop-Process`/fermeture de fenêtre pour obtenir une stack trace, plutôt que d'essayer de deviner depuis le seul "exiting with code 0" + segfault.
+
+## ERREUR 42 — Clic minimap déplace l'overlay sur RealSense au lieu de highlighter
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` (handler `BoardMinimap::anchorRequested`) / `src/gui/BoardMinimap.{h,cpp}`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Utilisateur sur D405 : « je vois que quand on clique sur la mini map ça ne fonctionne toujours pas. ça fais bouger tout l'overlay de la carte alors ça devrait highlighter le composant. » Log terminal confirme : chaque clic minimap produit `Homography computed: 4/4 inliers, error: 0.000 px` + `Minimap anchor: PCB (x, y) → image center` — l'overlay entier se redéplace/réoriente à chaque clic.
+
+### Cause
+`BoardMinimap::anchorRequested(pcbPoint)` était câblé sans condition de backend à un re-ancrage 1-point (recalcule l'homographie complète pour centrer le FOV caméra sur le point cliqué). Cette fonctionnalité est pensée pour le **microscope à FOV étroit** (`docs/MICROSCOPE_PLACEMENT_PLAN.md`) où toute la carte n'est jamais visible en même temps — recentrer la vue caméra sur un point cliqué a du sens là. Sur **RealSense (FOV large)**, la carte entière est déjà visible : « recentrer le FOV » n'a aucun sens et produit juste l'effet rapporté (overlay qui sursaute à chaque clic anodin).
+
+### Solution appliquée ✅
+Handler bifurqué selon `m_config->cameraBackend()` :
+- **RealSense** : recherche linéaire du composant `Layer::Front` le plus proche du point cliqué (distance euclidienne en mm, pas de seuil de distance — toujours le plus proche), puis applique exactement le même effet qu'un clic dans le BOM panel (`m_overlayRenderer->setHighlightedRefs()`, `boardMinimap()->setSelectedRef()`, `bomPanel()->highlightComponent()`). Aucune homographie touchée.
+- **Microscope (V4L2)** : comportement de re-ancrage inchangé.
+
+### Leçon
+Une fonctionnalité conçue pour un cas d'usage spécifique (FOV étroit) ne doit pas être câblée globalement sur tous les backends sans vérifier qu'elle reste pertinente pour chacun — ici le bug n'était pas un défaut d'implémentation de l'anchor lui-même (l'homographie était calculée correctement, 0.000px d'erreur) mais un mauvais choix de comportement par défaut pour le backend RealSense.
 
 ## ERREUR 41 — Auto-Align D405 : carte coplanaire avec la table
 

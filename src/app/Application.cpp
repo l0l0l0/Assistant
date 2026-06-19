@@ -63,6 +63,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -2312,12 +2313,39 @@ void Application::connectControlSignals()
             this, [this]() { startComponentAnchor(); });
 
     // ── BoardMinimap ────────────────────────────────────────────────
-    // anchorRequested(pcbPoint): treat as a 1-point anchor at that PCB position,
-    // centering the FOV on the clicked point.  Reuses the same similarity-transform
-    // logic that startComponentAnchor() / the CameraView click handler use.
+    // anchorRequested(pcbPoint): on the microscope backend (narrow FOV), treat
+    // it as a 1-point anchor at that PCB position, centering the FOV on the
+    // clicked point — reuses the similarity-transform logic that
+    // startComponentAnchor() / the CameraView click handler use. On
+    // RealSense (wide FOV, the whole board is already visible) re-centering
+    // the FOV makes no sense — instead, highlight the nearest component, the
+    // same effect as clicking it in the BOM panel.
     connect(m_mainWindow->boardMinimap(), &gui::BoardMinimap::anchorRequested,
             this, [this](cv::Point2f pcbPt) {
         if (!m_ibomProject) return;
+
+        if (m_config->cameraBackend() == CameraBackend::RealSense) {
+            const Component* nearest = nullptr;
+            double bestDist = std::numeric_limits<double>::max();
+            for (const auto& c : m_ibomProject->components) {
+                if (c.layer != ibom::Layer::Front) continue;  // matches rendered layer
+                const double dx = c.position.x - pcbPt.x;
+                const double dy = c.position.y - pcbPt.y;
+                const double d = std::hypot(dx, dy);
+                if (d < bestDist) { bestDist = d; nearest = &c; }
+            }
+            if (!nearest) return;
+            m_selectedRef = nearest->reference;
+            if (m_overlayRenderer)
+                m_overlayRenderer->setHighlightedRefs({m_selectedRef});
+            m_mainWindow->boardMinimap()->setSelectedRef(m_selectedRef);
+            if (auto* bomPanel = m_mainWindow->bomPanel())
+                bomPanel->highlightComponent(m_selectedRef);
+            m_mainWindow->updateStatusMessage(
+                tr("Selected %1").arg(QString::fromStdString(m_selectedRef)));
+            return;
+        }
+
         double scale = (m_currentPixelsPerMm > 0.0) ? m_currentPixelsPerMm
                        : m_config->microscopeAnchorPixelsPerMm();
         double rot  = m_config->microscopeAnchorRotationDeg() * CV_PI / 180.0;
