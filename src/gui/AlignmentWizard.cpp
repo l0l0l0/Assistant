@@ -134,11 +134,12 @@ public:
             m_startBtn->setText(tr("Start 2-Component align"));
             break;
         case AlignmentWizard::MultiComponent:
-            steps = QT_TR_NOOP("Click \"Start alignment\". For each landmark: select it "
-                               "in the BOM panel, choose Pin 1 (1 click) or 2 opposite "
-                               "corners (2 clicks). The PCB Map marks pin 1 (red). Mark "
-                               "≥2 (≥4 for perspective), then press \"Start alignment\" "
-                               "again to finish.");
+            steps = QT_TR_NOOP("Click \"Start alignment\" and pick a marking method "
+                               "(opposite pads / pin 1 / body corners) once. Then for "
+                               "each landmark: pick a component in the BOM panel OR the "
+                               "PCB Map (switch freely), and click it in the image. Mark "
+                               "≥2 (≥4 for perspective), then press the button again to "
+                               "finish.");
             m_startBtn->setText(tr("Start Multi-Component align"));
             break;
         }

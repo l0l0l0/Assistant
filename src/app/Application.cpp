@@ -745,6 +745,87 @@ void Application::setMultiAlignUIState(bool collecting)
     if (m_alignWizard) m_alignWizard->setMultiAlignCollecting(collecting);
 }
 
+void Application::beginMarkComponent(const std::string& ref)
+{
+    if (!m_ibomProject) return;
+    const Component* comp = nullptr;
+    for (const auto& c : m_ibomProject->components)
+        if (c.reference == ref) { comp = &c; break; }
+    if (!comp) return;
+
+    // Reflect the selection everywhere (overlay emphasis, minimap, BOM row).
+    m_selectedRef = ref;
+    if (m_overlayRenderer) m_overlayRenderer->setHighlightedRefs({ref});
+    m_mainWindow->boardMinimap()->setSelectedRef(ref);
+    if (auto* bom = m_mainWindow->bomPanel()) bom->highlightComponent(ref);
+
+    const QString qref = QString::fromStdString(ref);
+
+    switch (m_alignMultiMethod) {
+    case 1: {  // Pin 1 — single click, anchored to the iBOM pin-1 pad.
+        const Pad* pin1 = nullptr;
+        for (const auto& p : comp->pads) if (p.isPin1) { pin1 = &p; break; }
+        if (!pin1) {
+            // Don't arm — let the user pick another component without cancelling.
+            m_alignMultiAwaitClick = false;
+            m_mainWindow->updateStatusMessage(
+                tr("%1 has no pin-1 pad in the iBOM — pick another component, or "
+                   "restart multi-align with the 'opposite pads' / 'corners' method.")
+                .arg(qref));
+            return;
+        }
+        m_alignMultiPcb = cv::Point2f(static_cast<float>(pin1->position.x),
+                                      static_cast<float>(pin1->position.y));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        m_mainWindow->updateStatusMessage(
+            tr("Click PIN 1 of %1 in the image (red dot in the PCB Map). "
+               "Or pick another component to switch.").arg(qref));
+        break;
+    }
+    case 2: {  // Two farthest-apart pads → midpoint of the two (precise anchor).
+        if (comp->pads.size() < 2) {
+            m_alignMultiAwaitClick = false;
+            m_mainWindow->updateStatusMessage(
+                tr("%1 has fewer than 2 pads — pick another component, or use the "
+                   "'corners' / 'pin 1' method.").arg(qref));
+            return;
+        }
+        // Find the pair of pads with the largest separation (footprint corners).
+        double best = -1.0; const Pad* pa = nullptr; const Pad* pb = nullptr;
+        for (size_t i = 0; i < comp->pads.size(); ++i)
+            for (size_t j = i + 1; j < comp->pads.size(); ++j) {
+                const double d = std::hypot(comp->pads[i].position.x - comp->pads[j].position.x,
+                                            comp->pads[i].position.y - comp->pads[j].position.y);
+                if (d > best) { best = d; pa = &comp->pads[i]; pb = &comp->pads[j]; }
+            }
+        if (!pa || !pb) { m_alignMultiAwaitClick = false; return; }
+        m_alignMultiPcb = cv::Point2f(
+            static_cast<float>((pa->position.x + pb->position.x) * 0.5),
+            static_cast<float>((pa->position.y + pb->position.y) * 0.5));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        m_mainWindow->updateStatusMessage(
+            tr("Click the two FARTHEST-APART pads of %1 (opposite corners of the "
+               "footprint), in any order. Or pick another component to switch.").arg(qref));
+        break;
+    }
+    default: {  // 0: two body corners → midpoint, anchored to bbox center.
+        m_alignMultiPcb = cv::Point2f(static_cast<float>(comp->bbox.center().x),
+                                      static_cast<float>(comp->bbox.center().y));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        m_mainWindow->updateStatusMessage(
+            tr("Click any corner of %1's body, then the opposite one (order "
+               "doesn't matter). Or pick another component to switch.").arg(qref));
+        break;
+    }
+    }
+}
+
 void Application::applyMultiAlignment()
 {
     // Stop collecting regardless of outcome.
@@ -1778,62 +1859,12 @@ void Application::connectControlSignals()
             m_overlayRenderer->setHighlightedRefs({ref});
         m_mainWindow->boardMinimap()->setSelectedRef(ref);
 
-        // Handle multi-component alignment selection
+        // Handle multi-component alignment selection. The marking method is
+        // chosen once when multi-align starts, so selecting (or re-selecting) a
+        // component here just arms it — no blocking popup, and switching to a
+        // different component before clicking is allowed.
         if (m_alignMulti) {
-            if (m_alignMultiAwaitClick) {
-                m_mainWindow->updateStatusMessage(
-                    tr("Finish marking %1 in the image first")
-                    .arg(QString::fromStdString(m_alignMultiRef)));
-                return;
-            }
-            const Component* comp = nullptr;
-            for (const auto& c : m_ibomProject->components) {
-                if (c.reference == ref) { comp = &c; break; }
-            }
-            if (!comp) return;
-
-            // Ask how to mark this component.
-            QMessageBox box(m_mainWindow.get());
-            box.setWindowTitle(tr("Mark %1").arg(QString::fromStdString(ref)));
-            box.setText(tr("How do you want to mark %1?")
-                        .arg(QString::fromStdString(ref)));
-            QPushButton* cornersBtn = box.addButton(tr("2 Opposite Corners"), QMessageBox::AcceptRole);
-            QPushButton* pin1Btn    = box.addButton(tr("Pin 1"), QMessageBox::AcceptRole);
-            box.addButton(QMessageBox::Cancel);
-            box.exec();
-            if (box.clickedButton() == pin1Btn) {
-                // Use the iBOM pin-1 pad position for precision.
-                const Pad* pin1 = nullptr;
-                for (const auto& p : comp->pads) {
-                    if (p.isPin1) { pin1 = &p; break; }
-                }
-                if (!pin1) {
-                    QMessageBox::information(m_mainWindow.get(), tr("Pin 1"),
-                        tr("%1 has no pin-1 pad in the iBOM — use the corners method.")
-                        .arg(QString::fromStdString(ref)));
-                    return;
-                }
-                m_alignMultiMethod = 1;
-                m_alignMultiPcb = cv::Point2f(static_cast<float>(pin1->position.x),
-                                              static_cast<float>(pin1->position.y));
-                m_alignMultiAwaitClick = true;
-                m_alignMultiRef = ref;
-                m_mainWindow->updateStatusMessage(
-                    tr("Click PIN 1 of %1 in the camera image "
-                       "(red dot in the PCB Map shows where it is)")
-                    .arg(QString::fromStdString(ref)));
-            } else if (box.clickedButton() == cornersBtn) {
-                m_alignMultiMethod = 0;
-                m_alignMultiPcb = cv::Point2f(static_cast<float>(comp->bbox.center().x),
-                                              static_cast<float>(comp->bbox.center().y));
-                m_alignMultiAwaitClick = true;
-                m_alignMultiHaveCorner1 = false;
-                m_alignMultiRef = ref;
-                m_mainWindow->updateStatusMessage(
-                    tr("Click any corner of %1's body, then the opposite one "
-                       "(order doesn't matter — check the PCB Map for its outline)")
-                    .arg(QString::fromStdString(ref)));
-            }
+            beginMarkComponent(ref);
             return;
         }
 
@@ -2143,6 +2174,29 @@ void Application::connectControlSignals()
                 tr("Start the camera first."));
             return;
         }
+        // Choose the marking method ONCE for the whole session — afterwards a
+        // component selection (BOM panel or minimap) arms the click directly,
+        // with no per-component popup blocking re-selection.
+        QMessageBox methodBox(m_mainWindow.get());
+        methodBox.setWindowTitle(tr("Multi-Component Alignment"));
+        methodBox.setText(tr("How will you mark each component?"));
+        methodBox.setInformativeText(tr(
+            "• Opposite pads — click the 2 farthest-apart pads (most precise; "
+            "ideal for resistors/capacitors)\n"
+            "• Pin 1 — single click on pin 1 (precise for ICs/connectors)\n"
+            "• Body corners — click 2 opposite corners of the body (eyeballed)\n\n"
+            "You can pick components from the BOM panel OR the PCB Map, and switch "
+            "freely before clicking."));
+        QPushButton* padsBtn    = methodBox.addButton(tr("Opposite Pads (recommended)"), QMessageBox::AcceptRole);
+        QPushButton* pin1Btn    = methodBox.addButton(tr("Pin 1"), QMessageBox::AcceptRole);
+        QPushButton* cornersBtn = methodBox.addButton(tr("Body Corners"), QMessageBox::AcceptRole);
+        methodBox.addButton(QMessageBox::Cancel);
+        methodBox.exec();
+        if (methodBox.clickedButton() == padsBtn)         m_alignMultiMethod = 2;
+        else if (methodBox.clickedButton() == pin1Btn)    m_alignMultiMethod = 1;
+        else if (methodBox.clickedButton() == cornersBtn) m_alignMultiMethod = 0;
+        else return;  // Cancel → don't start
+
         m_pickingHomographyPoints = false;
         m_alignOnComponents = false;
         m_alignMulti = true;
@@ -2154,9 +2208,9 @@ void Application::connectControlSignals()
         setMultiAlignUIState(true);
         m_mainWindow->showBomPanel();
         m_mainWindow->updateStatusMessage(
-            tr("Multi-align: select a component in the BOM panel "
+            tr("Multi-align: pick a component in the BOM panel or the PCB Map "
                "(mark ≥2 spread out; ≥4 for perspective). Click the button again to finish."));
-        spdlog::info("Multi-component alignment started");
+        spdlog::info("Multi-component alignment started (method {})", m_alignMultiMethod);
     });
 
     // ── Auto-Align (board outline detection) ────────────────────
@@ -2186,13 +2240,16 @@ void Application::connectControlSignals()
             // resolution, this recovers sub-pixel precision when there's a
             // real corner/edge nearby (silkscreen edge, pad corner, etc.).
             imgPt = refineClickPoint(imgPt);
-            if (m_alignMultiMethod == 0) {  // 2 opposite corners → midpoint
+            if (m_alignMultiMethod != 1) {  // 2 clicks → midpoint (body corners or opposite pads)
                 if (!m_alignMultiHaveCorner1) {
                     m_alignMultiCorner1 = imgPt;
                     m_alignMultiHaveCorner1 = true;
                     m_mainWindow->updateStatusMessage(
-                        tr("Click the OPPOSITE corner of %1's body")
-                        .arg(QString::fromStdString(m_alignMultiRef)));
+                        m_alignMultiMethod == 2
+                            ? tr("Click the OPPOSITE pad of %1")
+                                  .arg(QString::fromStdString(m_alignMultiRef))
+                            : tr("Click the OPPOSITE corner of %1's body")
+                                  .arg(QString::fromStdString(m_alignMultiRef)));
                     return;
                 }
                 cv::Point2f mid((m_alignMultiCorner1.x + imgPt.x) * 0.5f,
@@ -2647,6 +2704,23 @@ void Application::connectControlSignals()
     connect(m_mainWindow->boardMinimap(), &gui::BoardMinimap::anchorRequested,
             this, [this](cv::Point2f pcbPt) {
         if (!m_ibomProject) return;
+
+        // During Multi-Comp alignment a minimap click picks the nearest
+        // component as the next landmark — same as selecting it in the BOM
+        // panel, but without leaving the camera view. Switching is free
+        // (beginMarkComponent re-arms), so a wrong pick needs no cancel.
+        if (m_alignMulti) {
+            const Component* nearest = nullptr;
+            double bestDist = std::numeric_limits<double>::max();
+            for (const auto& c : m_ibomProject->components) {
+                if (c.layer != ibom::Layer::Front) continue;
+                const double d = std::hypot(c.position.x - pcbPt.x,
+                                            c.position.y - pcbPt.y);
+                if (d < bestDist) { bestDist = d; nearest = &c; }
+            }
+            if (nearest) beginMarkComponent(nearest->reference);
+            return;
+        }
 
         if (m_config->cameraBackend() == CameraBackend::RealSense) {
             const Component* nearest = nullptr;

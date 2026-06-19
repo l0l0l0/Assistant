@@ -280,7 +280,7 @@ private:
     // (corrects perspective/tilt); 3 → affine; 2 → similarity.
     bool m_alignMulti = false;
     bool m_alignMultiAwaitClick = false;  // a component is chosen, waiting image click(s)
-    int  m_alignMultiMethod = 0;          // 0 = 2 corners (midpoint), 1 = pin 1
+    int  m_alignMultiMethod = 0;          // 0 = 2 body corners (midpoint), 1 = pin 1, 2 = 2 farthest pads (midpoint)
     std::string m_alignMultiRef;          // component currently being marked
     cv::Point2f m_alignMultiPcb;          // its known PCB point (center or pin 1)
     bool m_alignMultiHaveCorner1 = false; // corners method: first corner captured
@@ -307,6 +307,16 @@ private:
     /// available or the window has no usable corner (e.g. a flat pad
     /// center); never moves the point further than searchRadiusPx.
     cv::Point2f refineClickPoint(cv::Point2f rawPoint, int searchRadiusPx = 8) const;
+
+    /// Arm the given component as the next Multi-Comp landmark using the
+    /// session-wide marking method (m_alignMultiMethod). Computes its PCB
+    /// anchor (pin-1 pad / midpoint of the two farthest pads / bbox center),
+    /// reflects the selection in every UI surface, and sets m_alignMultiAwaitClick.
+    /// Callable repeatedly: selecting another component (from the BOM panel OR
+    /// the minimap) before finishing the image click(s) simply switches the
+    /// target — no need to cancel. No-op if the component is unusable for the
+    /// chosen method (e.g. pin-1 method on a part with no pin-1 pad).
+    void beginMarkComponent(const std::string& ref);
 
     // Live tracking mode — ORB work happens on m_trackingThread via m_trackingWorker.
     bool     m_liveMode = false;
