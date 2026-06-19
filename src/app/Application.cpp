@@ -1753,7 +1753,9 @@ void Application::connectControlSignals()
                 m_alignMultiAwaitClick = true;
                 m_alignMultiRef = ref;
                 m_mainWindow->updateStatusMessage(
-                    tr("Click PIN 1 of %1 in the camera image").arg(QString::fromStdString(ref)));
+                    tr("Click PIN 1 of %1 in the camera image "
+                       "(red dot in the PCB Map shows where it is)")
+                    .arg(QString::fromStdString(ref)));
             } else if (box.clickedButton() == cornersBtn) {
                 m_alignMultiMethod = 0;
                 m_alignMultiPcb = cv::Point2f(static_cast<float>(comp->bbox.center().x),
@@ -1762,7 +1764,8 @@ void Application::connectControlSignals()
                 m_alignMultiHaveCorner1 = false;
                 m_alignMultiRef = ref;
                 m_mainWindow->updateStatusMessage(
-                    tr("Click the FIRST corner of %1's body in the camera image")
+                    tr("Click any corner of %1's body, then the opposite one "
+                       "(order doesn't matter — check the PCB Map for its outline)")
                     .arg(QString::fromStdString(ref)));
             }
             return;

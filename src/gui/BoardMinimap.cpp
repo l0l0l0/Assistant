@@ -159,6 +159,33 @@ void BoardMinimap::paintEvent(QPaintEvent*)
         p.drawRect(r);
     }
 
+    // Selected component guide: draw its pads and mark pin 1. This is the
+    // visual reference used during multi-component alignment — it lets the user
+    // read the part's orientation and locate pin 1 on the real board before
+    // clicking in the camera image (crucial for irregular footprints like an
+    // ESP32 module where "the body" is otherwise ambiguous).
+    if (!m_selectedRef.empty()) {
+        for (const auto& comp : m_project.components) {
+            if (comp.reference != m_selectedRef) continue;
+            if (comp.layer != m_activeLayer) break;
+
+            // Pad outlines (thin) + pin 1 (filled red dot).
+            for (const auto& pad : comp.pads) {
+                QPointF c = pcbToWidget(pad.position.x, pad.position.y);
+                if (pad.isPin1) {
+                    p.setPen(QPen(QColor(255, 70, 70), 1.2f));
+                    p.setBrush(QColor(255, 70, 70, 220));
+                    p.drawEllipse(c, 3.0, 3.0);
+                } else {
+                    p.setPen(QPen(QColor(255, 220, 50, 200), 0.8f));
+                    p.setBrush(QColor(255, 220, 50, 90));
+                    p.drawEllipse(c, 1.6, 1.6);
+                }
+            }
+            break;
+        }
+    }
+
     // FOV rectangle (only when homography is valid and camera size known)
     if (m_homography && m_homography->isValid() && m_cameraSize.isValid()) {
         // Four image corners → PCB coords

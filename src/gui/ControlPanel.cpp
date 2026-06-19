@@ -224,9 +224,14 @@ QGroupBox* ControlPanel::createCalibrationGroup()
 
     m_btnAlignMulti = new QPushButton(tr("Align: Multi-Comp (Beta)"));
     m_btnAlignMulti->setToolTip(tr("Align using several components (≥2, ≥4 for perspective). "
-                                   "Works on non-rectangular boards. Mark each component by its "
-                                   "2 opposite corners (midpoint) or by pin 1. Click again to "
-                                   "finish once enough components are marked."));
+                                   "Works on non-rectangular boards.\n"
+                                   "1) Click a component row in the BOM panel.\n"
+                                   "2) Choose 'Pin 1' (one click in the image, most precise — "
+                                   "best for ESP32 & complex footprints) or '2 Opposite Corners' "
+                                   "(two clicks, any diagonal — midpoint is used).\n"
+                                   "The PCB Map highlights the selected part and marks pin 1 "
+                                   "(red dot) to guide you.\n"
+                                   "3) Repeat, then click this button again to finish."));
     connect(m_btnAlignMulti, &QPushButton::clicked, this, &ControlPanel::alignMultiRequested);
     layout->addWidget(m_btnAlignMulti);
 
