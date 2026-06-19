@@ -40,6 +40,9 @@ public:
     void setCameraDevices(const QStringList& labels, const QList<int>& indices,
                           int currentIndex = -1);
     void setConfidenceThreshold(float conf);
+    /// Reflect the persisted hybrid drift-correction flag in the checkbox.
+    void setHybridMode(bool enabled);
+    bool hybridMode() const;
     /// Switch UI between USB-microscope and RealSense mode.
     /// Disables/relabels the calibration button when RealSense is active
     /// (factory intrinsics are embedded in the SDK — no checkerboard needed).
@@ -62,6 +65,7 @@ signals:
     void alignOnComponentsRequested();
     void autoAlignRequested();
     void liveModeChanged(bool enabled);
+    void hybridModeChanged(bool enabled);
 
 private:
     void buildUI();
@@ -101,6 +105,7 @@ private:
     QPushButton* m_btnAlignComps   = nullptr;
     QPushButton* m_btnAutoAlign    = nullptr;
     QCheckBox*   m_liveMode        = nullptr;
+    QCheckBox*   m_hybridMode      = nullptr;
 };
 
 } // namespace ibom::gui

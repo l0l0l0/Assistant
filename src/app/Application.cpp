@@ -149,6 +149,7 @@ bool Application::initialize()
     // Reflect persisted AI settings in the control panel (before initializeAI
     // so the spinner already shows the threshold the detector will use).
     m_mainWindow->controlPanel()->setConfidenceThreshold(m_config->detectionConfidence());
+    m_mainWindow->controlPanel()->setHybridMode(m_config->hybridDriftCorrection());
 
     // AI pipeline — off the GUI thread: first launch with TensorRT compiles
     // the engine (minutes); the app is fully usable without it meanwhile.
@@ -2146,6 +2147,17 @@ void Application::connectControlSignals()
             spdlog::info("Live tracking mode disabled");
             m_mainWindow->updateStatusMessage(tr("Live tracking mode OFF"));
         }
+    });
+
+    // ── Hybrid drift correction (beta) ──────────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::hybridModeChanged,
+            this, [this](bool enabled) {
+        m_config->setHybridDriftCorrection(enabled);
+        m_config->save();
+        if (m_trackingWorker)
+            QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection",
+                Qt::QueuedConnection, Q_ARG(bool, enabled));
+        spdlog::info("Hybrid drift correction {}", enabled ? "enabled" : "disabled");
     });
 
     // ── Inspection workflow wiring ──────────────────────────────

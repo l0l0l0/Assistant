@@ -234,6 +234,16 @@ QGroupBox* ControlPanel::createCalibrationGroup()
     connect(m_liveMode, &QCheckBox::toggled, this, &ControlPanel::liveModeChanged);
     layout->addWidget(m_liveMode);
 
+    m_hybridMode = new QCheckBox(tr("Hybrid drift correction (beta)"));
+    m_hybridMode->setToolTip(tr("During incremental tracking, snap back to the original "
+                                "anchor view whenever it is recognized again — eliminates "
+                                "long-term drift while keeping smooth tracking. Only affects "
+                                "incremental (narrow-FOV / microscope) tracking."));
+    m_hybridMode->setChecked(true);  // matches Config default; overridden by setHybridMode()
+    m_hybridMode->setStyleSheet("margin-left: 18px;");  // nest under Live Tracking Mode
+    connect(m_hybridMode, &QCheckBox::toggled, this, &ControlPanel::hybridModeChanged);
+    layout->addWidget(m_hybridMode);
+
     // Default to microscope view until the backend is known.
     setCameraBackendUI(false);
 
@@ -289,6 +299,18 @@ void ControlPanel::setConfidenceThreshold(float conf)
 {
     QSignalBlocker blocker(m_confidenceSpin);
     m_confidenceSpin->setValue(static_cast<double>(conf));
+}
+
+void ControlPanel::setHybridMode(bool enabled)
+{
+    if (!m_hybridMode) return;
+    QSignalBlocker blocker(m_hybridMode);
+    m_hybridMode->setChecked(enabled);
+}
+
+bool ControlPanel::hybridMode() const
+{
+    return m_hybridMode && m_hybridMode->isChecked();
 }
 
 void ControlPanel::setCameraBackendUI(bool isRealSense)
