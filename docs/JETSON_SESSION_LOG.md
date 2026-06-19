@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Multi-Comp : méthode "pads opposés" en rouge comme pin 1)
+
+> **2026-06-19 (suite 84)** : **retour utilisateur** — « attention il y a aussi le choix avec pin opposée qui doit avoir le même graphisme que pin 1 ». **Fix** : les cibles de clic de la PCB Map peuvent désormais être colorées — `BoardMinimap::setClickTargets()` prend un paramètre `QColor` (défaut vert). Le rendu des cibles utilise maintenant **le même graphisme que le marqueur pin 1** (halo noir + anneau coloré + croix + **point central plein**). La méthode **opposite pads** passe `QColor(255,70,70)` → 2 marqueurs **rouges** identiques au pin 1 (numérotés 1/2). La méthode **body corners** garde le vert (ce ne sont pas des pads). Texte de statut mis à jour (« two RED target pads »). Fichiers : `src/gui/BoardMinimap.{h,cpp}` (param couleur + dot central), `src/app/Application.cpp` (opposite-pads passe rouge, include `<QColor>`). ⚠️ **Non compilé/testé ici**. **À valider** : méthode opposite-pads → 2 anneaux rouges (même style que pin 1) sur les 2 pads extrêmes.
+
 ## État actuel — au 2026-06-19 (Multi-Comp : pin 1 en rouge + sélection composant fiable sur la PCB Map)
 
 > **2026-06-19 (suite 83)** : **2 retours utilisateur**. (a) « pour le choix des pins je préférais la pin en rouge plutôt que la cible verte » ; (b) « on ne peut toujours pas cliquer sur le composant dans la map pour le sélectionner ».

@@ -54,6 +54,7 @@
 #include <QStandardPaths>
 #include <QPushButton>
 #include <QPainter>
+#include <QColor>
 #include <QMediaDevices>
 #include <QCameraDevice>
 #include <QDesktopServices>
@@ -893,11 +894,13 @@ void Application::beginMarkComponent(const std::string& ref)
         m_alignMultiHaveCorner1 = false;
         m_alignMultiAwaitClick  = true;
         m_alignMultiRef = ref;
+        // Same red graphic as the pin-1 marker (user request) — these are pads.
         m_mainWindow->boardMinimap()->setClickTargets({
             cv::Point2f(static_cast<float>(pa->position.x), static_cast<float>(pa->position.y)),
-            cv::Point2f(static_cast<float>(pb->position.x), static_cast<float>(pb->position.y))});
+            cv::Point2f(static_cast<float>(pb->position.x), static_cast<float>(pb->position.y))},
+            QColor(255, 70, 70));
         setStatus(
-            tr("Click the two green target pads of %1 in the image (opposite "
+            tr("Click the two RED target pads of %1 in the image (opposite "
                "corners of the footprint), in any order. Or pick another "
                "component to switch.").arg(qref));
         break;

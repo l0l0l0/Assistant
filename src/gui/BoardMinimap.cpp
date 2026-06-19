@@ -51,9 +51,11 @@ void BoardMinimap::setPlacedRefs(const std::unordered_set<std::string>& refs)
     update();
 }
 
-void BoardMinimap::setClickTargets(const std::vector<cv::Point2f>& pcbPts)
+void BoardMinimap::setClickTargets(const std::vector<cv::Point2f>& pcbPts,
+                                   const QColor& color)
 {
     m_clickTargets = pcbPts;
+    m_clickTargetColor = color;
     update();
 }
 
@@ -226,9 +228,11 @@ void BoardMinimap::paintEvent(QPaintEvent*)
         p.setFont(QFont("monospace", 8, QFont::Bold));
         for (size_t i = 0; i < m_clickTargets.size(); ++i) {
             QPointF c = pcbToWidget(m_clickTargets[i].x, m_clickTargets[i].y);
-            const QColor ring(50, 230, 90);  // bright green = "click here"
+            const QColor ring = m_clickTargetColor;  // green (corners) / red (pads)
 
-            // Outer glow ring + crosshair to draw the eye, even on a busy map.
+            // Same graphic as the pin-1 marker: dark halo + coloured ring +
+            // crosshair + filled centre dot, so "opposite pads" reads the same
+            // way as "pin 1".
             p.setPen(QPen(QColor(0, 0, 0, 160), 3.0));
             p.setBrush(Qt::NoBrush);
             p.drawEllipse(c, 7.0, 7.0);
@@ -236,6 +240,9 @@ void BoardMinimap::paintEvent(QPaintEvent*)
             p.drawEllipse(c, 7.0, 7.0);
             p.drawLine(QPointF(c.x() - 9, c.y()), QPointF(c.x() + 9, c.y()));
             p.drawLine(QPointF(c.x(), c.y() - 9), QPointF(c.x(), c.y() + 9));
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(ring.red(), ring.green(), ring.blue(), 230));
+            p.drawEllipse(c, 3.0, 3.0);
 
             // Number the targets when there is more than one (click order is free).
             if (m_clickTargets.size() > 1) {

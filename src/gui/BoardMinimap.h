@@ -3,6 +3,7 @@
 #include "ibom/IBomData.h"
 #include <QWidget>
 #include <QImage>
+#include <QColor>
 #include <opencv2/core.hpp>
 #include <memory>
 #include <string>
@@ -48,8 +49,11 @@ public:
     /// Highlight the exact PCB points the user must click in the camera image
     /// to calibrate (multi-component alignment) — e.g. the two farthest-apart
     /// pads, pin 1, or the two body corners of the component being marked.
-    /// Drawn as prominent numbered markers. Pass an empty vector to clear.
-    void setClickTargets(const std::vector<cv::Point2f>& pcbPts);
+    /// Drawn as prominent numbered markers (ring + crosshair + dot) in the
+    /// given colour. Pass an empty vector to clear. The colour lets the
+    /// "opposite pads" method reuse the same red graphic as the pin-1 marker.
+    void setClickTargets(const std::vector<cv::Point2f>& pcbPts,
+                         const QColor& color = QColor(50, 230, 90));
 
 signals:
     /// User clicked at PCB coordinate (mm). Caller should anchor to this position.
@@ -73,6 +77,7 @@ private:
     std::string                         m_selectedRef;
     std::unordered_set<std::string>     m_placedRefs;
     std::vector<cv::Point2f>            m_clickTargets;  // PCB points to click (multi-align)
+    QColor                              m_clickTargetColor{50, 230, 90};  // ring colour
 
     // Cached rendering transform: PCB bbox → widget rect
     double  m_pcbMinX  = 0, m_pcbMinY  = 0;
