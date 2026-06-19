@@ -199,11 +199,16 @@ void OverlayRenderer::drawPin1Marker(QPainter& painter, const Component& comp)
 
 void OverlayRenderer::drawSelectionEmphasis(QPainter& painter, const Component& comp)
 {
-    const QColor accent(255, 220, 50);  // bright yellow — the "selected" colour
+    // Dark red — stands out against green PCB + yellow silkscreen/copper, where
+    // the previous bright-yellow emphasis blended in.
+    const QColor accent(170, 0, 0);
 
-    // 1) Bright bounding box around the component body.
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(accent, 2.5));
+    // 1) Bounding box around the component body, plus a translucent fill so a
+    //    tiny SMD part still reads as a coloured blob even when the outline is
+    //    only a few pixels.
+    QColor boxFill = accent; boxFill.setAlpha(70);
+    painter.setBrush(QBrush(boxFill));
+    painter.setPen(QPen(accent, 3.0));
     if (m_homography.isValid()) {
         auto corners = m_homography.transformRect(
             static_cast<float>(comp.bbox.minX),

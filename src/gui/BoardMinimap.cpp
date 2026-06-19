@@ -141,7 +141,7 @@ void BoardMinimap::paintEvent(QPaintEvent*)
         bool selected = comp.reference == m_selectedRef;
 
         QColor col;
-        if (selected)       col = QColor(255, 220, 50);
+        if (selected)       col = QColor(210, 30, 30);  // dark red, matches the halo
         else if (placed)    col = theme::placedColor().darker(130);
         else                col = theme::accentDark();
 
@@ -174,7 +174,7 @@ void BoardMinimap::paintEvent(QPaintEvent*)
             if (comp.reference != m_selectedRef) continue;
 
             QPointF center = pcbToWidget(comp.bbox.center().x, comp.bbox.center().y);
-            const QColor halo(255, 220, 50);
+            const QColor halo(210, 30, 30);  // dark red — clearly visible on the dark map
 
             p.setPen(QPen(halo, 1.5));
             p.setBrush(Qt::NoBrush);
