@@ -66,7 +66,21 @@ find_package(OpenCV REQUIRED COMPONENTS
     calib3d
     dnn
     features2d
+    OPTIONAL_COMPONENTS
+    cudafeatures2d
+    cudaimgproc
+    cudaarithm
 )
+
+# Live-tracking GPU path (Phase 3) — only when OpenCV was built with the CUDA
+# modules (Jetson). Guarded by IBOM_HAVE_OPENCV_CUDA in the code; the Windows
+# legacy / non-CUDA builds simply compile the CPU path.
+if(OpenCV_cudafeatures2d_FOUND AND OpenCV_cudaimgproc_FOUND)
+    add_compile_definitions(IBOM_HAVE_OPENCV_CUDA=1)
+    message(STATUS "  OpenCV CUDA:  ON (live-tracking GPU path enabled)")
+else()
+    message(STATUS "  OpenCV CUDA:  OFF (CPU live-tracking only)")
+endif()
 
 # ONNX Runtime
 find_package(onnxruntime CONFIG REQUIRED)

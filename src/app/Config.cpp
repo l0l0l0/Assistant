@@ -189,6 +189,9 @@ bool Config::load(const std::string& path)
             m_trackingModel      = trk.value("model", m_trackingModel);
             m_oneEuroMinCutoff   = trk.value("one_euro_min_cutoff", m_oneEuroMinCutoff);
             m_oneEuroBeta        = trk.value("one_euro_beta", m_oneEuroBeta);
+            m_trackingClahe      = trk.value("clahe", m_trackingClahe);
+            m_trackingOpticalFlow = trk.value("optical_flow", m_trackingOpticalFlow);
+            m_trackingGpuMode    = trk.value("gpu_mode", m_trackingGpuMode);
 
             // Migration: legacy match_distance_ratio values were distance multipliers
             // (typically 2.0); the new semantics is Lowe's ratio test in [0,1].
@@ -351,7 +354,10 @@ bool Config::save(const std::string& path) const
             {"downscale",            m_trackingDownscale},
             {"model",                m_trackingModel},
             {"one_euro_min_cutoff",  m_oneEuroMinCutoff},
-            {"one_euro_beta",        m_oneEuroBeta}
+            {"one_euro_beta",        m_oneEuroBeta},
+            {"clahe",                m_trackingClahe},
+            {"optical_flow",         m_trackingOpticalFlow},
+            {"gpu_mode",             m_trackingGpuMode}
         };
 
         // Calibration

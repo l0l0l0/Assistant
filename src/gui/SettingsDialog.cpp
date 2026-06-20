@@ -284,6 +284,28 @@ void SettingsDialog::createTrackingTab(QTabWidget* tabs)
            "more jitter)."));
     form->addRow(tr("Smoothing beta:"), m_oneEuroBeta);
 
+    m_trackingClahe = new QCheckBox(tr("CLAHE pre-equalization (anti-glare)"));
+    m_trackingClahe->setToolTip(
+        tr("Locally equalize contrast before ORB → steadier keypoints under glare "
+           "and uneven lighting (helps the D405). Small extra cost per frame."));
+    form->addRow(QString(), m_trackingClahe);
+
+    m_trackingOpticalFlow = new QCheckBox(tr("Optical-flow assisted tracking"));
+    m_trackingOpticalFlow->setToolTip(
+        tr("Between periodic ORB re-detections, sub-pixel-track the landmarks "
+           "frame to frame with Lucas-Kanade. Smoother and cheaper than running "
+           "ORB on every frame; ORB still refreshes periodically and on loss."));
+    form->addRow(QString(), m_trackingOpticalFlow);
+
+    m_trackingGpuMode = new QComboBox;
+    m_trackingGpuMode->addItem(tr("Off (CPU)"), 0);
+    m_trackingGpuMode->addItem(tr("Auto (GPU if available)"), 1);
+    m_trackingGpuMode->addItem(tr("Force GPU"), 2);
+    m_trackingGpuMode->setToolTip(
+        tr("Run ORB feature detection on the Jetson GPU (cv::cuda::ORB) when "
+           "OpenCV was built with CUDA. Falls back to CPU automatically."));
+    form->addRow(tr("GPU acceleration:"), m_trackingGpuMode);
+
     m_microscopeIncremental = new QCheckBox(
         tr("Incremental frame→frame tracking (microscope)"));
     m_microscopeIncremental->setToolTip(
@@ -494,6 +516,12 @@ void SettingsDialog::loadFromConfig()
     }
     m_oneEuroMinCutoff->setValue(m_config.oneEuroMinCutoff());
     m_oneEuroBeta->setValue(m_config.oneEuroBeta());
+    m_trackingClahe->setChecked(m_config.trackingClahe());
+    m_trackingOpticalFlow->setChecked(m_config.trackingOpticalFlow());
+    {
+        int gi = m_trackingGpuMode->findData(m_config.trackingGpuMode());
+        m_trackingGpuMode->setCurrentIndex(gi >= 0 ? gi : 1);
+    }
     m_microscopeIncremental->setChecked(m_config.microscopeIncremental());
     m_reanchorDrift->setValue(m_config.microscopeReanchorDriftPx());
 
@@ -582,6 +610,9 @@ void SettingsDialog::accept()
     m_config.setTrackingModel(m_trackingModel->currentData().toInt());
     m_config.setOneEuroMinCutoff(m_oneEuroMinCutoff->value());
     m_config.setOneEuroBeta(m_oneEuroBeta->value());
+    m_config.setTrackingClahe(m_trackingClahe->isChecked());
+    m_config.setTrackingOpticalFlow(m_trackingOpticalFlow->isChecked());
+    m_config.setTrackingGpuMode(m_trackingGpuMode->currentData().toInt());
     m_config.setMicroscopeIncremental(m_microscopeIncremental->isChecked());
     m_config.setMicroscopeReanchorDriftPx(m_reanchorDrift->value());
 

@@ -188,6 +188,15 @@ public:
     double oneEuroBeta() const { return m_oneEuroBeta; }
     void   setOneEuroBeta(double v) { m_oneEuroBeta = v; }
 
+    /// Phase-3 advanced tracking (LIVE_TRACKING_PLAN.md).
+    bool trackingClahe() const { return m_trackingClahe; }
+    void setTrackingClahe(bool v) { m_trackingClahe = v; }
+    bool trackingOpticalFlow() const { return m_trackingOpticalFlow; }
+    void setTrackingOpticalFlow(bool v) { m_trackingOpticalFlow = v; }
+    /// 0=off, 1=auto (GPU if available), 2=force GPU.
+    int  trackingGpuMode() const { return m_trackingGpuMode; }
+    void setTrackingGpuMode(int m) { m_trackingGpuMode = m; }
+
     // --- Calibration ---
     int  calibBoardCols() const { return m_calibBoardCols; }
     void setCalibBoardCols(int n) { m_calibBoardCols = n; }
@@ -344,6 +353,9 @@ private:
     int    m_trackingModel      = 3;      // 0 auto / 1 sim / 2 affine / 3 homography
     double m_oneEuroMinCutoff   = 1.0;    // Hz
     double m_oneEuroBeta        = 0.02;
+    bool   m_trackingClahe       = false;
+    bool   m_trackingOpticalFlow = false;
+    int    m_trackingGpuMode     = 1;     // 0 off / 1 auto / 2 force
 
     // Calibration (microscope-friendly defaults: small 5cm card)
     int   m_calibBoardCols  = 7;    // inner corners cols

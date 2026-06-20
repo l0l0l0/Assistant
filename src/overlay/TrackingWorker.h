@@ -4,6 +4,12 @@
 #include <QString>
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
+#include <opencv2/imgproc.hpp>   // cv::CLAHE
+#include <opencv2/opencv_modules.hpp>
+#ifdef IBOM_HAVE_OPENCV_CUDA
+#  include <opencv2/cudafeatures2d.hpp>
+#  include <opencv2/cudaimgproc.hpp>
+#endif
 
 #include <chrono>
 #include <memory>
@@ -70,6 +76,15 @@ public slots:
     /// @param oneEuroBeta   speed coupling of the 1€ corner filter.
     void setStabilization(int model, double oneEuroMinCutoff, double oneEuroBeta);
 
+    /// Configure Phase-3 advanced tracking (docs/LIVE_TRACKING_PLAN.md):
+    /// @param clahe        CLAHE photometric pre-equalization before ORB
+    ///                     (steadier keypoints under glare / uneven light).
+    /// @param opticalFlow  hybrid Lucas-Kanade tracking — between periodic ORB
+    ///                     re-detections, sub-pixel-track the landmarks frame to
+    ///                     frame (smoother + cheaper than ORB every frame).
+    /// @param gpuMode      0=off, 1=auto (use GPU if available), 2=force.
+    void setAdvanced(bool clahe, bool opticalFlow, int gpuMode);
+
     /// Enable hybrid drift correction (beta). Only affects incremental mode.
     /// When on, the worker keeps the original anchor keyframe captured at
     /// bootstrap and, whenever that view is recognizable in the current frame
@@ -120,8 +135,30 @@ signals:
 
 private:
     /// Reference-frame matching (original behaviour): match current vs one
-    /// fixed reference, emit frameH * base.
-    void processReference(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
+    /// fixed reference, emit frameH * base. `fullGray` is the full-resolution
+    /// gray image, used to seed optical-flow landmarks on a successful fit.
+    void processReference(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc,
+                          const cv::Mat& fullGray);
+
+    /// Detect ORB keypoints + descriptors on the (downscaled) image, on GPU
+    /// when active else CPU. Keypoints are returned in `smallImg` coordinates
+    /// (caller rescales). `mask` is the board-area mask in `smallImg` coords.
+    void detectFeatures(const cv::Mat& smallImg, const cv::Mat& mask,
+                        std::vector<cv::KeyPoint>& kp, cv::Mat& desc);
+
+    /// Hybrid optical-flow fast path: Lucas-Kanade-track the current landmark
+    /// set (m_flowImg) from the previous frame into `fullGray`, refit PCB→image
+    /// from the surviving (m_flowPcb ↔ tracked) pairs and emit. Returns false
+    /// when it can't run / lost too many points (caller falls back to ORB).
+    bool runOpticalFlow(const cv::Mat& fullGray);
+
+    /// (Re)seed optical-flow landmarks from a fresh ORB homography H (PCB→image)
+    /// and the current board keypoints: back-projects them through H⁻¹ to PCB.
+    void seedFlowLandmarks(const std::vector<cv::KeyPoint>& kp, const cv::Mat& H,
+                           const cv::Mat& fullGray);
+
+    /// Incremental matching: match current vs previous frame, compose deltas.
+    void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
     /// Incremental matching: match current vs previous frame, compose deltas.
     void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
     /// Lowe-ratio match srcDesc→dstDesc into corresponding point lists.
@@ -215,6 +252,23 @@ private:
     double  m_oneEuroBeta      = 0.02;
     std::vector<OneEuroFilter> m_cornerFilters;  // 2 per board corner (x,y)
     int     m_targetKeypoints  = 0;    // bucketing target (0 = disabled)
+
+    // Phase-3 advanced tracking (docs/LIVE_TRACKING_PLAN.md).
+    bool    m_useClahe    = false;
+    bool    m_opticalFlow = false;
+    int     m_gpuMode     = 1;          // 0 off / 1 auto / 2 force
+    bool    m_gpuActive   = false;      // resolved at configure time
+    cv::Ptr<cv::CLAHE> m_clahe;
+    // Optical-flow landmark set: PCB coords ↔ current image positions, tracked
+    // frame-to-frame by Lucas-Kanade; refreshed by ORB every N frames.
+    cv::Mat                  m_prevGray;          // previous full-res gray (LK)
+    std::vector<cv::Point2f> m_flowPcb;           // landmark PCB coords
+    std::vector<cv::Point2f> m_flowImg;           // landmark image positions
+    int     m_flowFramesSinceDetect = 0;
+    int     m_flowRedetectInterval  = 30;         // force an ORB refresh cadence
+#ifdef IBOM_HAVE_OPENCV_CUDA
+    cv::Ptr<cv::cuda::ORB>   m_gpuOrb;
+#endif
 
     int    m_minMatchCount      = 10;
     double m_loweRatio          = 0.75;

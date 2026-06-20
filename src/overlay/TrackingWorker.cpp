@@ -2,6 +2,10 @@
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>   // calcOpticalFlowPyrLK
+#ifdef IBOM_HAVE_OPENCV_CUDA
+#  include <opencv2/core/cuda.hpp>
+#endif
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -18,6 +22,45 @@ TrackingWorker::TrackingWorker(QObject* parent)
     // Determinism: USAC is deterministic but fix the global RNG too so any
     // residual randomness can't add frame-to-frame wobble.
     cv::setRNGSeed(12345);
+
+    m_clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+}
+
+void TrackingWorker::setAdvanced(bool clahe, bool opticalFlow, int gpuMode)
+{
+    m_useClahe    = clahe;
+    m_opticalFlow = opticalFlow;
+    m_gpuMode     = std::clamp(gpuMode, 0, 2);
+
+    bool gpuAvail = false;
+#ifdef IBOM_HAVE_OPENCV_CUDA
+    try {
+        gpuAvail = cv::cuda::getCudaEnabledDeviceCount() > 0;
+    } catch (const cv::Exception&) {
+        gpuAvail = false;
+    }
+#endif
+    m_gpuActive = (m_gpuMode != 0) && gpuAvail;
+
+#ifdef IBOM_HAVE_OPENCV_CUDA
+    if (m_gpuActive) {
+        try {
+            const int cap = (m_targetKeypoints > 0 ? m_targetKeypoints : 200) * 2;
+            m_gpuOrb = cv::cuda::ORB::create(cap);
+        } catch (const cv::Exception& e) {
+            spdlog::warn("TrackingWorker: GPU ORB init failed ({}), falling back to CPU",
+                         e.what());
+            m_gpuActive = false;
+        }
+    }
+#endif
+
+    // Optical-flow / detector switch invalidates the current reference.
+    m_flowImg.clear();
+    m_flowPcb.clear();
+    m_prevGray = cv::Mat();
+    spdlog::info("TrackingWorker advanced: clahe={}, opticalFlow={}, gpuMode={} (active={})",
+                 m_useClahe, m_opticalFlow, m_gpuMode, m_gpuActive);
 }
 
 void TrackingWorker::configure(int orbKeypoints,
@@ -32,6 +75,12 @@ void TrackingWorker::configure(int orbKeypoints,
     // cluster). Target = requested count; detector cap = 2× target.
     m_targetKeypoints = std::max(50, orbKeypoints);
     m_detector        = cv::ORB::create(m_targetKeypoints * 2);
+#ifdef IBOM_HAVE_OPENCV_CUDA
+    if (m_gpuActive) {
+        try { m_gpuOrb = cv::cuda::ORB::create(m_targetKeypoints * 2); }
+        catch (const cv::Exception&) { m_gpuActive = false; }
+    }
+#endif
     m_minMatchCount   = std::max(4, minMatchCount);
     m_loweRatio       = std::clamp(loweRatio, 0.1, 0.99);
     m_ransacThreshold = ransacThreshold;
@@ -136,6 +185,10 @@ void TrackingWorker::resetReference()
     m_staticFrames       = 0;
     m_lowQualityFrames   = 0;
     m_cornerFilters.clear();
+    m_prevGray           = cv::Mat();
+    m_flowImg.clear();
+    m_flowPcb.clear();
+    m_flowFramesSinceDetect = 0;
     setState(State::Lost);
 }
 
@@ -305,6 +358,104 @@ void TrackingWorker::refineKeypointsSubPix(const cv::Mat& fullGray,
     }
 }
 
+void TrackingWorker::detectFeatures(const cv::Mat& smallImg, const cv::Mat& mask,
+                                    std::vector<cv::KeyPoint>& kp, cv::Mat& desc)
+{
+#ifdef IBOM_HAVE_OPENCV_CUDA
+    if (m_gpuActive && m_gpuOrb) {
+        try {
+            cv::cuda::GpuMat gImg, gMask, gDesc;
+            gImg.upload(smallImg);
+            if (!mask.empty()) gMask.upload(mask);
+            m_gpuOrb->detectAndCompute(gImg, gMask, kp, gDesc);
+            gDesc.download(desc);  // match on CPU (descriptors are small)
+            return;
+        } catch (const cv::Exception& e) {
+            spdlog::warn("TrackingWorker: GPU ORB failed ({}), CPU fallback", e.what());
+            m_gpuActive = false;  // stop trying this session
+        }
+    }
+#endif
+    m_detector->detectAndCompute(smallImg, mask, kp, desc);
+}
+
+void TrackingWorker::seedFlowLandmarks(const std::vector<cv::KeyPoint>& kp,
+                                       const cv::Mat& H, const cv::Mat& fullGray)
+{
+    m_flowImg.clear();
+    m_flowPcb.clear();
+    m_flowFramesSinceDetect = 0;
+    if (!m_opticalFlow || kp.empty() || H.empty() || fullGray.empty())
+        return;
+
+    cv::Mat Hinv;
+    try { Hinv = H.inv(); } catch (const cv::Exception&) { return; }
+    if (Hinv.empty()) return;
+
+    std::vector<cv::Point2f> img;
+    img.reserve(kp.size());
+    for (const auto& k : kp) img.push_back(k.pt);  // already board-masked
+    try {
+        cv::perspectiveTransform(img, m_flowPcb, Hinv);  // image → PCB
+    } catch (const cv::Exception&) {
+        m_flowPcb.clear();
+        return;
+    }
+    m_flowImg = std::move(img);
+    m_prevGray = fullGray.clone();
+}
+
+bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
+{
+    if (m_flowImg.size() < static_cast<size_t>(m_minMatchCount) ||
+        m_prevGray.empty() || m_prevGray.size() != fullGray.size())
+        return false;
+
+    std::vector<cv::Point2f> next;
+    std::vector<uchar> status;
+    std::vector<float> err;
+    try {
+        cv::calcOpticalFlowPyrLK(
+            m_prevGray, fullGray, m_flowImg, next, status, err,
+            cv::Size(21, 21), 3,
+            cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 20, 0.03));
+    } catch (const cv::Exception&) {
+        return false;
+    }
+
+    std::vector<cv::Point2f> keptPcb, keptImg;
+    keptPcb.reserve(next.size());
+    keptImg.reserve(next.size());
+    const float w = static_cast<float>(fullGray.cols);
+    const float h = static_cast<float>(fullGray.rows);
+    for (size_t i = 0; i < next.size(); ++i) {
+        if (!status[i] || err[i] > 20.0f) continue;
+        if (next[i].x < 0 || next[i].y < 0 || next[i].x >= w || next[i].y >= h) continue;
+        keptPcb.push_back(m_flowPcb[i]);
+        keptImg.push_back(next[i]);
+    }
+    if (keptImg.size() < static_cast<size_t>(m_minMatchCount))
+        return false;  // lost too many → let ORB re-acquire
+
+    int inliers = 0;
+    double reprojErr = 0.0;
+    cv::Mat H = estimateModel(keptPcb, keptImg, inliers, reprojErr);
+    if (H.empty() || inliers < m_minMatchCount)
+        return false;
+
+    // Keep only the inlier-consistent landmarks alive (the fit already
+    // rejected fliers; we keep the tracked set for the next frame).
+    m_flowPcb = std::move(keptPcb);
+    m_flowImg = std::move(keptImg);
+    m_prevGray = fullGray.clone();
+    m_flowFramesSinceDetect++;
+
+    m_lastHomography = H.clone();
+    setState(State::Locked);
+    emitHomography(H, inliers, reprojErr);
+    return true;
+}
+
 cv::Mat TrackingWorker::smoothHomography(const cv::Mat& rawH)
 {
     if (rawH.empty() || m_pcbPolygon.size() < 4)
@@ -422,6 +573,23 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
         else
             gray = *frame;
 
+        // CLAHE photometric equalization → steadier keypoints under glare /
+        // uneven lighting (D405). Applied on full-res gray so optical flow and
+        // ORB both see the equalized image.
+        if (m_useClahe && m_clahe) {
+            try { m_clahe->apply(gray, gray); }
+            catch (const cv::Exception&) { /* keep raw gray */ }
+        }
+
+        // Phase-3 optical-flow fast path: between periodic ORB re-detections,
+        // Lucas-Kanade-track the landmarks frame to frame (sub-pixel, cheap,
+        // smooth). Skipped in incremental mode and when it's time to refresh.
+        if (m_opticalFlow && !m_incremental && m_hasReference &&
+            m_flowFramesSinceDetect < m_flowRedetectInterval &&
+            runOpticalFlow(gray)) {
+            return;
+        }
+
         cv::Mat small;
         if (m_downscale > 0.0f && m_downscale < 1.0f)
             cv::resize(gray, small, cv::Size(), m_downscale, m_downscale, cv::INTER_AREA);
@@ -438,7 +606,7 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
 
         std::vector<cv::KeyPoint> kp;
         cv::Mat desc;
-        m_detector->detectAndCompute(small, mask, kp, desc);
+        detectFeatures(small, mask, kp, desc);
 
         // Rescale keypoint positions back to original-resolution coords.
         for (auto& k : kp) {
@@ -458,7 +626,7 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
         if (m_incremental)
             processIncremental(kp, desc);
         else
-            processReference(kp, desc);
+            processReference(kp, desc, gray);
 
     } catch (const cv::Exception& e) {
         emit trackingError(QString::fromStdString(e.what()));
@@ -467,7 +635,7 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
 }
 
 void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
-                                      const cv::Mat& desc)
+                                      const cv::Mat& desc, const cv::Mat& fullGray)
 {
     if (!m_hasReference) {
         if (kp.size() < static_cast<size_t>(m_minMatchCount) || desc.empty())
@@ -500,6 +668,12 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
 
     cv::Mat combined = frameH * m_baseHomography;
     m_lastHomography = combined.clone();
+
+    // Seed optical-flow landmarks from this fresh ORB fit so the LK fast path
+    // can take over for the next m_flowRedetectInterval frames.
+    if (m_opticalFlow)
+        seedFlowLandmarks(kp, combined, fullGray);
+
     emitHomography(combined, inliers, reprojErr);
 }
 

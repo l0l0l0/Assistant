@@ -84,6 +84,9 @@ private:
     QComboBox*      m_trackingModel     = nullptr;
     QDoubleSpinBox* m_oneEuroMinCutoff  = nullptr;
     QDoubleSpinBox* m_oneEuroBeta       = nullptr;
+    QCheckBox*      m_trackingClahe     = nullptr;
+    QCheckBox*      m_trackingOpticalFlow = nullptr;
+    QComboBox*      m_trackingGpuMode   = nullptr;
     QCheckBox*      m_microscopeIncremental = nullptr;
     QDoubleSpinBox* m_reanchorDrift     = nullptr;
 

@@ -11,6 +11,19 @@
 
 ---
 
+## État actuel — au 2026-06-19 (Live Tracking — Phase 3 : optical flow + CLAHE + GPU Jetson)
+
+> **2026-06-19 (suite 88)** : **implémentation Phase 3** du [plan](LIVE_TRACKING_PLAN.md) (« phase 3 »). 3 fonctionnalités, **toutes derrière des flags, défaut conservateur** :
+> - **3.1 Optical flow hybride (Lucas-Kanade, CPU)** : `runOpticalFlow()` + `seedFlowLandmarks()`. En reference mode, après un fit ORB réussi, les keypoints (déjà masqués sur la carte) sont rétro-projetés en coords PCB via H⁻¹ → landmarks `(m_flowPcb ↔ m_flowImg)`. Les frames suivantes (jusqu'à `m_flowRedetectInterval=30`) **ne refont pas d'ORB** : elles trackent les landmarks frame→frame par `cv::calcOpticalFlowPyrLK` (sub-pixel, fluide, peu coûteux) et refit PCB→image via `estimateModel`. ORB se rafraîchit périodiquement ou si trop de points perdus. Drift-free par frame (chaque fit est PCB→image direct, pas d'accumulation). Défaut **off**.
+> - **3.2 CLAHE** : `cv::createCLAHE(2.0, 8×8)` appliqué sur le gris pleine résolution avant ORB/flow → keypoints plus stables sous glare/éclairage inégal (D405). Défaut **off**.
+> - **3.3 Accélération GPU Jetson** : `detectFeatures()` route la détection ORB sur `cv::cuda::ORB` quand dispo, sinon CPU. **Compilation conditionnelle** `#ifdef IBOM_HAVE_OPENCV_CUDA` (macro définie par CMake si modules `cudafeatures2d`/`cudaimgproc` trouvés — Jetson oui, Windows-legacy non → CPU). Descripteurs téléchargés en CPU pour réutiliser le matching/bucketing/subpix existants (intégration minimale, moins risquée). Runtime : actif si `getCudaEnabledDeviceCount()>0` et mode≠off ; fallback CPU automatique sur exception. Défaut mode **auto**.
+>
+> **Plomberie** : nouveau slot `TrackingWorker::setAdvanced(clahe, opticalFlow, gpuMode)` invoqué aux 2 sites configure d'`Application`. Config : `m_trackingClahe`(false)/`m_trackingOpticalFlow`(false)/`m_trackingGpuMode`(1) + accesseurs + JSON (`clahe`/`optical_flow`/`gpu_mode`). SettingsDialog onglet Tracking : checkbox CLAHE + checkbox Optical-flow + combo GPU acceleration (Off/Auto/Force). CMakeLists : `OPTIONAL_COMPONENTS cudafeatures2d cudaimgproc cudaarithm` + macro `IBOM_HAVE_OPENCV_CUDA` + message status. Reset flow dans `resetReference()`/`setAdvanced`.
+>
+> Fichiers : `src/overlay/TrackingWorker.{h,cpp}`, `src/app/Config.{h,cpp}`, `src/app/Application.cpp`, `src/gui/SettingsDialog.{h,cpp}`, `CMakeLists.txt`.
+>
+> ⚠️ **Non compilé/testé ici** — **risque build plus élevé que Phases 1-2** : le chemin GPU (`cv::cuda::ORB::detectAndCompute`) et les includes CUDA ne sont **pas vérifiables ici**. **À valider au prochain build Jetson** : (1) vérifier le message CMake « OpenCV CUDA: ON » ; (2) défaut (tout off/auto) → comportement Phase 2 inchangé, fallback CPU si GPU échoue (log « GPU ORB failed ») ; (3) activer **Optical-flow** → overlay plus fluide, surveiller la dérive entre rafraîchissements ORB (baisser `m_flowRedetectInterval` si besoin) ; (4) activer **CLAHE** sous glare ; (5) **GPU auto/force** → vérifier le gain FPS et l'absence d'erreur cuda (si l'overload `detectAndCompute` GPU ne compile pas, ajuster vers `detectAndComputeAsync`+download, ou passer gpu_mode=off). En cas de souci de compilation CUDA, le code CPU reste la voie par défaut.
+
 ## État actuel — au 2026-06-19 (Live Tracking — Phase 2 : 1€ Filter + modèle adaptatif + bucketing keypoints)
 
 > **2026-06-19 (suite 87)** : **implémentation Phase 2** du [plan](LIVE_TRACKING_PLAN.md) (« go phase 2 »).

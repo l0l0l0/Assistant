@@ -399,6 +399,10 @@ void Application::createSubsystems()
         Q_ARG(int,    m_config->trackingModel()),
         Q_ARG(double, m_config->oneEuroMinCutoff()),
         Q_ARG(double, m_config->oneEuroBeta()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setAdvanced", Qt::QueuedConnection,
+        Q_ARG(bool, m_config->trackingClahe()),
+        Q_ARG(bool, m_config->trackingOpticalFlow()),
+        Q_ARG(int,  m_config->trackingGpuMode()));
     QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
         Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                       && m_config->microscopeIncremental()),
@@ -2138,6 +2142,10 @@ void Application::connectControlSignals()
                 Q_ARG(int,    m_config->trackingModel()),
                 Q_ARG(double, m_config->oneEuroMinCutoff()),
                 Q_ARG(double, m_config->oneEuroBeta()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setAdvanced", Qt::QueuedConnection,
+                Q_ARG(bool, m_config->trackingClahe()),
+                Q_ARG(bool, m_config->trackingOpticalFlow()),
+                Q_ARG(int,  m_config->trackingGpuMode()));
             QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
                 Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                               && m_config->microscopeIncremental()),
