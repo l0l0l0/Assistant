@@ -11,6 +11,18 @@
 
 ---
 
+## État actuel — au 2026-06-20 (PR #20 ouverte — en attente de validation Jetson)
+
+> **2026-06-20 (suite 89)** : les 3 phases du [plan Live Tracking](LIVE_TRACKING_PLAN.md) sont livrées (Phase 1 suite 86, Phase 2 suite 87, Phase 3 suite 88), ainsi que les fixes Multi-Comp (pin 1 rouge + `componentAtPcb` suite 83, opposite-pads rouge suite 84). Tout est commit/push sur `claude/pensive-euler-pvde0v`. **Ouverture de la Pull Request** [#20](https://github.com/lo26lo/Assistant/pull/20) (`claude/pensive-euler-pvde0v` → `main`) à la demande de l'utilisateur (« commit le pr »).
+>
+> **Prochaine étape obligatoire avant merge** : valider sur le Jetson AGX Orin + RealSense D405 (build Docker complet — risque build plus élevé que d'habitude à cause du chemin GPU CUDA de la Phase 3, cf. checklist suite 88) :
+> 1. Build → vérifier le message CMake `OpenCV CUDA: ON/OFF` cohérent avec l'attendu.
+> 2. Live tracking scène statique → overlay immobile (plus de vibration).
+> 3. PCB Map → clic sur composant dense → sélection fiable ; Pin 1 et Opposite-Pads → marqueurs rouges identiques.
+> 4. Tester progressivement les nouveaux réglages Settings → Tracking (Motion model, 1€ filter, CLAHE, Optical-flow, GPU mode) — défauts = comportement legacy inchangé.
+>
+> Aucune modification de code dans cette suite (administratif : ouverture PR + journal). Si une session future reprend ce travail, commencer par lire ce bloc puis l'historique suite 82→88 ci-dessous, et vérifier l'état de la PR #20 sur GitHub (CI, reviews, merge status).
+
 ## État actuel — au 2026-06-19 (Live Tracking — Phase 3 : optical flow + CLAHE + GPU Jetson)
 
 > **2026-06-19 (suite 88)** : **implémentation Phase 3** du [plan](LIVE_TRACKING_PLAN.md) (« phase 3 »). 3 fonctionnalités, **toutes derrière des flags, défaut conservateur** :
