@@ -3,7 +3,11 @@
 #include <QApplication>
 #include <QTimer>
 #include <QThread>
+#include <QImage>
+#include <QSize>
+#include <QFutureWatcher>
 #include <opencv2/core.hpp>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <atomic>
@@ -343,6 +347,26 @@ private:
     // dedicated thread, same ownership pattern as the tracking worker.
     QThread* m_datasetThread = nullptr;
     features::DatasetCreator* m_datasetCreator = nullptr;  // lives on m_datasetThread
+
+    // ── iBOM overlay rendering (off-GUI-thread, change-gated) ──────────────
+    // The overlay is rebuilt only when one of its inputs changes (homography,
+    // selection, placed set, toggles, colors, frame size, loaded project), and
+    // the heavy QPainter work runs on a QtConcurrent worker delivered back via
+    // this watcher. m_overlayInFlight prevents the GUI thread from queuing a new
+    // render before the previous one finished. The m_ovSig* fields are the
+    // signature of the inputs the last dispatched render was built from.
+    QFutureWatcher<QImage>* m_overlayWatcher = nullptr;
+    bool        m_overlayInFlight = false;
+    bool        m_overlayValid    = false;   // false until first render dispatched
+    cv::Mat     m_ovSigHomography;
+    std::string m_ovSigSelected;
+    std::size_t m_ovSigPlacedHash = 0;
+    QSize       m_ovSigSize;
+    bool        m_ovSigPads = false, m_ovSigSilk = false, m_ovSigFab = false;
+    std::string m_ovSigColorKey;
+    float       m_ovSigPlacedOpacity = -1.0f;
+    float       m_ovSigSelectedSilkW = -1.0f;
+    const void* m_ovSigProject = nullptr;    // identity of the rendered IBomProject
 
     // Dynamic scale tracking
     double m_basePixelsPerMm = 0.0;  // pixelsPerMm at initial homography

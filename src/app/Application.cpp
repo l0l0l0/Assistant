@@ -66,6 +66,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -78,6 +79,173 @@ Q_DECLARE_METATYPE(ibom::Layer)
 Q_DECLARE_METATYPE(std::vector<cv::Point2f>)
 
 namespace ibom {
+
+namespace {
+
+// Self-contained snapshot of everything renderOverlayImage() needs, so the
+// render can run on a worker thread (QtConcurrent) without touching the
+// Application / GUI objects. All members are value copies (the IBomProject is
+// shared and immutable after load; the Homography holds a refcounted cv::Mat).
+struct OverlayRenderInputs {
+    std::shared_ptr<const IBomProject> project;
+    overlay::Homography                homo;
+    QSize                              size;
+    std::string                        selectedRef;
+    std::unordered_set<std::string>    placedRefs;
+    QColor cSelected, cPlaced, cNormal, labelNormal;
+    float  placedAlphaMul = 1.0f;
+    float  selectedSilkW  = 1.0f;
+    bool   drawPads = true;
+    bool   drawSilk = true;
+};
+
+// Pure pixel work — builds the iBOM overlay (pads / silkscreen / labels) into a
+// transparent ARGB image. No widget / Application access → safe on a worker
+// thread. Includes frustum culling (skip off-frame components) and builds the
+// label fonts once per render instead of once per component.
+QImage renderOverlayImage(const OverlayRenderInputs& in)
+{
+    if (!in.project || in.size.isEmpty()) return {};
+
+    QImage overlay(in.size, QImage::Format_ARGB32_Premultiplied);
+    overlay.fill(Qt::transparent);
+    QPainter painter(&overlay);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QFont selectedLabelFont("Segoe UI", 9, QFont::Bold);
+    const QFont normalLabelFont("Segoe UI", 7, QFont::Normal);
+    auto withAlpha = [](QColor c, int a) { c.setAlpha(a); return c; };
+
+    const overlay::Homography& H = in.homo;
+    const float fw = static_cast<float>(in.size.width());
+    const float fh = static_cast<float>(in.size.height());
+
+    for (const auto& comp : in.project->components) {
+        if (comp.layer != Layer::Front) continue;
+
+        // Frustum cull: skip components whose projected bbox is off-frame.
+        {
+            auto bb = H.transformRect(
+                static_cast<float>(comp.bbox.minX),
+                static_cast<float>(comp.bbox.minY),
+                static_cast<float>(comp.bbox.maxX - comp.bbox.minX),
+                static_cast<float>(comp.bbox.maxY - comp.bbox.minY));
+            if (bb.size() == 4) {
+                float minx = bb[0].x, maxx = bb[0].x;
+                float miny = bb[0].y, maxy = bb[0].y;
+                for (const auto& p : bb) {
+                    minx = std::min(minx, p.x); maxx = std::max(maxx, p.x);
+                    miny = std::min(miny, p.y); maxy = std::max(maxy, p.y);
+                }
+                if (maxx < 0.f || minx > fw || maxy < 0.f || miny > fh)
+                    continue;
+            }
+        }
+
+        const bool isSelected = (comp.reference == in.selectedRef);
+        const bool isPlaced   = !isSelected && in.placedRefs.count(comp.reference) > 0;
+
+        QColor padColor, silkColor, labelColor;
+        qreal silkWidth = 1.0;
+        if (isSelected) {
+            padColor   = withAlpha(in.cSelected, 220);
+            silkColor  = withAlpha(in.cSelected, 240);
+            labelColor = withAlpha(in.cSelected, 255);
+            silkWidth  = in.selectedSilkW;
+        } else if (isPlaced) {
+            int a = static_cast<int>(180 * in.placedAlphaMul);
+            padColor   = withAlpha(in.cPlaced, a);
+            silkColor  = withAlpha(in.cPlaced, std::min(255, a + 30));
+            labelColor = withAlpha(in.cPlaced, std::min(255, a + 60));
+        } else {
+            padColor   = withAlpha(in.cNormal, 180);
+            silkColor  = withAlpha(in.cNormal, 180);
+            labelColor = in.labelNormal;
+        }
+
+        // ── Draw pads ──
+        if (in.drawPads) {
+            for (const auto& pad : comp.pads) {
+                auto padCorners = H.transformRect(
+                    static_cast<float>(pad.position.x - pad.sizeX / 2.0),
+                    static_cast<float>(pad.position.y - pad.sizeY / 2.0),
+                    static_cast<float>(pad.sizeX),
+                    static_cast<float>(pad.sizeY));
+                if (padCorners.size() == 4) {
+                    QPolygonF padPoly;
+                    for (auto& c : padCorners) padPoly << QPointF(c.x, c.y);
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(padColor);
+                    if (pad.shape == Pad::Shape::Circle || pad.shape == Pad::Shape::Oval)
+                        painter.drawEllipse(padPoly.boundingRect());
+                    else
+                        painter.drawPolygon(padPoly);
+                }
+            }
+        }
+
+        // ── Draw silkscreen / drawings ──
+        if (in.drawSilk) {
+            painter.setBrush(Qt::NoBrush);
+            for (const auto& seg : comp.drawings) {
+                if (seg.type == DrawingSegment::Type::Line) {
+                    cv::Point2f s = H.pcbToImage(cv::Point2f(
+                        static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
+                    cv::Point2f e = H.pcbToImage(cv::Point2f(
+                        static_cast<float>(seg.end.x), static_cast<float>(seg.end.y)));
+                    painter.setPen(QPen(silkColor, silkWidth));
+                    painter.drawLine(QPointF(s.x, s.y), QPointF(e.x, e.y));
+                } else if (seg.type == DrawingSegment::Type::Rect) {
+                    auto rc = H.transformRect(
+                        static_cast<float>(std::min(seg.start.x, seg.end.x)),
+                        static_cast<float>(std::min(seg.start.y, seg.end.y)),
+                        static_cast<float>(std::abs(seg.end.x - seg.start.x)),
+                        static_cast<float>(std::abs(seg.end.y - seg.start.y)));
+                    if (rc.size() == 4) {
+                        QPolygonF rp;
+                        for (auto& c : rc) rp << QPointF(c.x, c.y);
+                        painter.setPen(QPen(silkColor, silkWidth));
+                        painter.drawPolygon(rp);
+                    }
+                } else if (seg.type == DrawingSegment::Type::Circle) {
+                    cv::Point2f c = H.pcbToImage(cv::Point2f(
+                        static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
+                    cv::Point2f edge = H.pcbToImage(cv::Point2f(
+                        static_cast<float>(seg.start.x + seg.radius),
+                        static_cast<float>(seg.start.y)));
+                    float r = std::hypot(edge.x - c.x, edge.y - c.y);
+                    painter.setPen(QPen(silkColor, silkWidth));
+                    painter.drawEllipse(QPointF(c.x, c.y), static_cast<qreal>(r), static_cast<qreal>(r));
+                } else if (seg.type == DrawingSegment::Type::Polygon && !seg.points.empty()) {
+                    QPolygonF polyPts;
+                    for (const auto& pt : seg.points) {
+                        cv::Point2f ip = H.pcbToImage(cv::Point2f(
+                            static_cast<float>(pt.x), static_cast<float>(pt.y)));
+                        polyPts << QPointF(ip.x, ip.y);
+                    }
+                    painter.setPen(QPen(silkColor, silkWidth));
+                    painter.drawPolygon(polyPts);
+                }
+            }
+        }
+
+        // ── Draw reference label ──
+        if (in.drawSilk || isSelected) {
+            cv::Point2f bboxCenter(
+                static_cast<float>((comp.bbox.minX + comp.bbox.maxX) / 2.0),
+                static_cast<float>((comp.bbox.minY + comp.bbox.maxY) / 2.0));
+            cv::Point2f imgPt = H.pcbToImage(bboxCenter);
+            painter.setPen(labelColor);
+            painter.setFont(isSelected ? selectedLabelFont : normalLabelFont);
+            painter.drawText(QPointF(imgPt.x, imgPt.y - 3),
+                             QString::fromStdString(comp.reference));
+        }
+    }
+    painter.end();
+    return overlay;
+}
+
+} // anonymous namespace
 
 Application::Application(QApplication& qapp)
     : QObject(&qapp)
@@ -409,6 +577,23 @@ void Application::createSubsystems()
         Q_ARG(double, m_config->microscopeReanchorDriftPx()));
     QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
         Q_ARG(bool, m_config->hybridDriftCorrection()));
+
+    // Overlay rendering worker: the iBOM overlay (pads/silk/labels) is built on
+    // a QtConcurrent thread, off the GUI thread (see the frameReady dispatch +
+    // the file-local renderOverlayImage). The watcher delivers the finished
+    // QImage back on the GUI thread; m_overlayInFlight gates re-dispatch so the
+    // GUI thread can't pile up renders.
+    m_overlayWatcher = new QFutureWatcher<QImage>(this);
+    connect(m_overlayWatcher, &QFutureWatcher<QImage>::finished, this, [this]() {
+        m_overlayInFlight = false;
+        // Drop stale results: the homography may have become invalid (Reset
+        // Alignment) while this render was running — the else-branch already
+        // cleared the overlay in that case, so don't re-show a stale one.
+        if (!m_ibomProject || !m_homography || !m_homography->isValid()) return;
+        const QImage img = m_overlayWatcher->result();
+        if (!img.isNull())
+            m_mainWindow->cameraView()->setOverlayImage(img);
+    });
 
     // Dataset capture worker on its own thread — JPEG writes + label
     // projection must never block the GUI (same pattern as tracking).
@@ -1543,153 +1728,87 @@ void Application::wireCameraSignals()
         if (m_remoteView && m_remoteView->isRunning() && m_remoteView->clientCount() > 0)
             m_remoteView->pushFrame(display);
 
-        // Render iBOM overlay if data is loaded and homography is set
+        // ── iBOM overlay: render off the GUI thread, only when it changed ───
+        // The full-resolution vector overlay used to be rebuilt on the GUI
+        // thread every frame. Now: render only when an input changes
+        // (homography, selection, placed set, toggles, colors, size, project),
+        // and run the heavy QPainter work on a QtConcurrent worker — the GUI
+        // thread only snapshots cheap value copies and dispatches. Frustum
+        // culling + the draw loop live in renderOverlayImage() (top of file).
         if (m_ibomProject && m_homography && m_homography->isValid()) {
-            // Create a transparent overlay the same size as the frame
-            QImage overlay(rgb.cols, rgb.rows, QImage::Format_ARGB32_Premultiplied);
-            overlay.fill(Qt::transparent);
-            QPainter painter(&overlay);
-            painter.setRenderHint(QPainter::Antialiasing, true);
-
-            // Draw component pads, silkscreen outlines, and labels
             const bool drawPads = m_config->showPads();
             const bool drawSilk = m_config->showSilkscreen();
-            [[maybe_unused]] const bool drawFab = m_config->showFabrication();
+            const bool drawFab  = m_config->showFabrication();
 
-            // Resolve per-state base colors from Config (user-customizable via Settings)
-            QColor cSelected = QColor(QString::fromStdString(m_config->selectedColorHex()));
-            QColor cPlaced   = QColor(QString::fromStdString(m_config->placedColorHex()));
-            QColor cNormal   = QColor(QString::fromStdString(m_config->normalColorHex()));
-            if (!cSelected.isValid()) cSelected = QColor(0, 229, 255);
-            if (!cPlaced.isValid())   cPlaced   = QColor(72, 200, 72);
-            if (!cNormal.isValid())   cNormal   = QColor(170, 170, 68);
+            std::size_t placedHash = m_placedRefs.size();
+            for (const auto& r : m_placedRefs)
+                placedHash ^= std::hash<std::string>{}(r) + 0x9e3779b97f4a7c15ULL
+                              + (placedHash << 6) + (placedHash >> 2);
 
+            const QSize    curSize(rgb.cols, rgb.rows);
+            const cv::Mat& curH = m_homography->matrix();
+            const std::string colorKey =
+                m_config->selectedColorHex() + '|' + m_config->placedColorHex() + '|'
+                + m_config->normalColorHex();
             const float placedAlphaMul = std::clamp(m_config->placedOpacity(), 0.05f, 1.0f);
             const float selectedSilkW  = std::max(1.0f, m_config->selectedOutlineWidth());
 
-            auto withAlpha = [](QColor c, int a) { c.setAlpha(a); return c; };
+            const bool homographyChanged =
+                m_ovSigHomography.empty() || curH.empty()
+                || m_ovSigHomography.size() != curH.size()
+                || cv::norm(curH, m_ovSigHomography, cv::NORM_INF) > 1e-9;
 
-            for (const auto& comp : m_ibomProject->components) {
-                if (comp.layer != Layer::Front) continue;
+            const bool needsRender =
+                !m_overlayValid
+                || curSize != m_ovSigSize
+                || drawPads != m_ovSigPads || drawSilk != m_ovSigSilk || drawFab != m_ovSigFab
+                || m_selectedRef != m_ovSigSelected
+                || placedHash != m_ovSigPlacedHash
+                || colorKey != m_ovSigColorKey
+                || placedAlphaMul != m_ovSigPlacedOpacity
+                || selectedSilkW != m_ovSigSelectedSilkW
+                || m_ibomProject.get() != m_ovSigProject
+                || homographyChanged;
 
-                const bool isSelected = (comp.reference == m_selectedRef);
-                const bool isPlaced   = !isSelected && m_placedRefs.count(comp.reference) > 0;
+            // Skip if nothing changed, or if a render is still in flight (the
+            // signature stays stale so the next free frame picks up the latest).
+            if (needsRender && !m_overlayInFlight) {
+                OverlayRenderInputs in;
+                in.project     = m_ibomProject;
+                in.homo        = *m_homography;
+                in.size        = curSize;
+                in.selectedRef = m_selectedRef;
+                in.placedRefs  = m_placedRefs;
+                QColor cSel = QColor(QString::fromStdString(m_config->selectedColorHex()));
+                QColor cPl  = QColor(QString::fromStdString(m_config->placedColorHex()));
+                QColor cNo  = QColor(QString::fromStdString(m_config->normalColorHex()));
+                in.cSelected   = cSel.isValid() ? cSel : QColor(0, 229, 255);
+                in.cPlaced     = cPl.isValid()  ? cPl  : QColor(72, 200, 72);
+                in.cNormal     = cNo.isValid()  ? cNo  : QColor(170, 170, 68);
+                in.labelNormal = ibom::gui::theme::labelNormalColor();
+                in.placedAlphaMul = placedAlphaMul;
+                in.selectedSilkW  = selectedSilkW;
+                in.drawPads = drawPads;
+                in.drawSilk = drawSilk;
 
-                // Per-state pad/silk/label colors and stroke widths
-                QColor padColor, silkColor, labelColor;
-                qreal silkWidth = 1.0;
-                if (isSelected) {
-                    padColor   = withAlpha(cSelected, 220);
-                    silkColor  = withAlpha(cSelected, 240);
-                    labelColor = withAlpha(cSelected, 255);
-                    silkWidth  = selectedSilkW;
-                } else if (isPlaced) {
-                    int a = static_cast<int>(180 * placedAlphaMul);
-                    padColor   = withAlpha(cPlaced, a);
-                    silkColor  = withAlpha(cPlaced, std::min(255, a + 30));
-                    labelColor = withAlpha(cPlaced, std::min(255, a + 60));
-                } else {
-                    padColor   = withAlpha(cNormal, 180);
-                    silkColor  = withAlpha(cNormal, 180);
-                    labelColor = ibom::gui::theme::labelNormalColor();
-                }
+                m_overlayInFlight = true;
+                m_overlayWatcher->setFuture(
+                    QtConcurrent::run([in]() { return renderOverlayImage(in); }));
 
-                // ── Draw pads ──
-                if (drawPads) {
-                for (const auto& pad : comp.pads) {
-                    cv::Point2f padCenter(
-                        static_cast<float>(pad.position.x),
-                        static_cast<float>(pad.position.y));
-                    [[maybe_unused]] cv::Point2f imgPad = m_homography->pcbToImage(padCenter);
-
-                    // Transform pad size: map a rect at pad position
-                    auto padCorners = m_homography->transformRect(
-                        static_cast<float>(pad.position.x - pad.sizeX / 2.0),
-                        static_cast<float>(pad.position.y - pad.sizeY / 2.0),
-                        static_cast<float>(pad.sizeX),
-                        static_cast<float>(pad.sizeY));
-
-                    if (padCorners.size() == 4) {
-                        QPolygonF padPoly;
-                        for (auto& c : padCorners)
-                            padPoly << QPointF(c.x, c.y);
-
-                        painter.setPen(Qt::NoPen);
-                        painter.setBrush(padColor);
-
-                        if (pad.shape == Pad::Shape::Circle || pad.shape == Pad::Shape::Oval) {
-                            painter.drawEllipse(padPoly.boundingRect());
-                        } else {
-                            painter.drawPolygon(padPoly);
-                        }
-                    }
-                }
-                } // drawPads
-
-                // ── Draw silkscreen / drawings ──
-                if (drawSilk) {
-                painter.setBrush(Qt::NoBrush);
-                for (const auto& seg : comp.drawings) {
-                    if (seg.type == DrawingSegment::Type::Line) {
-                        cv::Point2f s = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
-                        cv::Point2f e = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.end.x), static_cast<float>(seg.end.y)));
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawLine(QPointF(s.x, s.y), QPointF(e.x, e.y));
-
-                    } else if (seg.type == DrawingSegment::Type::Rect) {
-                        auto rc = m_homography->transformRect(
-                            static_cast<float>(std::min(seg.start.x, seg.end.x)),
-                            static_cast<float>(std::min(seg.start.y, seg.end.y)),
-                            static_cast<float>(std::abs(seg.end.x - seg.start.x)),
-                            static_cast<float>(std::abs(seg.end.y - seg.start.y)));
-                        if (rc.size() == 4) {
-                            QPolygonF rp;
-                            for (auto& c : rc) rp << QPointF(c.x, c.y);
-                            painter.setPen(QPen(silkColor, silkWidth));
-                            painter.drawPolygon(rp);
-                        }
-
-                    } else if (seg.type == DrawingSegment::Type::Circle) {
-                        cv::Point2f c = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
-                        // Approximate radius in image space
-                        cv::Point2f edge = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x + seg.radius),
-                                        static_cast<float>(seg.start.y)));
-                        float r = std::hypot(edge.x - c.x, edge.y - c.y);
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawEllipse(QPointF(c.x, c.y), static_cast<qreal>(r), static_cast<qreal>(r));
-
-                    } else if (seg.type == DrawingSegment::Type::Polygon && !seg.points.empty()) {
-                        QPolygonF polyPts;
-                        for (const auto& pt : seg.points) {
-                            cv::Point2f ip = m_homography->pcbToImage(
-                                cv::Point2f(static_cast<float>(pt.x), static_cast<float>(pt.y)));
-                            polyPts << QPointF(ip.x, ip.y);
-                        }
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawPolygon(polyPts);
-                    }
-                }
-                } // drawSilk
-
-                // ── Draw reference label ──
-                if (drawSilk || isSelected) {
-                cv::Point2f bboxCenter(
-                    static_cast<float>((comp.bbox.minX + comp.bbox.maxX) / 2.0),
-                    static_cast<float>((comp.bbox.minY + comp.bbox.maxY) / 2.0));
-                cv::Point2f imgPt = m_homography->pcbToImage(bboxCenter);
-                painter.setPen(labelColor);
-                painter.setFont(QFont("Segoe UI", isSelected ? 9 : 7,
-                                       isSelected ? QFont::Bold : QFont::Normal));
-                painter.drawText(QPointF(imgPt.x, imgPt.y - 3),
-                                 QString::fromStdString(comp.reference));
-                } // drawSilk || isSelected
+                // Commit the signature now (this exact state is being rendered).
+                m_overlayValid       = true;
+                m_ovSigSize          = curSize;
+                m_ovSigPads          = drawPads;
+                m_ovSigSilk          = drawSilk;
+                m_ovSigFab           = drawFab;
+                m_ovSigSelected      = m_selectedRef;
+                m_ovSigPlacedHash    = placedHash;
+                m_ovSigColorKey      = colorKey;
+                m_ovSigPlacedOpacity = placedAlphaMul;
+                m_ovSigSelectedSilkW = selectedSilkW;
+                m_ovSigProject       = m_ibomProject.get();
+                m_ovSigHomography    = curH.clone();
             }
-            painter.end();
-            m_mainWindow->cameraView()->setOverlayImage(overlay);
         } else if (!m_pickingHomographyPoints) {
             // No valid homography (e.g. after Reset Alignment): the block above
             // is skipped, so without this the LAST overlay image would stay
@@ -1697,6 +1816,7 @@ void Application::wireCameraSignals()
             // transparent overlay to actually clear it. (Skip while picking
             // 4-corner points — that path draws its own feedback overlay below.)
             m_mainWindow->cameraView()->setOverlayImage(QImage());
+            m_overlayValid = false;  // force a fresh render once it's valid again
         }
 
         // Draw alignment point picking visual feedback
