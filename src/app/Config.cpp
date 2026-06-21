@@ -192,6 +192,9 @@ bool Config::load(const std::string& path)
             m_trackingClahe      = trk.value("clahe", m_trackingClahe);
             m_trackingOpticalFlow = trk.value("optical_flow", m_trackingOpticalFlow);
             m_trackingGpuMode    = trk.value("gpu_mode", m_trackingGpuMode);
+            m_reanchorEnabled    = trk.value("reanchor_enabled", m_reanchorEnabled);
+            m_reanchorIntervalS  = trk.value("reanchor_interval_s", m_reanchorIntervalS);
+            m_reanchorMinScore   = trk.value("reanchor_min_score", m_reanchorMinScore);
 
             // Migration: legacy match_distance_ratio values were distance multipliers
             // (typically 2.0); the new semantics is Lowe's ratio test in [0,1].
@@ -357,7 +360,10 @@ bool Config::save(const std::string& path) const
             {"one_euro_beta",        m_oneEuroBeta},
             {"clahe",                m_trackingClahe},
             {"optical_flow",         m_trackingOpticalFlow},
-            {"gpu_mode",             m_trackingGpuMode}
+            {"gpu_mode",             m_trackingGpuMode},
+            {"reanchor_enabled",     m_reanchorEnabled},
+            {"reanchor_interval_s",  m_reanchorIntervalS},
+            {"reanchor_min_score",   m_reanchorMinScore}
         };
 
         // Calibration

@@ -137,7 +137,15 @@ private:
     /// and, on success, set the homography from it directly — no clicking
     /// required. Runs on a worker thread (QtConcurrent) since edge detection +
     /// orientation scoring can take tens of ms. See docs/AUTO_ALIGN_PLAN.md.
-    void autoAlignBoard();
+    /// @param silent  When true (periodic auto re-anchor), suppresses all UI
+    ///                (no status messages / dialogs) and only applies the result
+    ///                if it is confident (score ≥ reanchorMinScore) AND disagrees
+    ///                enough with the current pose to be worth correcting drift,
+    ///                so healthy live tracking is left undisturbed.
+    void autoAlignBoard(bool silent = false);
+    /// Start/stop/retune the periodic geometric re-anchor timer from Config
+    /// (features: reanchor_enabled / reanchor_interval_s).
+    void updateReanchorTimer();
     /// Finish multi-component alignment: fit a transform from the collected
     /// PCB↔image landmark pairs (≥4 → homography, 3 → affine, 2 → similarity)
     /// and apply it like the other alignment paths. No-op (with a message) if
@@ -210,6 +218,12 @@ private:
     // FPS tracking
     QTimer* m_fpsTimer = nullptr;
     std::atomic<int> m_frameCount{0};
+
+    // Periodic geometric re-anchor (plan B): when enabled + live tracking, a
+    // timer runs BoardLocator (silent autoAlignBoard) to correct accumulated
+    // drift from the PCB outline. Off by default; needs the board edges visible
+    // (not the microscope zoomed-in case). See docs/JETSON_SESSION_LOG.md.
+    QTimer* m_reanchorTimer = nullptr;
 
     // Focus assist — last time the sharpness metric was computed (throttle).
     qint64 m_lastSharpnessMs = 0;

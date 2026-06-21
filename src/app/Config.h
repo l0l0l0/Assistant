@@ -175,6 +175,18 @@ public:
     float trackingDownscale() const { return m_trackingDownscale; }
     void  setTrackingDownscale(float d) { m_trackingDownscale = d; }
 
+    // --- Periodic geometric re-anchor (BoardLocator, no model) ---
+    /// When true, periodically re-locate the PCB outline during live tracking
+    /// and re-anchor the homography to correct accumulated drift. Off by default.
+    bool   reanchorEnabled() const { return m_reanchorEnabled; }
+    void   setReanchorEnabled(bool v) { m_reanchorEnabled = v; }
+    /// Seconds between automatic re-anchor attempts.
+    double reanchorIntervalS() const { return m_reanchorIntervalS; }
+    void   setReanchorIntervalS(double s) { m_reanchorIntervalS = s; }
+    /// Minimum BoardLocator edge-agreement score [0,1] to accept an auto re-anchor.
+    double reanchorMinScore() const { return m_reanchorMinScore; }
+    void   setReanchorMinScore(double s) { m_reanchorMinScore = s; }
+
     /// Motion model fitted for live tracking (Phase 2, see LIVE_TRACKING_PLAN.md):
     /// 0=auto, 1=similarity, 2=affine, 3=homography. Default 3 (legacy).
     int  trackingModel() const { return m_trackingModel; }
@@ -356,6 +368,11 @@ private:
     bool   m_trackingClahe       = false;
     bool   m_trackingOpticalFlow = false;
     int    m_trackingGpuMode     = 1;     // 0 off / 1 auto / 2 force
+
+    // Periodic geometric re-anchor (BoardLocator)
+    bool   m_reanchorEnabled   = false;
+    double m_reanchorIntervalS = 3.0;
+    double m_reanchorMinScore  = 0.5;
 
     // Calibration (microscope-friendly defaults: small 5cm card)
     int   m_calibBoardCols  = 7;    // inner corners cols

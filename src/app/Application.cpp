@@ -443,6 +443,19 @@ void Application::createSubsystems()
             Q_ARG(QString, QString::fromStdString(rulesPath.string())));
     }
 
+    // Periodic geometric re-anchor timer (plan B): fires BoardLocator (silent
+    // autoAlignBoard) during live tracking to correct accumulated drift. The
+    // timeout re-checks all conditions; updateReanchorTimer() starts/stops it
+    // and sets the interval from Config.
+    m_reanchorTimer = new QTimer(this);
+    m_reanchorTimer->setObjectName("ReanchorTimer");
+    connect(m_reanchorTimer, &QTimer::timeout, this, [this]() {
+        if (!m_config->reanchorEnabled() || !m_liveMode || !m_ibomProject || m_autoAligning)
+            return;
+        autoAlignBoard(/*silent=*/true);
+    });
+    updateReanchorTimer();
+
     // Inspection workflow features
     spdlog::info("Creating inspection workflow features...");
     m_pickAndPlace    = std::make_unique<features::PickAndPlace>(this);
@@ -1017,11 +1030,12 @@ void Application::applyMultiAlignment()
                  n, model, m_currentPixelsPerMm);
 }
 
-void Application::autoAlignBoard()
+void Application::autoAlignBoard(bool silent)
 {
     if (m_autoAligning) return;  // already running, ignore re-clicks
     if (!m_lastColorFrame || m_lastColorFrame->empty()) {
-        m_mainWindow->updateStatusMessage(tr("Auto-Align: no camera frame available yet"));
+        if (!silent)
+            m_mainWindow->updateStatusMessage(tr("Auto-Align: no camera frame available yet"));
         return;
     }
 
@@ -1032,7 +1046,8 @@ void Application::autoAlignBoard()
     m_anchorMode = false;
 
     m_autoAligning = true;
-    m_mainWindow->updateStatusMessage(tr("Auto-Align: locating board outline..."));
+    if (!silent)
+        m_mainWindow->updateStatusMessage(tr("Auto-Align: locating board outline..."));
 
     const cv::Mat colorCopy = m_lastColorFrame->clone();
     const cv::Mat depthCopy = (m_lastDepthFrame && !m_lastDepthFrame->empty())
@@ -1060,7 +1075,7 @@ void Application::autoAlignBoard()
 
     auto* watcher = new QFutureWatcher<overlay::BoardLocateResult>(this);
     connect(watcher, &QFutureWatcher<overlay::BoardLocateResult>::finished, this,
-            [this, watcher, project, dispatchEpoch]() {
+            [this, watcher, project, dispatchEpoch, silent]() {
         const overlay::BoardLocateResult result = watcher->result();
         watcher->deleteLater();
         m_autoAligning = false;
@@ -1074,10 +1089,51 @@ void Application::autoAlignBoard()
         }
 
         if (!result.found) {
-            m_mainWindow->updateStatusMessage(
-                tr("Auto-Align failed: %1").arg(QString::fromStdString(result.message)));
-            spdlog::warn("Auto-Align failed: {}", result.message);
+            if (silent) {
+                spdlog::debug("Periodic re-anchor: board not found ({})", result.message);
+            } else {
+                m_mainWindow->updateStatusMessage(
+                    tr("Auto-Align failed: %1").arg(QString::fromStdString(result.message)));
+                spdlog::warn("Auto-Align failed: {}", result.message);
+            }
             return;
+        }
+
+        // Periodic (silent) re-anchor: only act on a confident detection, and
+        // only when it disagrees enough with the current pose to be worth a
+        // re-anchor — otherwise leave healthy live tracking undisturbed (a
+        // re-anchor resets the tracking reference and would otherwise stutter).
+        if (silent) {
+            if (result.score < m_config->reanchorMinScore()) {
+                spdlog::debug("Periodic re-anchor: score {:.2f} < {:.2f}, skipping",
+                              result.score, m_config->reanchorMinScore());
+                return;
+            }
+            const auto& sb = project->boardInfo.boardBBox;
+            const std::vector<cv::Point2f> curPcb = {
+                {static_cast<float>(sb.minX), static_cast<float>(sb.minY)},
+                {static_cast<float>(sb.maxX), static_cast<float>(sb.minY)},
+                {static_cast<float>(sb.maxX), static_cast<float>(sb.maxY)},
+                {static_cast<float>(sb.minX), static_cast<float>(sb.maxY)}
+            };
+            double maxShift = 1e9;  // no current pose → always (re)anchor
+            if (m_homography && m_homography->isValid() && result.imageCorners.size() == 4) {
+                maxShift = 0.0;
+                for (size_t i = 0; i < 4; ++i) {
+                    const auto cur = m_homography->pcbToImage(curPcb[i]);
+                    maxShift = std::max(maxShift,
+                        cv::norm(cv::Point2f(cur.x - result.imageCorners[i].x,
+                                             cur.y - result.imageCorners[i].y)));
+                }
+            }
+            constexpr double kReanchorMinShiftPx = 12.0;
+            if (maxShift < kReanchorMinShiftPx) {
+                spdlog::debug("Periodic re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
+                              kReanchorMinShiftPx, maxShift);
+                return;
+            }
+            spdlog::info("Periodic re-anchor: correcting drift (shift {:.1f}px, score {:.2f})",
+                         maxShift, result.score);
         }
 
         // Use the project captured at dispatch time, not the live m_ibomProject,
@@ -1116,6 +1172,14 @@ void Application::autoAlignBoard()
 
         if (m_trackingWorker)
             QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
+
+        if (silent) {
+            // Periodic re-anchor: applied silently (already score- and
+            // drift-gated above). No popups, no status spam.
+            spdlog::info("Periodic re-anchor applied via {} (score {:.2f})",
+                         result.method, result.score);
+            return;
+        }
 
         // The edge-agreement score is only weakly discriminative on a busy PCB
         // against a cluttered/reflective background: a spatially-offset quad can
@@ -1156,6 +1220,18 @@ void Application::autoAlignBoard()
         return overlay::BoardLocator::locate(colorCopy, depthCopy, *project, expectedPixelsPerMm,
                                               ibom::Layer::Front);
     }));
+}
+
+void Application::updateReanchorTimer()
+{
+    if (!m_reanchorTimer) return;
+    const int ms = std::max(500, static_cast<int>(m_config->reanchorIntervalS() * 1000.0));
+    m_reanchorTimer->setInterval(ms);
+    if (m_config->reanchorEnabled()) {
+        if (!m_reanchorTimer->isActive()) m_reanchorTimer->start();
+    } else {
+        m_reanchorTimer->stop();
+    }
 }
 
 void Application::refreshCameraDeviceList()
@@ -2073,6 +2149,8 @@ void Application::connectControlSignals()
             QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
                 Q_ARG(bool, m_config->hybridDriftCorrection()));
         }
+        // Apply re-anchor enable/interval changes from the dialog.
+        updateReanchorTimer();
         spdlog::info("Settings applied (camera={}, ORB={}, interval={}ms, RANSAC={:.1f}, downscale={:.2f})",
                      newIdx, m_config->orbKeypoints(), m_config->trackingIntervalMs(),
                      m_config->ransacThreshold(), m_config->trackingDownscale());
