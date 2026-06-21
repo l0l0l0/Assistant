@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-06-20 (1er build Jetson de PR #20 — fix déclaration dupliquée)
+
+> **2026-06-20 (suite 90)** : **premier build Jetson de la PR #20** lancé par l'utilisateur (`bash scripts/build_jetson.sh`, CMake résumé `RealSense: ON`, `IBOM_HAVE_OPENCV_CUDA=1`). **Échec à `[27-30/89]`** sur toute cible incluant `TrackingWorker.h` : `processIncremental` **déclaré deux fois de suite** (lignes 161 et 163) — artefact de copier-coller du refactor Phases 1-3, jamais attrapé car PR #20 n'avait jamais été compilée. **Fix** : suppression de la paire commentaire+déclaration en double dans `src/overlay/TrackingWorker.h` (le `.cpp` ne la définissait qu'une fois → header seul en faute). [JETSON_ERREURS #49](JETSON_ERREURS.md#erreur-49--processincremental-declare-deux-fois-build-pr-20). Vérif rapide effectuée par relecture : `processIncremental`/`processReference`/`runOpticalFlow`/`seedFlowLandmarks`/`detectFeatures` chacune définie **une seule fois** dans le `.cpp` ; le bloc GPU `detectFeatures` (`#ifdef IBOM_HAVE_OPENCV_CUDA`, `cv::cuda::ORB::detectAndCompute` + upload/download) est laissé tel quel — overload plausible mais **non vérifiable sans toolchain** (déjà signalé suite 88 comme point à valider). ⚠️ Le build ne s'était arrêté qu'à **cette première erreur** : d'autres erreurs de compilation de PR #20 (surtout le chemin GPU Phase 3, +4183 lignes jamais compilées) peuvent encore surgir. **Action utilisateur** : relancer `bash scripts/build_jetson.sh` après ce fix et coller la prochaine erreur éventuelle — on itère. Fichier : `src/overlay/TrackingWorker.h`.
+
 ## État actuel — au 2026-06-20 (PR #20 ouverte — en attente de validation Jetson)
 
 > **2026-06-20 (suite 89)** : les 3 phases du [plan Live Tracking](LIVE_TRACKING_PLAN.md) sont livrées (Phase 1 suite 86, Phase 2 suite 87, Phase 3 suite 88), ainsi que les fixes Multi-Comp (pin 1 rouge + `componentAtPcb` suite 83, opposite-pads rouge suite 84). Tout est commit/push sur `claude/pensive-euler-pvde0v`. **Ouverture de la Pull Request** [#20](https://github.com/lo26lo/Assistant/pull/20) (`claude/pensive-euler-pvde0v` → `main`) à la demande de l'utilisateur (« commit le pr »).

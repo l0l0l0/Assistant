@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 49 | 2026-06-20 | TrackingWorker.h — build PR #20 | ✅ RÉSOLU | [Build Jetson de PR #20 échoue : `processIncremental` déclaré deux fois dans `TrackingWorker.h` (artefact du refactor Phases 1-3)](#erreur-49--processincremental-declare-deux-fois-build-pr-20) |
 | 48 | 2026-06-19 | Application.cpp — sélection PCB Map | ✅ RÉSOLU | [Clic sur la PCB Map ne sélectionne pas le composant visé : recherche par centre le plus proche (`c.position`) peu fiable sur carte dense → hit-test bbox](#erreur-48--clic-pcb-map-ne-selectionne-pas-le-bon-composant-nearest-center-peu-fiable) |
 | 47 | 2026-06-19 | TrackingWorker.cpp — Live Tracking | ✅ RÉSOLU | [Overlay "vibre" pixel par pixel en Live Tracking sur scène statique — homographie refaite de zéro chaque frame sans lissage temporel](#erreur-47--overlay-vibre-en-live-tracking-sur-scene-statique-pas-de-lissage) |
 | 46 | 2026-06-19 | Application.cpp — overlay caméra | ✅ RÉSOLU | [« Reset Alignment ne fait rien » : l'overlay est dessiné seulement si `m_homography->isValid()`, donc quand l'homographie devient invalide le bloc est sauté et la dernière image d'overlay reste figée à l'écran (jamais effacée)](#erreur-46--reset-alignment-ne-fait-rien-overlay-fige) |
@@ -1379,6 +1380,30 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 49 — `processIncremental` déclaré deux fois (build PR #20)
+
+**Date :** 2026-06-20
+**Composant :** `src/overlay/TrackingWorker.h`
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier build Jetson de la PR #20 (`claude/pensive-euler-pvde0v`, refactor Live Tracking Phases 1-3, `-DIBOM_HAVE_OPENCV_CUDA=1`). Échec à la compilation de toute cible incluant `TrackingWorker.h` (test_tracking_worker + MOC MicroscopeIBOM) :
+
+```
+src/overlay/TrackingWorker.h:163:10: error: 'void ibom::overlay::TrackingWorker::processIncremental(...)' cannot be overloaded with 'void ibom::overlay::TrackingWorker::processIncremental(...)'
+  163 |     void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
+src/overlay/TrackingWorker.h:161:10: note: previous declaration ...
+```
+
+### Cause
+Artefact de copier-coller du refactor multi-phases : la déclaration de `processIncremental` (avec son commentaire `/// Incremental matching...`) apparaissait **deux fois de suite** (lignes 160-161 et 162-163). Deux déclarations identiques de la même méthode = surcharge impossible → erreur. Le `.cpp` ne la définit qu'une fois, donc seul le header était en faute. Jamais attrapé avant car PR #20 n'avait **jamais été compilée** (cf. son propre descriptif) — la CI ne build pas le C++, seul un build Jetson l'attrape (rappel récurrent, cf. erreurs #19/#20).
+
+### Solution appliquée ✅
+Suppression de la paire commentaire + déclaration en double dans `TrackingWorker.h` (on garde une seule déclaration). Aucune autre modification.
+
+### Leçon
+Après un refactor lourd d'un header `Q_OBJECT` (MOC), faire un `grep -c 'void <method>'` sur les nouvelles méthodes pour repérer les doublons avant de pousser. Toute PR non compilée sur la cible doit être considérée comme « probablement cassée » tant qu'un build Jetson ne l'a pas validée.
 
 ## ERREUR 48 — Clic PCB Map ne sélectionne pas le bon composant (nearest-center peu fiable)
 

@@ -159,8 +159,6 @@ private:
 
     /// Incremental matching: match current vs previous frame, compose deltas.
     void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
-    /// Incremental matching: match current vs previous frame, compose deltas.
-    void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
     /// Lowe-ratio match srcDesc→dstDesc into corresponding point lists.
     void matchPoints(const cv::Mat& srcDesc, const std::vector<cv::KeyPoint>& srcKp,
                      const cv::Mat& dstDesc, const std::vector<cv::KeyPoint>& dstKp,
