@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 50 | 2026-06-20 | tests/CMakeLists.txt — link PR #20 | ✅ RÉSOLU | [`test_tracking_worker` ne linke pas : `cv::calcOpticalFlowPyrLK` (opencv_video) + `cv::cuda::ORB::create` (opencv_cudafeatures2d) non résolus — le test linkait un sous-ensemble OpenCV figé](#erreur-50--test_tracking_worker-ne-linke-pas-modules-opencv-manquants) |
 | 49 | 2026-06-20 | TrackingWorker.h — build PR #20 | ✅ RÉSOLU | [Build Jetson de PR #20 échoue : `processIncremental` déclaré deux fois dans `TrackingWorker.h` (artefact du refactor Phases 1-3)](#erreur-49--processincremental-declare-deux-fois-build-pr-20) |
 | 48 | 2026-06-19 | Application.cpp — sélection PCB Map | ✅ RÉSOLU | [Clic sur la PCB Map ne sélectionne pas le composant visé : recherche par centre le plus proche (`c.position`) peu fiable sur carte dense → hit-test bbox](#erreur-48--clic-pcb-map-ne-selectionne-pas-le-bon-composant-nearest-center-peu-fiable) |
 | 47 | 2026-06-19 | TrackingWorker.cpp — Live Tracking | ✅ RÉSOLU | [Overlay "vibre" pixel par pixel en Live Tracking sur scène statique — homographie refaite de zéro chaque frame sans lissage temporel](#erreur-47--overlay-vibre-en-live-tracking-sur-scene-statique-pas-de-lissage) |
@@ -1380,6 +1381,30 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 50 — `test_tracking_worker` ne linke pas : modules OpenCV manquants
+
+**Date :** 2026-06-20
+**Composant :** `tests/CMakeLists.txt` (+ `CMakeLists.txt` racine)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Après le fix #49, le build avance : **le binaire `MicroscopeIBOM` compile ET linke** (`[63/64]`), mais le **test** `test_tracking_worker` échoue au link :
+
+```
+undefined reference to `cv::calcOpticalFlowPyrLK(...)'
+undefined reference to `cv::cuda::ORB::create(int, float, int, int, int, int, int, int, int, bool)'
+```
+
+### Cause
+La cible de test `test_tracking_worker` (dans `tests/CMakeLists.txt`) linkait un **sous-ensemble OpenCV figé** : `opencv_core opencv_imgproc opencv_calib3d opencv_features2d`. Or le refactor Phase 3 de `TrackingWorker.cpp` ajoute deux nouvelles dépendances : (a) `cv::calcOpticalFlowPyrLK` → module **`opencv_video`** ; (b) `cv::cuda::ORB::create` → module **`opencv_cudafeatures2d`** (compilé car `IBOM_HAVE_OPENCV_CUDA=1` est posé **globalement** via `add_compile_definitions`, donc le test compile aussi le chemin GPU). Ni `video` ni les modules CUDA n'étaient dans la liste de link du test. La cible **principale** linke `${OpenCV_LIBS}` (jeu complet trouvé à la racine, incluant les modules CUDA optionnels) → elle, linkait sans souci.
+
+### Solution appliquée ✅
+1. `tests/CMakeLists.txt` : `test_tracking_worker` linke désormais **`${OpenCV_LIBS}`** (comme la cible principale) au lieu du sous-ensemble explicite → récupère automatiquement `opencv_video` + les modules CUDA optionnels présents.
+2. `CMakeLists.txt` racine : ajout du composant **`video`** à `find_package(OpenCV ... COMPONENTS …)` pour rendre la dépendance explicite et garantir que `${OpenCV_LIBS}` contient `opencv_video` pour les deux cibles.
+
+### Leçon
+Quand un module ajoute une dépendance OpenCV (ici video + cuda), les cibles de **test** qui recompilent ce `.cpp` avec une liste de link figée cassent même si la cible principale (qui linke `${OpenCV_LIBS}`) passe. Préférer `${OpenCV_LIBS}` pour toute cible recompilant un `.cpp` du tronc, ou tenir la liste explicite synchronisée. Penser que `IBOM_HAVE_OPENCV_CUDA` est **global** : tout `.cpp` qui inclut le chemin GPU a besoin des libs CUDA au link, tests compris.
 
 ## ERREUR 49 — `processIncremental` déclaré deux fois (build PR #20)
 

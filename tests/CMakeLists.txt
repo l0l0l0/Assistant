@@ -76,10 +76,14 @@ if(Qt6_FOUND)
     set_target_properties(test_tracking_worker PROPERTIES AUTOMOC ON)
     target_include_directories(test_tracking_worker PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_compile_features(test_tracking_worker PRIVATE cxx_std_20)
+    # Link the full OpenCV set found at the root (same as the main target) so
+    # the Phase 3 tracking code resolves: opencv_video (calcOpticalFlowPyrLK)
+    # and, when IBOM_HAVE_OPENCV_CUDA is defined, the optional CUDA modules
+    # (cv::cuda::ORB). The previous explicit subset omitted both.
     target_link_libraries(test_tracking_worker PRIVATE
         Catch2::Catch2WithMain
         Qt6::Core
-        opencv_core opencv_imgproc opencv_calib3d opencv_features2d
+        ${OpenCV_LIBS}
         spdlog::spdlog
     )
     add_test(NAME test_tracking_worker COMMAND test_tracking_worker)

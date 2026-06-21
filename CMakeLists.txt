@@ -66,6 +66,7 @@ find_package(OpenCV REQUIRED COMPONENTS
     calib3d
     dnn
     features2d
+    video          # cv::calcOpticalFlowPyrLK (Phase 3 hybrid tracking)
     OPTIONAL_COMPONENTS
     cudafeatures2d
     cudaimgproc
