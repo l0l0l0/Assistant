@@ -95,7 +95,8 @@ la finesse boîtier reste perdue. Acceptable pour B, pénalisant pour A.
 | `scripts/export_yolov8_onnx.py` | `.pt` → `.onnx` (opset 17, 640, FP32) | ✅ existe |
 | `src/overlay/ComponentReanchor.{h,cpp}` | Boîtes détectées ↔ positions iBOM → homographie RANSAC | ✅ fait (B) |
 | Câblage app (`componentReanchor()` + timer + menu Dev) | Re-ancrage périodique IA + déclenchement manuel | ✅ fait (B) |
-| `scripts/merge_datasets.py` | Fusionner public + sortie `DatasetCreator` (splits propres) | ☐ à faire (A) |
+| `scripts/merge_datasets.py` | Fusionner public + sortie `DatasetCreator` (splits propres) | ✅ fait (A) |
+| Class prior dans le re-ancrage (`useClassPrior`) | Gating par classe quand un modèle 14-classes est chargé | ☐ raffinement futur (exige d'exposer les noms de classes du modèle pour valider l'alignement d'ordre) |
 
 ---
 
@@ -111,10 +112,46 @@ la finesse boîtier reste perdue. Acceptable pour B, pénalisant pour A.
 
 ---
 
-## 7. Prochaine décision (utilisateur)
+## 7. Workflow concret (commandes)
 
-Choisir le débouché à attaquer en premier :
-- **Piste B** (re-ancrage rapide, modèle grossier) — recommandé pour débloquer le D405 vite.
-- **Piste A** (modèle fin complet) — meilleure qualité overlay, dépend de nos propres captures.
+> Décision prise : **B d'abord, puis A**. Le code des deux est en place ; ce qui
+> reste est l'exécution côté données/entraînement (machine GPU + nos captures).
 
-Une fois choisi, je commence par les scripts de la §5 correspondants.
+### Piste B — modèle de présence (débloque le re-ancrage D405)
+```bash
+export ROBOFLOW_API_KEY=xxxx
+python3 scripts/fetch_roboflow_dataset.py \
+    https://universe.roboflow.com/marco-filippozzi-siwjn/smd-component-detection \
+    --out datasets/smd
+python3 scripts/remap_classes.py datasets/smd --presence
+python3 scripts/train_yolo.py datasets/smd/data.yaml \
+    --model yolov8n.pt --epochs 80 --name reanchor_presence
+python3 scripts/export_yolov8_onnx.py \
+    runs/detect/reanchor_presence/weights/best.pt \
+    --out models/component_detector.onnx
+# -> copier models/component_detector.onnx (+ .txt) sur le Jetson, relancer l'app.
+#    Le re-ancrage périodique utilise alors automatiquement le détecteur ;
+#    test manuel : menu Dev -> "Component re-anchor now".
+```
+
+### Piste A — détecteur 14 classes (overlay/inspection fin)
+```bash
+# 1. capturer nos cartes via l'app (DatasetPanel) -> sessions sous
+#    $IBOM_DATA_DIR/dataset/session_*  (déjà en 14 classes)
+# 2. pré-entraînement public remappé vers nos 14 classes :
+python3 scripts/remap_classes.py datasets/smd --map mon_mapping.yaml
+# 3. fusion public + nos sessions :
+python3 scripts/merge_datasets.py --out datasets/merged \
+    datasets/smd  $IBOM_DATA_DIR/dataset/session_2026-06-20
+# 4. entraînement + export :
+python3 scripts/train_yolo.py datasets/merged/data.yaml \
+    --model yolov8m.pt --epochs 150 --name component_detector
+python3 scripts/export_yolov8_onnx.py \
+    runs/detect/component_detector/weights/best.pt \
+    --out models/component_detector.onnx
+```
+
+> Raffinement A (optionnel, pas encore câblé) : activer `useClassPrior` dans
+> `ComponentReanchor` pour gater le matching par classe. Sûr **uniquement** si
+> l'ordre des classes du modèle == `footprint_classes.json` ; il faudra d'abord
+> exposer les noms de classes du modèle pour valider l'alignement au runtime.
