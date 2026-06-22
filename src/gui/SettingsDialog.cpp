@@ -669,6 +669,21 @@ void SettingsDialog::updateCameraResolutionUI()
         && m_cameraBackend->currentData().toInt() == 1;
     if (m_v4l2ResWidget) m_v4l2ResWidget->setVisible(!isRS);
     if (m_rsResWidget)   m_rsResWidget->setVisible(isRS);
+
+    // Incremental frame→frame tracking is a microscope (V4L2) feature — the
+    // tracking worker only applies it on the V4L2 backend, so grey it (and its
+    // drift threshold) out on RealSense to avoid implying it does anything.
+    if (m_microscopeIncremental) {
+        m_microscopeIncremental->setEnabled(!isRS);
+        m_microscopeIncremental->setToolTip(
+            isRS ? tr("Microscope-only (V4L2). Ignored on the RealSense backend.")
+                 : tr("At high magnification the field of view is narrow, so matching "
+                      "every frame against one fixed reference fails as the microscope "
+                      "pans away. Incremental mode matches each frame against the "
+                      "previous one and composes the motion. Drift accumulates; "
+                      "re-anchor (A) to reset. Only applied on the V4L2 microscope backend."));
+    }
+    if (m_reanchorDrift) m_reanchorDrift->setEnabled(!isRS);
 }
 
 void SettingsDialog::enumerateCameras()
