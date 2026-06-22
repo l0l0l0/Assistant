@@ -452,6 +452,13 @@ void Application::createSubsystems()
     connect(m_reanchorTimer, &QTimer::timeout, this, [this]() {
         if (!m_config->reanchorEnabled() || !m_liveMode || !m_ibomProject || m_autoAligning)
             return;
+        // Back off when BoardLocator keeps missing (e.g. the board fills the
+        // frame, so the outline can't be separated): skip ticks in proportion
+        // to the failure streak instead of running Canny + orientation scoring
+        // every interval forever.
+        if (m_reanchorFailStreak > 0
+            && (++m_reanchorTickCount % (m_reanchorFailStreak + 1)) != 0)
+            return;
         autoAlignBoard(/*silent=*/true);
     });
     updateReanchorTimer();
@@ -1090,7 +1097,9 @@ void Application::autoAlignBoard(bool silent)
 
         if (!result.found) {
             if (silent) {
-                spdlog::debug("Periodic re-anchor: board not found ({})", result.message);
+                m_reanchorFailStreak = std::min(m_reanchorFailStreak + 1, 20);
+                spdlog::debug("Periodic re-anchor: board not found ({}), streak {}",
+                              result.message, m_reanchorFailStreak);
             } else {
                 m_mainWindow->updateStatusMessage(
                     tr("Auto-Align failed: %1").arg(QString::fromStdString(result.message)));
@@ -1104,6 +1113,9 @@ void Application::autoAlignBoard(bool silent)
         // re-anchor — otherwise leave healthy live tracking undisturbed (a
         // re-anchor resets the tracking reference and would otherwise stutter).
         if (silent) {
+            // BoardLocator found the board here → geometric re-anchor works;
+            // clear any back-off streak.
+            m_reanchorFailStreak = 0;
             if (result.score < m_config->reanchorMinScore()) {
                 spdlog::debug("Periodic re-anchor: score {:.2f} < {:.2f}, skipping",
                               result.score, m_config->reanchorMinScore());

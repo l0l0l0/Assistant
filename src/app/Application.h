@@ -224,6 +224,8 @@ private:
     // drift from the PCB outline. Off by default; needs the board edges visible
     // (not the microscope zoomed-in case). See docs/JETSON_SESSION_LOG.md.
     QTimer* m_reanchorTimer = nullptr;
+    int     m_reanchorFailStreak = 0;   // consecutive BoardLocator misses → back off
+    int     m_reanchorTickCount  = 0;   // for skipping ticks while backing off
 
     // Focus assist — last time the sharpness metric was computed (throttle).
     qint64 m_lastSharpnessMs = 0;

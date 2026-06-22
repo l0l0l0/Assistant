@@ -440,7 +440,11 @@ BoardLocateResult BoardLocator::locate(const cv::Mat& colorBgr,
     if (result.found)
         spdlog::info("BoardLocator: {}", result.message);
     else
-        spdlog::warn("BoardLocator: {}", result.message);
+        // debug, not warn: a not-found result is a normal outcome (the periodic
+        // silent re-anchor calls this every few seconds, and on a board that
+        // fills the frame it legitimately can't separate the outline). The
+        // interactive Auto-Align path logs its own user-facing failure message.
+        spdlog::debug("BoardLocator: {}", result.message);
     return result;
 }
 
