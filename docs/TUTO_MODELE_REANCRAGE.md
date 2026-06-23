@@ -11,6 +11,31 @@
 
 ---
 
+## ⚡ Méthode express — un seul script (recommandé)
+
+Si tu veux le chemin le plus court, **un seul script fait les étapes 2 à 6**.
+Dans le Docker :
+
+```bash
+# 1. donne ta clé API (remplace par la vraie) :
+export ROBOFLOW_API_KEY=ta_cle
+# 2. lance tout :
+bash scripts/build_reanchor_model.sh
+```
+
+À la fin tu as `models/component_detector.onnx`. Passe directement à l'**Étape 7**.
+
+> Le script télécharge le dataset, le prépare, entraîne et exporte, tout seul.
+> Réglages en haut du fichier `scripts/build_reanchor_model.sh` (epochs, batch…).
+> Si l'entraînement (torch) coince sur le Jetson : mets `RUN_TRAINING=0` dans le
+> script (il téléchargera + préparera seulement), puis entraîne sur Colab/PC GPU
+> avec le dataset déjà prêt.
+
+Le reste de ce document détaille **les mêmes étapes à la main**, si tu préfères
+comprendre/contrôler chaque étape.
+
+---
+
 ## Vue d'ensemble (les 6 étapes)
 
 ```
