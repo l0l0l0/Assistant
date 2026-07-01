@@ -1749,7 +1749,11 @@ void Application::wireCameraSignals()
 
         // ── Live tracking: hand the raw frame off to the worker thread ──
         // The worker throttles, downscales and runs ORB without blocking us.
-        if (m_liveMode && m_trackingWorker && m_homography && m_homography->isValid()) {
+        // tryReserveFrameSlot() is the backpressure valve (F6): at most 2
+        // frames in flight — when the worker falls behind, frames are skipped
+        // here instead of piling up latency in its event queue.
+        if (m_liveMode && m_trackingWorker && m_homography && m_homography->isValid()
+            && m_trackingWorker->tryReserveFrameSlot()) {
             QMetaObject::invokeMethod(m_trackingWorker, "processFrame", Qt::QueuedConnection,
                 Q_ARG(ibom::camera::FrameRef, frameRef));
         }

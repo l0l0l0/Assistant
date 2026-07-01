@@ -90,7 +90,7 @@ Verdict par étape :
 *Proposition* : `setState(Locked)` sur émission réussie dans `processReference` (2 lignes) — le badge devient fiable dans les 3 modes.
 *Effort* : XS. *Risque* : nul.
 
-**F6 — Pas de backpressure sur la file du worker.**
+**F6 — Pas de backpressure sur la file du worker.** ✅ *Implémenté (suite 112) : `tryReserveFrameSlot()` (atomique, max 2 frames en vol) — réservation au post côté GUI, libération à l'entrée de `processFrame` ; les frames excédentaires sont sautées à la source.*
 `Application.cpp:1744-1747` poste **chaque frame** en queued connection. Le throttle interne rend les frames en retard bon marché en mode ORB pur, mais avec le flow actif chaque frame en retard subit quand même `cvtColor` full-res (+CLAHE éventuel) + LK + fit. Si le coût par frame dépasse la période caméra (microscope 1080p, CLAHE on, CPU chargé par l'IA), la file s'allonge **sans borne** → latence croissante, jamais résorbée.
 *Proposition* : compteur atomique in-flight partagé (incrément au post, décrément en tête de `processFrame`) ; si ≥ 2 en vol, ne pas poster (le flux converge vers « toujours la frame la plus fraîche »). ~10 lignes.
 *Effort* : S. *Risque* : faible.
@@ -102,7 +102,7 @@ Verdict par étape :
 
 ### P2 — fluidité / précision fine
 
-**F8 — Re-seed flow toutes les 30 frames = micro-saut périodique (~1 Hz).**
+**F8 — Re-seed flow toutes les 30 frames = micro-saut périodique (~1 Hz).** ✅ *Implémenté (suite 112) : re-seed piloté par l'attrition (déjà en lot B) + intervalle fixe 30→120 frames (filet anti-dérive) + re-seed « seamless » (`m_flowHealthy`) : sur refresh programmé d'un flow sain, les landmarks sont re-seedés sans émettre la pose ORB — le flow ré-émet dès la frame suivante.*
 `processFrame:584-587` saute le fast-path quand `m_flowFramesSinceDetect ≥ 30` → passe ORB → `processReference` émet **sa propre** estimée puis `seedFlowLandmarks` remplace tout le set. L'estimée ORB et le fit flow diffèrent de quelques dixièmes de px → petit à-coup visible à cadence fixe sur scène quasi statique (partiellement absorbé par gate statique + 1€).
 *Proposition* : piloter le re-seed par l'**attrition du set** (re-seed quand < 2×minMatch survivants) plutôt qu'un compteur fixe ; et lors d'un re-seed sur suivi sain, re-seeder les landmarks **sans émettre** l'estimée ORB (le flow ré-émet dès la frame suivante, continuité préservée). Garder un re-seed forcé long (ex. 120 frames) comme filet anti-dérive.
 *Effort* : M. *Risque* : moyen (à valider au Jetson avec les logs `[track]`).
@@ -112,7 +112,7 @@ Verdict par étape :
 *Proposition* : tracker aussi le chemin retour (`fullGray → m_prevGray`) et rejeter si ‖aller-retour − départ‖ > 0,5 px (critère MedianFlow standard). Double le coût LK (~qq ms sur ≤200 pts, budget OK sur Orin) pour une pureté de set nettement meilleure — synergique avec F3.
 *Effort* : S. *Risque* : faible.
 
-**F10 — Le delta incrémental est toujours une homographie 8 DOF.**
+**F10 — Le delta incrémental est toujours une homographie 8 DOF.** ✅ *Implémenté (suite 112) : le delta passe par `estimateModel` (respecte `m_model` — Auto→similarité en pratique), le bruit perspectif ne se compose plus.*
 `processIncremental:776` appelle `cv::findHomography(MAGSAC)` directement, **ignorant `m_model`**. En composition frame→frame, le bruit perspectif de chaque delta se **multiplie** dans `m_cumulativeH` → la dérive microscope est plus rapide qu'elle ne devrait. Une similarité par delta (le mouvement inter-frame au microscope est ~rigide) composera un bruit bien moindre.
 *Proposition* : utiliser `estimateModel` pour le delta (respecte `m_model`, Auto → similarité en pratique). Le chemin hybride (anchor snap) reste inchangé et continue d'absorber la dérive résiduelle.
 *Effort* : XS (le helper existe déjà). *Risque* : faible.
@@ -154,7 +154,7 @@ Par lots compilables/validables en une session Jetson chacun, du meilleur ROI au
 | **A (quick wins)** ✅ fait (suite 109) | F1 défauts + F5 badge + F2 masque fallback + F7 fix scale | Le comportement « bon » devient celui par défaut ; plus de perte définitive ; badge fiable |
 | **B (robustesse flow)** ✅ fait (suite 110) | F3 prune outliers + F9 FB-check + F4 anti-saut | Suivi flow durablement propre ; plus d'« explosions » d'overlay |
 | **C (perf affichage)** ✅ fait (suite 111) | F13 transform inline, puis F11 warp overlay (si la re-capture post-suite-100 montre encore un coût overlay significatif) | GUI thread libéré, AA réactivable, cap 40 ms supprimé |
-| **D (fin de polish)** | F8 re-seed piloté attrition + F10 delta similarité + F6 backpressure | Micro-saut 1 Hz éliminé ; dérive microscope ralentie ; latence bornée |
+| **D (fin de polish)** ✅ fait (suite 112) | F8 re-seed piloté attrition + F10 delta similarité + F6 backpressure | Micro-saut 1 Hz éliminé ; dérive microscope ralentie ; latence bornée |
 | **E (fondation)** | F12 timestamps capture (+ 1€ sur dt réels, prédiction optionnelle) | Overlay synchronisé/prédit — dernier verrou du « ça suit mal » |
 
 **Protocole de validation** (reprend LIVE_TRACKING_PLAN.md §6, avec l'outillage suite 99 déjà en place) :

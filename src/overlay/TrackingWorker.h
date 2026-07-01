@@ -11,6 +11,7 @@
 #  include <opencv2/cudaimgproc.hpp>
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -51,6 +52,16 @@ public:
     /// reads as overlay wobble at the edges. `Auto` fits both and keeps the
     /// simpler one when it explains the data comparably well.
     enum class Model { Auto = 0, Similarity = 1, Affine = 2, Homography = 3 };
+
+public:
+    /// Backpressure for the GUI→worker frame queue (F6): the sender reserves
+    /// a slot right before posting processFrame() (queued connection) and the
+    /// worker releases it when the call starts. At most 2 frames in flight —
+    /// when the worker falls behind (CLAHE spike, GPU hiccup, CPU load), new
+    /// frames are skipped at the source instead of queueing unbounded latency
+    /// (each queued call would still be processed, just later and later).
+    /// Thread-safe (single atomic); called from the GUI thread.
+    bool tryReserveFrameSlot();
 
 public slots:
     /// Configure detector + matching parameters. Recreates ORB detector
@@ -286,12 +297,21 @@ private:
     bool    m_gpuActive   = false;      // resolved at configure time
     cv::Ptr<cv::CLAHE> m_clahe;
     // Optical-flow landmark set: PCB coords ↔ current image positions, tracked
-    // frame-to-frame by Lucas-Kanade; refreshed by ORB every N frames.
+    // frame-to-frame by Lucas-Kanade; refreshed by ORB. The refresh is driven
+    // primarily by set attrition (FB-check + outlier pruning thin the set →
+    // early re-seed, see runOpticalFlow); the fixed interval is only a long
+    // anti-drift safety net (F8) — it used to be 30 frames (~1 s), causing a
+    // visible micro-jump at every scheduled refresh.
     cv::Mat                  m_prevGray;          // previous full-res gray (LK)
     std::vector<cv::Point2f> m_flowPcb;           // landmark PCB coords
     std::vector<cv::Point2f> m_flowImg;           // landmark image positions
     int     m_flowFramesSinceDetect = 0;
-    int     m_flowRedetectInterval  = 30;         // force an ORB refresh cadence
+    int     m_flowRedetectInterval  = 120;        // anti-drift net (~4 s @ 30 fps)
+    // True while the LK track is delivering healthy fits — lets the ORB
+    // refresh path distinguish a scheduled re-seed of a working track (seed
+    // silently, flow re-emits next frame — no double-pose micro-jump) from a
+    // recovery (emit the ORB pose immediately).
+    bool    m_flowHealthy = false;
 #ifdef IBOM_HAVE_OPENCV_CUDA
     cv::Ptr<cv::cuda::ORB>   m_gpuOrb;
 #endif
@@ -318,6 +338,10 @@ private:
 
     std::chrono::steady_clock::time_point m_lastProcessTime;
     bool m_hasReference = false;
+
+    // Frames posted (GUI thread) but not yet started (worker thread) — see
+    // tryReserveFrameSlot().
+    std::atomic<int> m_framesInFlight{0};
 };
 
 } // namespace ibom::overlay

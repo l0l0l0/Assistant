@@ -135,6 +135,17 @@ void TrackingWorker::setBoardPolygon(std::vector<cv::Point2f> pcbPoints)
     m_pcbPolygon = std::move(pcbPoints);
 }
 
+bool TrackingWorker::tryReserveFrameSlot()
+{
+    int cur = m_framesInFlight.load(std::memory_order_relaxed);
+    while (cur < 2) {
+        if (m_framesInFlight.compare_exchange_weak(cur, cur + 1,
+                                                   std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
 cv::Mat TrackingWorker::buildBoardMask(const cv::Size& smallSize, float downscale,
                                        float marginScale) const
 {
@@ -191,6 +202,7 @@ void TrackingWorker::resetReference()
     m_flowImg.clear();
     m_flowPcb.clear();
     m_flowFramesSinceDetect = 0;
+    m_flowHealthy           = false;
     setState(State::Lost);
 }
 
@@ -480,6 +492,7 @@ void TrackingWorker::seedFlowLandmarks(const std::vector<cv::KeyPoint>& kp,
     m_flowImg.clear();
     m_flowPcb.clear();
     m_flowFramesSinceDetect = 0;
+    m_flowHealthy = false;  // fresh seed — unproven until the first flow fit
     if (!m_opticalFlow || kp.empty() || H.empty() || fullGray.empty())
         return;
 
@@ -503,8 +516,10 @@ void TrackingWorker::seedFlowLandmarks(const std::vector<cv::KeyPoint>& kp,
 bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
 {
     if (m_flowImg.size() < static_cast<size_t>(m_minMatchCount) ||
-        m_prevGray.empty() || m_prevGray.size() != fullGray.size())
+        m_prevGray.empty() || m_prevGray.size() != fullGray.size()) {
+        m_flowHealthy = false;
         return false;
+    }
 
     const cv::Size lkWin(21, 21);
     const cv::TermCriteria lkCrit(
@@ -523,6 +538,7 @@ bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
         cv::calcOpticalFlowPyrLK(fullGray, m_prevGray, next, back,
                                  statusB, errB, lkWin, 3, lkCrit);
     } catch (const cv::Exception&) {
+        m_flowHealthy = false;
         return false;
     }
 
@@ -543,15 +559,19 @@ bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
         keptPcb.push_back(m_flowPcb[i]);
         keptImg.push_back(next[i]);
     }
-    if (keptImg.size() < static_cast<size_t>(m_minMatchCount))
+    if (keptImg.size() < static_cast<size_t>(m_minMatchCount)) {
+        m_flowHealthy = false;
         return false;  // lost too many → let ORB re-acquire
+    }
 
     int inliers = 0;
     double reprojErr = 0.0;
     cv::Mat inlierMask;
     cv::Mat H = estimateModel(keptPcb, keptImg, inliers, reprojErr, &inlierMask);
-    if (H.empty() || inliers < m_minMatchCount)
+    if (H.empty() || inliers < m_minMatchCount) {
+        m_flowHealthy = false;
         return false;
+    }
 
     // Prune the RANSAC outliers from the landmark set. They used to be kept
     // ("the fit already rejected fliers") — but rejected-from-the-fit is not
@@ -584,7 +604,8 @@ bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
         m_flowFramesSinceDetect = m_flowRedetectInterval;
 
     m_lastHomography = H.clone();
-    m_lostFrames = 0;  // healthy fit — reset the mask-fallback miss streak
+    m_lostFrames  = 0;     // healthy fit — reset the mask-fallback miss streak
+    m_flowHealthy = true;  // scheduled ORB refreshes may re-seed seamlessly (F8)
     setState(State::Locked);
     emitHomography(H, inliers, reprojErr);
     return true;
@@ -695,6 +716,12 @@ double TrackingWorker::medianReprojError(const std::vector<cv::Point2f>& src,
 
 void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
 {
+    // Release the backpressure slot reserved by the poster. Direct callers
+    // (tests) never reserve — clamp at zero instead of drifting negative
+    // (production posts always reserve first, so the clamp never races).
+    if (m_framesInFlight.fetch_sub(1, std::memory_order_relaxed) <= 0)
+        m_framesInFlight.store(0, std::memory_order_relaxed);
+
     if (!frame || frame->empty())
         return;
 
@@ -846,12 +873,25 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
         // or seed optical-flow landmarks — a degenerate low-inlier estimate
         // would point both at a wrong area and cement the loss.
         m_lastHomography = combined.clone();
+        // Seamless re-seed (F8): when this ORB pass is just the periodic
+        // refresh of a HEALTHY flow track, re-seed the landmarks but do not
+        // emit the ORB pose — the flow re-emits from the new seed on the very
+        // next frame. Emitting both back to back injected a micro-jump at
+        // every refresh (ORB and flow disagree by a sub-pixel step with a
+        // different noise character). On recovery (flow was not healthy) the
+        // ORB pose is emitted immediately as before.
+        const bool seamlessReseed = m_opticalFlow && m_flowHealthy;
         if (m_opticalFlow)
             seedFlowLandmarks(kp, combined, fullGray);
         // The reference path never reported Locked before (only the flow and
         // incremental paths did), leaving the UI badge stuck on "LOST" while
         // pure-ORB tracking worked fine.
         setState(State::Locked);
+        if (seamlessReseed) {
+            spdlog::debug("[track] seamless ORB re-seed ({} landmarks), emit deferred to flow",
+                          m_flowImg.size());
+            return;
+        }
     } else {
         noteDetectMiss();
     }
@@ -944,16 +984,18 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
         return;
     }
 
-    cv::Mat inlierMask;
-    cv::Mat deltaH = cv::findHomography(srcPts, dstPts, cv::USAC_MAGSAC,
-                                        m_ransacThreshold, inlierMask);
+    // Fit the frame→frame delta with the configured motion model (F10). This
+    // used to be a direct 8-DOF findHomography regardless of m_model — but
+    // deltas get COMPOSED into m_cumulativeH every frame, so their spurious
+    // perspective noise compounds and inflates microscope drift. With
+    // Auto/Similarity the composed noise stays rigid.
+    int inliers = 0;
+    double reprojErr = 0.0;
+    cv::Mat deltaH = estimateModel(srcPts, dstPts, inliers, reprojErr);
     if (deltaH.empty() || deltaH.rows != 3 || deltaH.cols != 3) {
         noteDetectMiss();
         return;
     }
-
-    int inliers = 0;
-    double reprojErr = medianReprojError(srcPts, dstPts, deltaH, inlierMask, inliers);
 
     // Compose: PCB → prev_image → current_image.
     m_cumulativeH = deltaH * m_cumulativeH;
