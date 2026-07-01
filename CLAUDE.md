@@ -138,7 +138,7 @@ main.cpp
   └─ QApplication
   └─ Application (QObject)
        ├─ Config (JSON, AppData)
-       ├─ CameraCapture (thread séparé → frameReady(FrameRef) → CameraView)
+       ├─ CameraCapture (thread séparé → frameReady(FrameRef, captureNs) → CameraView)
        ├─ CameraCalibration (YAML, undistort)
        ├─ IBomParser (HTML → JSON → IBomProject, supporte LZ-String)
        ├─ OverlayRenderer (pads + silkscreen + labels sur QImage)
@@ -162,8 +162,8 @@ main.cpp
 | Thread | Rôle |
 |--------|------|
 | Main/GUI | Qt event loop, paintEvent, signals/slots UI |
-| CameraCapture | `captureLoop()` — lit `cv::VideoCapture`, émet `frameReady(FrameRef)` en QueuedConnection |
-| TrackingWorker | ORB+RANSAC — reçoit `processFrame(FrameRef)` via QueuedConnection, émet `homographyUpdated(cv::Mat, int inliers, double reprojErrPx)` |
+| CameraCapture | `captureLoop()` — lit `cv::VideoCapture`, émet `frameReady(FrameRef, qint64 captureNs)` en QueuedConnection (timestamp steady_clock posé sur le thread capture) |
+| TrackingWorker | ORB+RANSAC — reçoit `processFrame(FrameRef, captureNs=0)` via QueuedConnection (backpressure `tryReserveFrameSlot()` max 2 en vol, drop si >150 ms), émet `homographyUpdated(cv::Mat, int inliers, double reprojErrPx)` |
 | DatasetCreator | Capture dataset — gates qualité, projection bboxes iBOM → labels YOLO, écriture JPEG/labels/manifest sous `$IBOM_DATA_DIR/dataset/` |
 
 Zero-copy : `FrameRef = std::shared_ptr<const cv::Mat>`. La frame allouée dans le thread capture est partagée sans clone jusqu'à CameraView. Le calibrateur fait un `.clone()` explicite pour stockage long-terme.

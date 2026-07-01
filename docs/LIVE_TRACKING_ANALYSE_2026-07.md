@@ -125,7 +125,7 @@ Gains : GUI thread quasi libéré (plus besoin du cap 40 ms ni de la signature h
 Points à trancher : les labels seraient warpés avec la carte (style AR — probablement mieux au microscope) ou dessinés en passe séparée légère (upright, culling par taille projetée) ; résolution du buffer carte à dimensionner (~2× la taille projetée max).
 *Effort* : M-L. *Risque* : moyen (rendu — validation visuelle Jetson obligatoire).
 
-**F12 — Pas de timestamps de capture → ni resync overlay↔frame, ni prédiction possible.** *(Partiellement adressé par F11 : le warp utilise la pose la plus fraîche au moment du paint, ce qui supprime le lag de rendu ; reste le lag d'estimation worker → lot E.)*
+**F12 — Pas de timestamps de capture → ni resync overlay↔frame, ni prédiction possible.** ✅ *Implémenté (suite 113) : `frameReady(FrameRef, qint64 captureNs)` (steady_clock ns posé sur le thread capture, deux backends) ; le worker droppe les frames > 150 ms (filet du backpressure F6) et alimente le filtre 1€ avec les **vrais dt de capture** au lieu du temps de traitement. La prédiction vitesse-constante reste une option future (le lag de rendu est déjà éliminé par F11 ; le résidu = latence d'estimation ~1 frame).*
 L'homographie appliquée provient d'une frame **plus vieille** que celle affichée (latence worker + 2 queued hops + prochain frameReady) : en mouvement, l'overlay traîne systématiquement de 1-2 frames (33-66 ms) derrière la vidéo — une part du « ça suit mal » perçu qui ne vient **pas** de l'estimation. `FrameRef = shared_ptr<const cv::Mat>` ne porte aucun horodatage, donc on ne peut ni mesurer cette latence, ni la compenser.
 *Proposition (fondation)* : horodater à la capture (side-channel `frameReady(FrameRef, qint64 tCaptureNs)` — évite de toucher le métatype FrameRef). Ensuite, au choix : (a) prédiction vitesse-constante des coins sur la latence mesurée (anti-lag), (b) drop-if-stale dans le worker (renforce F6), (c) alimenter le 1€ avec les **vrais** dt de capture au lieu de `steady_clock::now()` au moment du traitement (`TrackingWorker.cpp:485-486`) — supprime le bruit de latence de traitement injecté dans le filtre.
 *Effort* : M (touche CameraCapture + signatures). *Risque* : moyen.
@@ -155,7 +155,7 @@ Par lots compilables/validables en une session Jetson chacun, du meilleur ROI au
 | **B (robustesse flow)** ✅ fait (suite 110) | F3 prune outliers + F9 FB-check + F4 anti-saut | Suivi flow durablement propre ; plus d'« explosions » d'overlay |
 | **C (perf affichage)** ✅ fait (suite 111) | F13 transform inline, puis F11 warp overlay (si la re-capture post-suite-100 montre encore un coût overlay significatif) | GUI thread libéré, AA réactivable, cap 40 ms supprimé |
 | **D (fin de polish)** ✅ fait (suite 112) | F8 re-seed piloté attrition + F10 delta similarité + F6 backpressure | Micro-saut 1 Hz éliminé ; dérive microscope ralentie ; latence bornée |
-| **E (fondation)** | F12 timestamps capture (+ 1€ sur dt réels, prédiction optionnelle) | Overlay synchronisé/prédit — dernier verrou du « ça suit mal » |
+| **E (fondation)** ✅ fait (suite 113) | F12 timestamps capture (+ 1€ sur dt réels, prédiction optionnelle) | Overlay synchronisé/prédit — dernier verrou du « ça suit mal » |
 
 **Protocole de validation** (reprend LIVE_TRACKING_PLAN.md §6, avec l'outillage suite 99 déjà en place) :
 1. Dev → Verbose debug logging → re-capture de référence AVANT tout lot (mesurer `[overlay] … in X.Xms` post-suite-100 — décide si F11 est nécessaire).

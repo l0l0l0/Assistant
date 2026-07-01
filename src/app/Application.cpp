@@ -1709,7 +1709,7 @@ void Application::wireCameraSignals()
     // switch to V4L2). The connection itself dies with the old camera object.
     const CameraBackend backend = m_activeBackend;
     connect(m_camera.get(), &camera::ICameraSource::frameReady, this,
-            [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef) mutable {
+            [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef, qint64 captureNs) mutable {
         if (!frameRef || frameRef->empty()) return;
         const cv::Mat& frame = *frameRef;
 
@@ -1755,7 +1755,7 @@ void Application::wireCameraSignals()
         if (m_liveMode && m_trackingWorker && m_homography && m_homography->isValid()
             && m_trackingWorker->tryReserveFrameSlot()) {
             QMetaObject::invokeMethod(m_trackingWorker, "processFrame", Qt::QueuedConnection,
-                Q_ARG(ibom::camera::FrameRef, frameRef));
+                Q_ARG(ibom::camera::FrameRef, frameRef), Q_ARG(qint64, captureNs));
         }
 
         // ── Dataset capture: same raw frame, own thread, throttles itself ──

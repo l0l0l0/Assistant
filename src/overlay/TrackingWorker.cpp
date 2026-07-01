@@ -631,8 +631,13 @@ cv::Mat TrackingWorker::smoothHomography(const cv::Mat& rawH)
         m_cornerFilters.assign(
             n * 2, OneEuroFilter(m_oneEuroMinCutoff, m_oneEuroBeta));
     }
-    const double t = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    // Feed the filters with the frame's CAPTURE time (F12) — using processing
+    // time injected the worker's scheduling jitter into the filter's dt.
+    // Falls back to "now" when the caller provided no timestamp.
+    const double t = (m_frameTimeSec > 0.0)
+        ? m_frameTimeSec
+        : std::chrono::duration<double>(
+              std::chrono::steady_clock::now().time_since_epoch()).count();
 
     std::vector<cv::Point2f> filt(n);
     for (size_t i = 0; i < n; ++i) {
@@ -714,7 +719,7 @@ double TrackingWorker::medianReprojError(const std::vector<cv::Point2f>& src,
     return *mid;
 }
 
-void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
+void TrackingWorker::processFrame(ibom::camera::FrameRef frame, qint64 captureNs)
 {
     // Release the backpressure slot reserved by the poster. Direct callers
     // (tests) never reserve — clamp at zero instead of drifting negative
@@ -724,6 +729,21 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
 
     if (!frame || frame->empty())
         return;
+
+    // Freshness gate (F12): a frame captured long ago means the worker fell
+    // behind — processing it would compute an already-outdated pose AND delay
+    // fresher queued frames further. Drop it cheaply; the backlog drains in
+    // microseconds and tracking resumes on the freshest frame. Belt to the
+    // backpressure valve's suspenders (a stall between reserve and dispatch
+    // can still age a queued frame). captureNs == 0 → no timestamp: keep.
+    const qint64 nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (captureNs > 0 && nowNs - captureNs > 150'000'000LL) {
+        spdlog::debug("[track] dropped stale frame ({} ms old)",
+                      (nowNs - captureNs) / 1'000'000LL);
+        return;
+    }
+    m_frameTimeSec = (captureNs > 0 ? captureNs : nowNs) * 1e-9;
 
     try {
         // Convert + downscale for speed. Keypoints are rescaled back to full

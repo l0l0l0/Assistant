@@ -11,6 +11,16 @@
 
 ---
 
+## État actuel — au 2026-07-01 (Lot E : timestamps de capture — l'audit live tracking est entièrement implémenté)
+
+> **2026-07-01 (suite 113)** : **implémentation du lot E (F12)**, dernier lot de [LIVE_TRACKING_ANALYSE_2026-07.md](LIVE_TRACKING_ANALYSE_2026-07.md) — **les 13 findings de l'audit sont maintenant tous implémentés** (lots A→E, suites 109-113), tout reste à valider au build Jetson :
+> - **Signal horodaté** : `ICameraSource::frameReady` devient **`frameReady(FrameRef, qint64 captureNs)`** — timestamp **steady_clock en ns posé sur le thread capture** juste après le grab, dans les deux backends (`CameraCapture` V4L2 + `RealSenseCapture`). Même horloge que les consommateurs → `now − captureNs` mesure la latence de bout en bout. Un seul connect existait (la lambda `frameReady` d'`Application::wireCameraSignals`) — mis à jour ; `DatasetCreator::processFrame(FrameRef)` inchangé (throttle interne, pas besoin du timestamp).
+> - **Worker** : `TrackingWorker::processFrame(FrameRef, qint64 captureNs = 0)` (défaut 0 → les tests/appels directs compilent inchangés, moc génère les deux signatures). Deux consommateurs du timestamp : (1) **gate de fraîcheur** — frame plus vieille que **150 ms** = le worker a décroché → drop immédiat (log `[track] dropped stale frame`), ceinture au backpressure F6 (un stall entre réservation et dispatch peut encore vieillir une frame en file) ; (2) **`m_frameTimeSec`** alimente le **filtre 1€ avec les vrais dt de capture** dans `smoothHomography` — le `steady_clock::now()` au moment du traitement injectait le jitter d'ordonnancement du worker dans le dt du filtre. Fallback « now » quand captureNs=0.
+> - **Non fait (volontairement)** : la **prédiction vitesse-constante** des coins reste une option future — le lag de *rendu* est déjà éliminé par F11 (warp à la pose la plus fraîche au paint) ; le résidu est la latence d'*estimation* (~1 frame worker), compensable plus tard en extrapolant sur `now − captureNs` si le besoin se confirme en pratique.
+> - CLAUDE.md : table threading mise à jour (`frameReady(FrameRef, qint64)`, `processFrame(FrameRef, captureNs=0)`, backpressure + drop 150 ms).
+>
+> Fichiers : `src/camera/{ICameraSource.h,CameraCapture.cpp,RealSenseCapture.cpp}`, `src/overlay/TrackingWorker.{h,cpp}`, `src/app/Application.cpp`, `CLAUDE.md`, docs. ⚠️ Non compilé ici. **À valider au build Jetson** : (1) build + `ctest` complet (signal signature = erreur de compil si un connect a été oublié — grep dit non) ; (2) verbose : `[track] dropped stale frame` doit rester **rare/absent** en fonctionnement normal (sinon le worker est vraiment surchargé — investiguer) ; (3) le jitter de l'overlay en scène statique ne doit pas regresser (le 1€ reçoit des dt plus réguliers → au pire identique, en pratique un peu plus stable). **Récap validation globale des 5 lots** : suivre les checklists des suites 109→113 ; l'ordre de bisect naturel en cas de régression = un lot par commit (`f138ca3` A, `e42753c` B, `f08b9fe` C, `4910c85` D, ce commit E).
+
 ## État actuel — au 2026-07-01 (Lot D : re-seed seamless, delta incrémental rigide, backpressure)
 
 > **2026-07-01 (suite 112)** : **implémentation du lot D** de [LIVE_TRACKING_ANALYSE_2026-07.md](LIVE_TRACKING_ANALYSE_2026-07.md) (« vas y avec D et E » — le E suit en suite 113) :

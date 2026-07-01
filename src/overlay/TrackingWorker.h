@@ -126,7 +126,12 @@ public slots:
 
     /// Process one incoming frame. Throttled by intervalMs — frames
     /// arriving too soon are dropped to keep the worker responsive.
-    void processFrame(ibom::camera::FrameRef frame);
+    /// @param captureNs Monotonic capture time of the frame (steady_clock ns,
+    ///        from ICameraSource::frameReady). Enables the stale-frame gate
+    ///        and real capture-dt for the 1€ filter (F12). 0 = no timestamp
+    ///        (direct/test callers): never dropped, filter falls back to
+    ///        processing time.
+    void processFrame(ibom::camera::FrameRef frame, qint64 captureNs = 0);
 
 signals:
     /// Emitted with the composed homography (PCB → current image) and the
@@ -282,6 +287,11 @@ private:
     // confirms it — one-off degenerate fits never get confirmed.
     cv::Mat m_pendingJumpH;
     double  m_frameDiag = 0.0;         // diagonal (px) of the last processed frame
+    // Capture time (seconds, steady_clock) of the frame being processed —
+    // feeds the 1€ corner filters with the REAL inter-frame dt instead of the
+    // worker's processing time, whose scheduling jitter used to leak into the
+    // filter (F12). 0 when the caller provided no timestamp.
+    double  m_frameTimeSec = 0.0;
 
     // Phase-2 stabilization (docs/LIVE_TRACKING_PLAN.md).
     Model   m_model            = Model::Homography;  // safe default = legacy
