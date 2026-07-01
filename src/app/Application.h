@@ -401,6 +401,13 @@ private:
     // Dynamic scale tracking
     double m_basePixelsPerMm = 0.0;  // pixelsPerMm at initial homography
     double m_currentPixelsPerMm = 0.0;
+    // IBomPads scale method: cached far-apart reference pad pair, recomputed
+    // only when the loaded project changes (ERREUR #52). Positions are copied
+    // by value; the project pointer is an identity tag, never dereferenced.
+    const void* m_scaleRefProject = nullptr;
+    cv::Point2f m_scaleRefA, m_scaleRefB;   // PCB coords (mm)
+    double      m_scaleRefDistMm = 0.0;
+    qint64      m_lastScaleUpdateMs = 0;    // throttle for the live-tracking path
 
     // Per-profile tracking state (saved/restored on profile switch)
     struct ProfileTrackingState {

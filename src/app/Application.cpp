@@ -1600,7 +1600,15 @@ void Application::connectSignals()
                 this, [this](cv::Mat combined, int inliers, double reprojErr) {
             if (!m_liveMode || combined.empty() || !m_homography) return;
             m_homography->setMatrix(combined);
-            updateDynamicScale();
+            // Scale readout at ~5 Hz is plenty — with optical flow this signal
+            // fires at camera rate, and the IBomPads method walks board data
+            // (ERREUR #52). Event-driven call sites (alignment, re-anchor)
+            // still call updateDynamicScale() directly, unthrottled.
+            const qint64 scaleNowMs = QDateTime::currentMSecsSinceEpoch();
+            if (scaleNowMs - m_lastScaleUpdateMs >= 200) {
+                m_lastScaleUpdateMs = scaleNowMs;
+                updateDynamicScale();
+            }
             m_mainWindow->boardMinimap()->update();
             // Tracking-quality stream (visible only with verbose logging on).
             spdlog::debug("[track] homography applied: inliers={} reprojErr={:.2f}px scale={:.3f}px/mm",
@@ -3717,40 +3725,59 @@ void Application::updateDynamicScale()
         newPpmm = pixW / pcbW;
 
     } else if (method == ScaleMethod::IBomPads) {
-        // Find two pads that are far apart and use their known real distance
-        // vs their projected pixel distance
-        const auto& comps = m_ibomProject->components;
-        if (comps.size() < 2) return;
+        // Reference pad pair for the scale: two far-apart pads whose known mm
+        // distance is compared to their projected pixel distance. Recomputed
+        // only when the loaded project changes — the old per-call scan reset
+        // its best-distance accumulator per component (so "padB" was only the
+        // farthest pad of the LAST component) and rescanned every pad on every
+        // homography emission (ERREUR #52).
+        if (m_ibomProject.get() != m_scaleRefProject) {
+            m_scaleRefProject = m_ibomProject.get();
+            m_scaleRefDistMm  = 0.0;
 
-        // Pick first pad of first and last component as reference points
-        const Pad* padA = nullptr;
-        const Pad* padB = nullptr;
-        for (const auto& c : comps) {
-            if (!c.pads.empty()) {
-                if (!padA) { padA = &c.pads[0]; continue; }
-                // Pick the pad farthest from padA
-                double bestDist = 0;
+            // Far-apart pair in one O(n) pass: extremes along the two board
+            // diagonals (x+y and x−y); keep the farther of the two candidate
+            // pairs. Not the exact diameter, but ≥ diagonal/√2 — ample for a
+            // stable scale baseline.
+            const Pad* minSumP = nullptr; const Pad* maxSumP = nullptr;
+            const Pad* minDifP = nullptr; const Pad* maxDifP = nullptr;
+            double minSum = 0, maxSum = 0, minDif = 0, maxDif = 0;
+            for (const auto& c : m_ibomProject->components) {
                 for (const auto& p : c.pads) {
-                    double dx = p.position.x - padA->position.x;
-                    double dy = p.position.y - padA->position.y;
-                    double d = dx*dx + dy*dy;
-                    if (d > bestDist) { bestDist = d; padB = &p; }
+                    const double s = p.position.x + p.position.y;
+                    const double d = p.position.x - p.position.y;
+                    if (!minSumP || s < minSum) { minSum = s; minSumP = &p; }
+                    if (!maxSumP || s > maxSum) { maxSum = s; maxSumP = &p; }
+                    if (!minDifP || d < minDif) { minDif = d; minDifP = &p; }
+                    if (!maxDifP || d > maxDif) { maxDif = d; maxDifP = &p; }
                 }
             }
+            const auto padDist = [](const Pad* a, const Pad* b) {
+                return (a && b) ? std::hypot(a->position.x - b->position.x,
+                                             a->position.y - b->position.y)
+                                : 0.0;
+            };
+            const double dSum = padDist(minSumP, maxSumP);
+            const double dDif = padDist(minDifP, maxDifP);
+            const Pad* a = (dSum >= dDif) ? minSumP : minDifP;
+            const Pad* b = (dSum >= dDif) ? maxSumP : maxDifP;
+            const double distMm = std::max(dSum, dDif);
+            if (a && b && distMm >= 1.0) {  // < 1 mm apart: unreliable baseline
+                // Positions copied by value — the project pointer above is an
+                // identity tag only, never dereferenced later.
+                m_scaleRefA      = cv::Point2f(static_cast<float>(a->position.x),
+                                               static_cast<float>(a->position.y));
+                m_scaleRefB      = cv::Point2f(static_cast<float>(b->position.x),
+                                               static_cast<float>(b->position.y));
+                m_scaleRefDistMm = distMm;
+            }
         }
-        if (!padA || !padB) return;
+        if (m_scaleRefDistMm < 1.0) return;  // no usable pad pair in this project
 
-        double realDist = std::sqrt(
-            std::pow(padA->position.x - padB->position.x, 2) +
-            std::pow(padA->position.y - padB->position.y, 2));
-        if (realDist < 1.0) return; // too close, unreliable
-
-        auto imgA = m_homography->pcbToImage(
-            {static_cast<float>(padA->position.x), static_cast<float>(padA->position.y)});
-        auto imgB = m_homography->pcbToImage(
-            {static_cast<float>(padB->position.x), static_cast<float>(padB->position.y)});
-        double pixDist = cv::norm(cv::Point2f(imgA.x - imgB.x, imgA.y - imgB.y));
-        newPpmm = pixDist / realDist;
+        const auto imgA = m_homography->pcbToImage(m_scaleRefA);
+        const auto imgB = m_homography->pcbToImage(m_scaleRefB);
+        const double pixDist = cv::norm(cv::Point2f(imgA.x - imgB.x, imgA.y - imgB.y));
+        newPpmm = pixDist / m_scaleRefDistMm;
     }
 
     if (newPpmm > 0) {

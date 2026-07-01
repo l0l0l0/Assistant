@@ -38,7 +38,8 @@ public:
     explicit TrackingWorker(QObject* parent = nullptr);
     ~TrackingWorker() override = default;
 
-    /// Tracking lock state for the microscope incremental mode. Mirrored to
+    /// Tracking lock state, reported by all modes (reference, optical-flow
+    /// and microscope incremental; Drifting is incremental-only). Mirrored to
     /// the UI as a "Locked / Drifting / Lost — re-anchor" badge (§4 of
     /// docs/MICROSCOPE_PLACEMENT_PLAN.md). Reported as int over the signal so
     /// no Qt metatype registration is needed.
@@ -126,8 +127,10 @@ signals:
     /// Emitted once when a reference frame has been captured.
     void referenceCaptured(int keypointCount);
 
-    /// Emitted when the incremental tracking state changes (only fires in
-    /// incremental mode). Value is a TrackingWorker::State cast to int.
+    /// Emitted when the tracking state changes, in every mode: Locked on a
+    /// healthy fit (reference, flow or incremental path), Lost after a few
+    /// consecutive detect/match misses, Drifting from incremental drift
+    /// accumulation. Value is a TrackingWorker::State cast to int.
     void trackingStateChanged(int state);
 
     /// Emitted on non-fatal tracking errors (e.g. cv::Exception).
@@ -173,10 +176,20 @@ private:
 
     /// Build an ORB detection mask covering the board, projected through the
     /// last known homography into `smallSize` (the downscaled detection
-    /// frame), grown by a margin to tolerate the motion since that estimate.
-    /// Returns an empty Mat if the board polygon or a homography estimate
-    /// isn't available yet (caller falls back to unmasked detection).
-    cv::Mat buildBoardMask(const cv::Size& smallSize, float downscale) const;
+    /// frame), grown by `marginScale` around its centroid to tolerate the
+    /// motion since that estimate. Returns an empty Mat if the board polygon
+    /// or a homography estimate isn't available yet (caller falls back to
+    /// unmasked detection).
+    cv::Mat buildBoardMask(const cv::Size& smallSize, float downscale,
+                           float marginScale) const;
+
+    /// Record one detect/match failure (m_lostFrames++). Drives the
+    /// escalating mask fallback in processFrame() — the mask is built from
+    /// m_lastHomography, which only refreshes on success, so consecutive
+    /// misses mean the mask itself is likely stale (ERREUR #51): widen it,
+    /// then drop it, or the loss is permanent. Flips the state to Lost after
+    /// a few consecutive misses.
+    void noteDetectMiss();
 
     /// Temporally smooth a freshly-fit homography to suppress visible overlay
     /// "vibration" on a static scene. Raw per-frame ORB/RANSAC fits wobble by
@@ -282,7 +295,10 @@ private:
     std::vector<cv::KeyPoint> m_prevKeypoints;
     cv::Mat                   m_cumulativeH;              // PCB → current image
     double                    m_accumulatedDrift = 0.0;   // Σ per-frame reproj err
-    int                       m_lostFrames       = 0;     // consecutive match failures
+    // Consecutive detect/match failures, counted in BOTH tracking modes (not
+    // just incremental): drives the Lost state and the escalating board-mask
+    // fallback (see noteDetectMiss / buildBoardMask). Reset on any success.
+    int                       m_lostFrames       = 0;
     State                     m_state            = State::Lost;
 
     std::chrono::steady_clock::time_point m_lastProcessTime;

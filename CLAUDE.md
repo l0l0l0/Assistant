@@ -234,12 +234,14 @@ Defaults à connaître :
 | `showPads` | true | |
 | `showSilkscreen` | true | |
 | `showFabrication` | false | |
-| `trackingIntervalMs` | 200 | Throttle entre appels ORB |
+| `trackingIntervalMs` | 100 | Throttle des appels ORB seulement (le flow tourne à cadence caméra) |
 | `orbKeypoints` | 200 | Suffisant à 0.5× downscale |
 | `minMatchCount` | 8 | Matches minimaux pour RANSAC |
 | `matchDistanceRatio` | 0.75 | Lowe's ratio (0.5–0.95) |
 | `ransacThreshold` | 3.0 | pixels |
 | `trackingDownscale` | 0.5 | 0.1–1.0; 0.5 = ×4 moins de pixels |
+| `trackingModel` | 0 (Auto) | Similarité sur carte plane, homographie si perspective réelle |
+| `trackingOpticalFlow` | true | LK à cadence caméra entre re-seeds ORB. Anciens config.json : migration douce `tracking.defaults_v<2` dans `Config::load()` |
 | `calibBoardCols/Rows` | 7×5 | Inner corners checkerboard |
 | `calibSquareSize` | 5.0 mm | |
 | `scaleMethod` | Homography | Enum: None/Homography/IBomPads |

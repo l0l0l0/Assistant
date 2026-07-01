@@ -134,7 +134,8 @@ void TrackingWorker::setBoardPolygon(std::vector<cv::Point2f> pcbPoints)
     m_pcbPolygon = std::move(pcbPoints);
 }
 
-cv::Mat TrackingWorker::buildBoardMask(const cv::Size& smallSize, float downscale) const
+cv::Mat TrackingWorker::buildBoardMask(const cv::Size& smallSize, float downscale,
+                                       float marginScale) const
 {
     if (m_pcbPolygon.empty() || m_lastHomography.empty())
         return {};
@@ -154,12 +155,11 @@ cv::Mat TrackingWorker::buildBoardMask(const cv::Size& smallSize, float downscal
     cv::Point2f centroid(0.f, 0.f);
     for (const auto& p : imgPoly) centroid += p;
     centroid *= (1.0f / static_cast<float>(imgPoly.size()));
-    constexpr float kMarginScale = 1.6f;
 
     std::vector<cv::Point> maskPoly;
     maskPoly.reserve(imgPoly.size());
     for (const auto& p : imgPoly) {
-        cv::Point2f grown = centroid + (p - centroid) * kMarginScale;
+        cv::Point2f grown = centroid + (p - centroid) * marginScale;
         // Scale into the downscaled detection frame's coordinate space.
         maskPoly.emplace_back(cv::saturate_cast<int>(grown.x * downscale),
                                cv::saturate_cast<int>(grown.y * downscale));
@@ -457,6 +457,7 @@ bool TrackingWorker::runOpticalFlow(const cv::Mat& fullGray)
     m_flowFramesSinceDetect++;
 
     m_lastHomography = H.clone();
+    m_lostFrames = 0;  // healthy fit — reset the mask-fallback miss streak
     setState(State::Locked);
     emitHomography(H, inliers, reprojErr);
     return true;
@@ -507,6 +508,15 @@ void TrackingWorker::setState(State s)
     if (s == m_state) return;
     m_state = s;
     emit trackingStateChanged(static_cast<int>(s));
+}
+
+void TrackingWorker::noteDetectMiss()
+{
+    ++m_lostFrames;
+    spdlog::debug("[track] detect/match miss #{} (mask fallback widens at 3, drops at 6)",
+                  m_lostFrames);
+    if (m_lostFrames >= 4)
+        setState(State::Lost);
 }
 
 void TrackingWorker::matchPoints(const cv::Mat& srcDesc,
@@ -611,8 +621,22 @@ void TrackingWorker::processFrame(ibom::camera::FrameRef frame)
 
         // Restrict detection to the board's projected area (grown by a
         // margin) so a static background can't outvote the board's own
-        // keypoints in RANSAC — see setBoardPolygon().
-        cv::Mat mask = buildBoardMask(small.size(), fwdScale);
+        // keypoints in RANSAC — see setBoardPolygon(). The mask is projected
+        // through m_lastHomography, which only refreshes on success — so after
+        // consecutive misses the mask itself is the prime suspect (board moved
+        // out of it → permanent silent loss, ERREUR #51). Escalate: widen the
+        // margin, then drop the mask entirely so the board can be re-acquired
+        // anywhere in the frame. Escalation only applies once a reference
+        // exists: the reference capture must stay board-masked, otherwise
+        // background keypoints contaminate the reference set (ERREUR #35).
+        constexpr int kWidenMaskAfter = 3;  // misses before growing the margin
+        constexpr int kDropMaskAfter  = 6;  // misses before full-frame detection
+        cv::Mat mask;
+        if (!m_hasReference || m_lostFrames < kWidenMaskAfter)
+            mask = buildBoardMask(small.size(), fwdScale, 1.6f);
+        else if (m_lostFrames < kDropMaskAfter)
+            mask = buildBoardMask(small.size(), fwdScale, 2.5f);
+        // else: empty mask → detect over the whole frame to re-acquire
 
         std::vector<cv::KeyPoint> kp;
         cv::Mat desc;
@@ -659,30 +683,47 @@ void TrackingWorker::processReference(const std::vector<cv::KeyPoint>& kp,
         return;
     }
 
-    if (desc.empty() || kp.size() < static_cast<size_t>(m_minMatchCount))
+    if (desc.empty() || kp.size() < static_cast<size_t>(m_minMatchCount)) {
+        noteDetectMiss();
         return;
+    }
 
     std::vector<cv::Point2f> srcPts, dstPts;
     matchPoints(m_refDescriptors, m_refKeypoints, desc, kp, srcPts, dstPts);
-    if (srcPts.size() < static_cast<size_t>(m_minMatchCount))
+    if (srcPts.size() < static_cast<size_t>(m_minMatchCount)) {
+        noteDetectMiss();
         return;
+    }
 
     if (m_baseHomography.empty())
-        return;
+        return;  // configuration gap, not a tracking miss
 
     int inliers = 0;
     double reprojErr = 0.0;
     cv::Mat frameH = estimateModel(srcPts, dstPts, inliers, reprojErr);
-    if (frameH.empty() || frameH.rows != 3 || frameH.cols != 3)
+    if (frameH.empty() || frameH.rows != 3 || frameH.cols != 3) {
+        noteDetectMiss();
         return;
+    }
 
     cv::Mat combined = frameH * m_baseHomography;
-    m_lastHomography = combined.clone();
 
-    // Seed optical-flow landmarks from this fresh ORB fit so the LK fast path
-    // can take over for the next m_flowRedetectInterval frames.
-    if (m_opticalFlow)
-        seedFlowLandmarks(kp, combined, fullGray);
+    const bool healthy = inliers >= m_minMatchCount;
+    if (healthy) {
+        m_lostFrames = 0;
+        // Only a healthy fit may steer the detection mask (m_lastHomography)
+        // or seed optical-flow landmarks — a degenerate low-inlier estimate
+        // would point both at a wrong area and cement the loss.
+        m_lastHomography = combined.clone();
+        if (m_opticalFlow)
+            seedFlowLandmarks(kp, combined, fullGray);
+        // The reference path never reported Locked before (only the flow and
+        // incremental paths did), leaving the UI badge stuck on "LOST" while
+        // pure-ORB tracking worked fine.
+        setState(State::Locked);
+    } else {
+        noteDetectMiss();
+    }
 
     emitHomography(combined, inliers, reprojErr);
 }
@@ -766,9 +807,9 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
 
     if (srcPts.size() < static_cast<size_t>(m_minMatchCount)) {
         // Lost this frame — keep the last good prev so a small re-overlap can
-        // recover, but flag Lost after a few consecutive failures.
-        if (++m_lostFrames >= 4)
-            setState(State::Lost);
+        // recover; noteDetectMiss flags Lost after a few consecutive failures
+        // and drives the mask fallback.
+        noteDetectMiss();
         return;
     }
 
@@ -776,8 +817,7 @@ void TrackingWorker::processIncremental(const std::vector<cv::KeyPoint>& kp,
     cv::Mat deltaH = cv::findHomography(srcPts, dstPts, cv::USAC_MAGSAC,
                                         m_ransacThreshold, inlierMask);
     if (deltaH.empty() || deltaH.rows != 3 || deltaH.cols != 3) {
-        if (++m_lostFrames >= 4)
-            setState(State::Lost);
+        noteDetectMiss();
         return;
     }
 

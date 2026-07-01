@@ -63,14 +63,14 @@ Verdict par étape :
 
 ### P0 — réglage pur, zéro code risqué
 
-**F1 — Les défauts Config laissent le chemin legacy (le plus mauvais) actif.**
+**F1 — Les défauts Config laissent le chemin legacy (le plus mauvais) actif.** ✅ *Implémenté (suite 109) : défauts `opticalFlow=true`, `model=Auto`, `interval=100 ms` + migration douce `tracking.defaults_v<2` dans `Config::load()` (n'écrase que les valeurs encore égales aux anciens défauts).*
 `Config.h:366-377` : `trackingIntervalMs=200`, `trackingOpticalFlow=false`, `trackingModel=3` (Homography 8 DOF), `clahe=false`. Autrement dit : **out-of-the-box le suivi tourne à 5 Hz, sans flow, avec le modèle le plus bruité** — exactement le comportement « ça suit mal et pas rapide » de la suite 94. Le chemin validé excellent (suite 100) exige de cocher Optical-flow à la main.
 *Proposition* : basculer les défauts vers `opticalFlow=true`, `trackingModel=0` (Auto — en pratique similarité sur carte plane, homographie seulement si la perspective est réelle), `intervalMs=100` (l'ORB ne sert plus que de re-seed ~10 Hz max). Attention : les `config.json` **existants** conservent leurs valeurs — prévoir soit une migration douce (clé `config_version`), soit un bouton « Recommended defaults » dans Settings → Tracking.
 *Effort* : XS. *Risque* : faible (comportement déjà validé sur Jetson quand activé manuellement).
 
 ### P1 — robustesse, code faible risque
 
-**F2 — Masque board sans récupération = perte définitive possible (🔴 ERREUR #51).**
+**F2 — Masque board sans récupération = perte définitive possible (ERREUR #51).** ✅ *Implémenté (suite 109) : escalade du masque via `m_lostFrames` partagé (×1.6 → ×2.5 à 3 échecs → plein cadre à 6), `m_lastHomography`/seed flow gatés sur fit sain, test de régression ajouté.*
 `buildBoardMask` (`TrackingWorker.cpp:137-171`) projette le polygone carte via `m_lastHomography`, qui n'est mis à jour **que sur estimation réussie** (`:459`, `:681`, `:789`). Si la carte sort de la zone masquée (déplacement rapide entre deux ticks ORB à 5 Hz, main qui déplace la carte, bump de la caméra), l'ORB ne détecte plus que la zone (fausse) du masque → plus jamais de match → `m_lastHomography` ne se met plus jamais à jour → **boucle morte silencieuse**. En mode référence il n'existe **aucun compteur d'échec** (`m_lostFrames` ne sert qu'à l'incrémental) et `processReference` sort par des `return` muets (`:662`, `:667`).
 *Proposition* : compter les échecs consécutifs du chemin référence ; après N échecs (ex. 5), repasser en **détection plein cadre** (masque vide) jusqu'à ré-acquisition ; optionnellement élargir la marge 1.6× → 2.5× au premier palier. ~15 lignes localisées.
 *Effort* : S. *Risque* : faible.
@@ -85,7 +85,7 @@ Verdict par étape :
 *Proposition* : (a) rejeter si `reprojErr > ransacThreshold` ; (b) si `cornerDisp(raw, m_lastEmittedH)` dépasse un seuil (ex. 15 % de la diagonale image), exiger **2 estimées consécutives concordantes** avant d'accepter (vrai mouvement brusque = confirmé dès la frame suivante ; estimée folle = isolée) ; (c) sanity : `det(H) > 0`, termes perspectifs bornés.
 *Effort* : S. *Risque* : faible (le cas nominal ne change pas).
 
-**F5 — Le badge d'état ne passe jamais « Locked » en mode référence pur.**
+**F5 — Le badge d'état ne passe jamais « Locked » en mode référence pur.** ✅ *Implémenté (suite 109) : `setState(Locked)` sur fit sain du chemin référence.*
 `processReference` ne fait **aucun** `setState` (seuls `runOpticalFlow:460`, `processIncremental` et le gate low-quality en font). Après `resetReference` → `State::Lost`, un suivi ORB pur qui fonctionne parfaitement laisse l'état sur Lost → la status bar peut afficher « Tracking: LOST — re-anchor » alors que tout va bien.
 *Proposition* : `setState(Locked)` sur émission réussie dans `processReference` (2 lignes) — le badge devient fiable dans les 3 modes.
 *Effort* : XS. *Risque* : nul.
@@ -95,7 +95,7 @@ Verdict par étape :
 *Proposition* : compteur atomique in-flight partagé (incrément au post, décrément en tête de `processFrame`) ; si ≥ 2 en vol, ne pas poster (le flux converge vers « toujours la frame la plus fraîche »). ~10 lignes.
 *Effort* : S. *Risque* : faible.
 
-**F7 — `updateDynamicScale` : méthode IBomPads boguée + scan par émission (🔴 ERREUR #52).**
+**F7 — `updateDynamicScale` : méthode IBomPads boguée + scan par émission (ERREUR #52).** ✅ *Implémenté (suite 109) : paire de pads cachée par projet (extrêmes des deux diagonales, O(n)) + throttle 5 Hz du call site live tracking.*
 `Application.cpp:3728-3740` : `bestDist` est **remis à 0 à chaque composant** et `padB` écrasé → `padB` = pad le plus éloigné de `padA` *dans le dernier composant à pads*, pas globalement (deux pads voisins possibles → échelle instable/fausse). De plus la fonction est appelée **à chaque émission** (jusqu'à ~30 Hz avec flow) et la branche IBomPads scanne tous les pads de la carte à chaque fois.
 *Proposition* : corriger la recherche (max global, calculé **une fois** au chargement de l'iBOM et caché) + throttler `updateDynamicScale` à ~5 Hz. La méthode par défaut (Homography) n'est pas affectée par le bug mais bénéficie du throttle.
 *Effort* : S. *Risque* : nul.
@@ -151,7 +151,7 @@ Par lots compilables/validables en une session Jetson chacun, du meilleur ROI au
 
 | Lot | Contenu | Effet attendu |
 |-----|---------|---------------|
-| **A (quick wins)** | F1 défauts + F5 badge + F2 masque fallback + F7 fix scale | Le comportement « bon » devient celui par défaut ; plus de perte définitive ; badge fiable |
+| **A (quick wins)** ✅ fait (suite 109) | F1 défauts + F5 badge + F2 masque fallback + F7 fix scale | Le comportement « bon » devient celui par défaut ; plus de perte définitive ; badge fiable |
 | **B (robustesse flow)** | F3 prune outliers + F9 FB-check + F4 anti-saut | Suivi flow durablement propre ; plus d'« explosions » d'overlay |
 | **C (perf affichage)** | F13 transform inline, puis F11 warp overlay (si la re-capture post-suite-100 montre encore un coût overlay significatif) | GUI thread libéré, AA réactivable, cap 40 ms supprimé |
 | **D (fin de polish)** | F8 re-seed piloté attrition + F10 delta similarité + F6 backpressure | Micro-saut 1 Hz éliminé ; dérive microscope ralentie ; latence bornée |
