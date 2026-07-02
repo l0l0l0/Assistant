@@ -39,15 +39,6 @@ struct ComponentReanchorResult {
 class ComponentReanchor {
 public:
     struct Params {
-        // Explicit defaulted ctor: works around a GCC front-end bug (PR 88857)
-        // where a nested aggregate's default member initializers aren't
-        // resolved when the aggregate is built via `{}` as the default
-        // argument of a sibling member function of the enclosing class (see
-        // estimate() below) — hits exactly this shape and fails with
-        // "could not convert '<brace-enclosed initializer list>()' ...".
-        // No behavior change: same defaults, still built with `{}` everywhere.
-        Params() = default;
-
         /// Gating radius (px) around a component's predicted image position.
         /// A detection farther than this from every predicted position is
         /// unmatched. Should comfortably exceed expected drift.
@@ -85,8 +76,24 @@ public:
         const ibom::IBomProject& project,
         const Homography& currentPose,
         ibom::Layer activeLayer,
-        const std::vector<int>& classOfComponent = {},
-        const Params& params = {});
+        const std::vector<int>& classOfComponent,
+        const Params& params);
+
+    /// Convenience overload: default detection/RANSAC tuning (Params{}), no
+    /// class prior. Split from the form above — `Params` is a nested
+    /// aggregate, and giving it a `= {}` default argument here (evaluated
+    /// while ComponentReanchor itself is still being defined) hits a
+    /// standard-mandated restriction: a default member initializer cannot be
+    /// required to construct a member's default before the end of its
+    /// enclosing class. Defined out-of-line in the .cpp, where
+    /// ComponentReanchor (and Params) is already a complete type, so building
+    /// Params{} there is unproblematic.
+    static ComponentReanchorResult estimate(
+        const std::vector<ai::Detection>& detections,
+        const ibom::IBomProject& project,
+        const Homography& currentPose,
+        ibom::Layer activeLayer,
+        const std::vector<int>& classOfComponent = {});
 };
 
 } // namespace ibom::overlay

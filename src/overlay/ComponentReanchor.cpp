@@ -31,6 +31,22 @@ ComponentReanchorResult ComponentReanchor::estimate(
     const ibom::IBomProject& project,
     const Homography& currentPose,
     ibom::Layer activeLayer,
+    const std::vector<int>& classOfComponent)
+{
+    // Built here, not as a `= {}` default argument in the header: Params is a
+    // nested aggregate, and ComponentReanchor is a complete type by the time
+    // this translation unit compiles, so aggregate-initializing it from its
+    // default member initializers is unproblematic (see the declaration
+    // comment in ComponentReanchor.h for why the header can't do this).
+    return estimate(detections, project, currentPose, activeLayer,
+                    classOfComponent, Params{});
+}
+
+ComponentReanchorResult ComponentReanchor::estimate(
+    const std::vector<ai::Detection>& detections,
+    const ibom::IBomProject& project,
+    const Homography& currentPose,
+    ibom::Layer activeLayer,
     const std::vector<int>& classOfComponent,
     const Params& params)
 {

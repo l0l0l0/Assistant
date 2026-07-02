@@ -1385,28 +1385,34 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
 
-## ERREUR 53 — ComponentReanchor Params : bug GCC aggrégat imbriqué + argument par défaut
+## ERREUR 53 — ComponentReanchor Params : DMI d'aggrégat imbriqué requis avant fin de la classe englobante
 
 **Date :** 2026-07-02
-**Composant :** `src/overlay/ComponentReanchor.h` — build Jetson de PR #21 (empilée sur PR #20)
-**Statut :** ✅ RÉSOLU
+**Composant :** `src/overlay/ComponentReanchor.{h,cpp}` — build Jetson de PR #21 (empilée sur PR #20)
+**Statut :** ✅ RÉSOLU (2 itérations — la 1ère tentative a introduit une 2e erreur, voir « Fausse piste » ci-dessous)
 
-### Symptôme
+### Symptôme (1ère itération)
 Premier build Jetson tenté sur `claude/live-tracking-analysis-tr2h3j` : échec dès `[19/36]` sur `ComponentReanchor.cpp` **et** `Application.cpp` (qui inclut le header) :
 ```
 ComponentReanchor.h:80:33: error: could not convert ‘<brace-enclosed initializer list>()’ from
   ‘<brace-enclosed initializer list>’ to ‘const ibom::overlay::ComponentReanchor::Params&’
         const Params& params = {});
 ```
+`Params` est une struct **imbriquée** dans `ComponentReanchor`, pur aggrégat (uniquement des initialiseurs de membre par défaut — DMI —, aucun constructeur déclaré). `estimate()`, méthode **statique sœur** de `Params` dans la même classe englobante, la prend en paramètre par défaut : `const Params& params = {}`.
 
-### Cause
-`Params` est une struct **imbriquée** dans `ComponentReanchor`, avec uniquement des initialiseurs de membre par défaut (DMI) — aucun constructeur déclaré, donc un aggrégat au sens strict. `estimate()`, méthode **statique sœur** de `Params` dans la même classe englobante, la prend en paramètre par défaut : `const Params& params = {}`. C'est exactement le motif d'un bug front-end GCC de longue date ([PR 88857](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88857)) : quand un aggrégat imbriqué avec DMI est construit via `{}` **comme argument par défaut d'une autre méthode de la classe englobante**, GCC perd la trace des DMI au moment de la résolution du défaut et échoue à convertir `{}` vers le type. Le code n'avait **jamais été compilé** avant ce build (suite 103 : « ⚠️ Non compilé ici » à chaque mention) — c'est le premier build Jetson qui touche réellement `ComponentReanchor.{h,cpp}`.
+### Fausse piste (corrigée en 2e itération)
+Le diagnostic initial pointait vers un bug front-end GCC ([PR 88857](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88857)) et proposait comme fix un constructeur par défaut explicite `Params() = default;`. **Ce fix a fait régresser le build** avec une 2e erreur, cette fois sans ambiguïté sur sa nature :
+```
+ComponentReanchor.h:89:33: error: default member initializer for
+  ‘ibom::overlay::ComponentReanchor::Params::maxMatchDistPx’ required before the end of its enclosing class
+```
+En ajoutant un constructeur déclaré (même `= default`) à `Params`, sa construction par défaut cesse d'être une aggregate-init mécanique et devient un vrai appel de constructeur — dont la définition implicite a besoin des DMI. Or c'est une **règle du standard C++** (pas un bug compilateur) : un DMI ne peut pas être requis pour synthétiser un constructeur **avant que la classe englobante (`ComponentReanchor`, pas seulement `Params`) ne soit complète** — et ici le besoin surgit dès `estimate()` (ligne 89), donc *avant* l'accolade fermante de `ComponentReanchor`. Rétrospectivement, l'erreur de la 1ère itération était probablement déjà une manifestation de cette même règle standard (via le chemin d'aggregate-init plutôt que constructeur), pas un bug GCC isolé.
 
 ### Solution appliquée ✅
-Ajout d'un constructeur par défaut **explicite** `Params() = default;` en tête de la struct. Aucun changement de comportement (les valeurs par défaut restent portées par les DMI, `Params` reste construite via `{}` partout) — mais un constructeur défaut *utilisateur* déclaré, même `= default`, retire `Params` du statut d'aggrégat : sa construction passe désormais par un appel de constructeur ordinaire (compilé une fois, comme n'importe quelle méthode) au lieu d'une ré-résolution d'aggregate-init à chaque site d'argument par défaut — ce qui contourne le bug. **Vérifié avant application** : aucun site du code ne construit `Params` avec une syntaxe d'initialisation désignée (`Params{.champ = valeur}`, qui exige un vrai aggrégat en C++20) — le seul usage est l'argument par défaut `{}` dans le header et la définition dans le `.cpp`, donc rien ne casse.
+`Params` redevient un pur aggrégat (retrait du constructeur explicite). `estimate()` est scindée en **deux surcharges** : la forme complète (6 arguments, **aucun défaut**, `classOfComponent` et `params` tous deux requis) et une **surcharge de commodité** (5 arguments, seul `classOfComponent = {}` par défaut — `std::vector`, un type sans lien avec `ComponentReanchor`, donc hors du problème). La surcharge à 5 arguments est **définie dans le `.cpp`**, où elle construit `Params{}` avant de déléguer à la forme complète — à cet endroit, `ComponentReanchor` (et son membre `Params`) est un type **déjà complet**, donc l'aggregate-init des DMI n'est plus requise avant la fin de sa classe englobante. Seul appelant existant (`Application.cpp:1374`, 4 arguments explicites) : résout sans ambiguïté vers la surcharge à 5 arguments. Le code n'avait **jamais été compilé** avant ce build (suite 103 : « ⚠️ Non compilé ici » à chaque mention) — c'est le premier build Jetson qui touche réellement `ComponentReanchor.{h,cpp}`.
 
 ### Leçon
-Une struct **imbriquée** avec uniquement des DMI, utilisée comme **argument par défaut `{}`** d'une méthode **du même englobant**, est un terrain connu pour ce bug GCC — même sur des versions récentes (touché ici sur GCC de JetPack 6.2 / Ubuntu 22.04). Fix systématique et sans risque : donner à la struct un `NomStruct() = default;` explicite, *sauf* si du code existant compte sur la syntaxe d'initialisation désignée (`{.champ = ...}`), auquel cas il faut d'abord vérifier tous les sites d'usage (comme fait ici) avant d'ajouter le constructeur. Rappel plus large : tout code marqué « ⚠️ Non compilé ici » dans le journal de session doit être traité comme **non validé même syntaxiquement** jusqu'au premier build réel — les bugs de ce genre (spécifiques au compilateur, invisibles à la relecture) ne sont attrapables qu'à la compilation.
+Une struct **imbriquée** utilisée comme valeur par défaut `= {}` d'un paramètre d'une méthode **de la même classe englobante** viole une règle standard dès que sa construction implique la moindre "instanciation" (DMI requis pour un constructeur) déclenchée avant que l'englobant ne soit complet — que le type soit un aggrégat pur (le chemin échoue silencieusement avec un message de conversion confus) ou qu'on lui ajoute un constructeur explicite (le chemin échoue avec un message explicite mais toujours à cause de la même contrainte). **Le vrai fix n'est jamais côté `Params`** : c'est de sortir la construction de la valeur par défaut du corps de la classe — via une surcharge sans ce paramètre, définie hors-ligne (`.cpp` ou après l'accolade fermante de la classe), là où l'englobant est garanti complet. Rappel plus large (déjà noté en 1ère itération, confirmé ici) : tout code marqué « ⚠️ Non compilé ici » doit être traité comme **non validé même syntaxiquement** jusqu'au premier build réel ; et un fix non compilable localement doit être vérifié avec un soin particulier avant d'être proposé comme définitif — la 1ère itération de ce fix, plausible en lecture, s'est révélée fausse dès le build suivant.
 
 ## ERREUR 52 — `updateDynamicScale` IBomPads : recherche du pad le plus éloigné boguée + scan par émission
 
