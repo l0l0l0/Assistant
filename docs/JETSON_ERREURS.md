@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 53 | 2026-07-02 | ComponentReanchor.h — 1er build Jetson de PR #21 | ✅ RÉSOLU | [Build échoue : `const Params& params = {}` ne compile pas — bug GCC (nested aggregate + DMI utilisée comme argument par défaut d'une méthode sœur, PR GCC 88857)](#erreur-53--componentreanchor-params--bug-gcc-aggregat-imbrique--argument-par-defaut) |
 | 52 | 2026-07-01 | Application.cpp — updateDynamicScale | ✅ RÉSOLU | [Méthode d'échelle `IBomPads` : `bestDist` remis à zéro par composant → `padB` = pad le plus loin du *dernier* composant, pas globalement ; + scan de tous les pads à chaque émission d'homographie (jusqu'à ~30 Hz)](#erreur-52--updatedynamicscale-ibompads-recherche-du-pad-le-plus-eloigne-boguee--scan-par-emission) |
 | 51 | 2026-07-01 | TrackingWorker — buildBoardMask | ✅ RÉSOLU | [Masque de détection board sans récupération : si la carte sort de la zone masquée, `m_lastHomography` ne se met plus jamais à jour → tracking perdu définitivement (mode référence, aucun compteur d'échec)](#erreur-51--masque-board-fige-apres-perte--pas-de-fallback-plein-cadre) |
 | 50 | 2026-06-20 | tests/CMakeLists.txt — link PR #20 | ✅ RÉSOLU | [`test_tracking_worker` ne linke pas : `cv::calcOpticalFlowPyrLK` (opencv_video) + `cv::cuda::ORB::create` (opencv_cudafeatures2d) non résolus — le test linkait un sous-ensemble OpenCV figé](#erreur-50--test_tracking_worker-ne-linke-pas-modules-opencv-manquants) |
@@ -1383,6 +1384,29 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 53 — ComponentReanchor Params : bug GCC aggrégat imbriqué + argument par défaut
+
+**Date :** 2026-07-02
+**Composant :** `src/overlay/ComponentReanchor.h` — build Jetson de PR #21 (empilée sur PR #20)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier build Jetson tenté sur `claude/live-tracking-analysis-tr2h3j` : échec dès `[19/36]` sur `ComponentReanchor.cpp` **et** `Application.cpp` (qui inclut le header) :
+```
+ComponentReanchor.h:80:33: error: could not convert ‘<brace-enclosed initializer list>()’ from
+  ‘<brace-enclosed initializer list>’ to ‘const ibom::overlay::ComponentReanchor::Params&’
+        const Params& params = {});
+```
+
+### Cause
+`Params` est une struct **imbriquée** dans `ComponentReanchor`, avec uniquement des initialiseurs de membre par défaut (DMI) — aucun constructeur déclaré, donc un aggrégat au sens strict. `estimate()`, méthode **statique sœur** de `Params` dans la même classe englobante, la prend en paramètre par défaut : `const Params& params = {}`. C'est exactement le motif d'un bug front-end GCC de longue date ([PR 88857](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88857)) : quand un aggrégat imbriqué avec DMI est construit via `{}` **comme argument par défaut d'une autre méthode de la classe englobante**, GCC perd la trace des DMI au moment de la résolution du défaut et échoue à convertir `{}` vers le type. Le code n'avait **jamais été compilé** avant ce build (suite 103 : « ⚠️ Non compilé ici » à chaque mention) — c'est le premier build Jetson qui touche réellement `ComponentReanchor.{h,cpp}`.
+
+### Solution appliquée ✅
+Ajout d'un constructeur par défaut **explicite** `Params() = default;` en tête de la struct. Aucun changement de comportement (les valeurs par défaut restent portées par les DMI, `Params` reste construite via `{}` partout) — mais un constructeur défaut *utilisateur* déclaré, même `= default`, retire `Params` du statut d'aggrégat : sa construction passe désormais par un appel de constructeur ordinaire (compilé une fois, comme n'importe quelle méthode) au lieu d'une ré-résolution d'aggregate-init à chaque site d'argument par défaut — ce qui contourne le bug. **Vérifié avant application** : aucun site du code ne construit `Params` avec une syntaxe d'initialisation désignée (`Params{.champ = valeur}`, qui exige un vrai aggrégat en C++20) — le seul usage est l'argument par défaut `{}` dans le header et la définition dans le `.cpp`, donc rien ne casse.
+
+### Leçon
+Une struct **imbriquée** avec uniquement des DMI, utilisée comme **argument par défaut `{}`** d'une méthode **du même englobant**, est un terrain connu pour ce bug GCC — même sur des versions récentes (touché ici sur GCC de JetPack 6.2 / Ubuntu 22.04). Fix systématique et sans risque : donner à la struct un `NomStruct() = default;` explicite, *sauf* si du code existant compte sur la syntaxe d'initialisation désignée (`{.champ = ...}`), auquel cas il faut d'abord vérifier tous les sites d'usage (comme fait ici) avant d'ajouter le constructeur. Rappel plus large : tout code marqué « ⚠️ Non compilé ici » dans le journal de session doit être traité comme **non validé même syntaxiquement** jusqu'au premier build réel — les bugs de ce genre (spécifiques au compilateur, invisibles à la relecture) ne sont attrapables qu'à la compilation.
 
 ## ERREUR 52 — `updateDynamicScale` IBomPads : recherche du pad le plus éloigné boguée + scan par émission
 

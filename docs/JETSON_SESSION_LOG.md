@@ -11,6 +11,10 @@
 
 ---
 
+## État actuel — au 2026-07-02 (1er build Jetson de PR #21 — fix ComponentReanchor::Params, ERREUR #53)
+
+> **2026-07-02 (suite 115)** : **premier build Jetson réel de la branche `claude/live-tracking-analysis-tr2h3j`** (PR #21), lancé par l'utilisateur sur le Jetson (`ololo@jetson`). Échec à `[19/36]` sur `ComponentReanchor.cpp` et `Application.cpp` — **pas lié aux lots A-E** de cette session : `src/overlay/ComponentReanchor.h:80`, `const Params& params = {}` ne compile pas (« could not convert `<brace-enclosed initializer list>()`… »). Cause : bug GCC front-end de longue date ([PR 88857](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88857)) — une struct **imbriquée** (`Params`, aggrégat pur, uniquement des initialiseurs de membre par défaut) construite via `{}` **comme argument par défaut d'une méthode sœur** de la classe englobante (`ComponentReanchor::estimate`) n'est pas résolue correctement par GCC. Ce code (`ComponentReanchor`, suite 103, « re-ancrage IA composant ») **n'avait jamais été compilé** avant ce build — systématiquement noté « ⚠️ Non compilé ici » depuis son écriture. **Fix** : `Params() = default;` explicite en tête de la struct — retire son statut d'aggrégat (donc plus de ré-résolution DMI à chaque site d'argument par défaut, code path standard à la place), zéro changement de comportement. Vérifié avant application : aucun site du code n'utilise l'initialisation désignée (`Params{.champ=...}`) qui casserait avec un constructeur explicite. [ERREUR #53](JETSON_ERREURS.md#erreur-53--componentreanchor-params--bug-gcc-aggregat-imbrique--argument-par-defaut). Fichier : `src/overlay/ComponentReanchor.h`. ⚠️ Non recompilé ici (pas de toolchain dans cet environnement) — **action utilisateur : relancer le build sur le Jetson et coller la prochaine erreur éventuelle**, on itère. Rien à voir avec les lots A-E (TrackingWorker/Config/Application/CameraView/Homography/OverlayRenderer/ICameraSource) qui n'ont pas encore été atteints par le build au moment de cet échec.
+
 ## État actuel — au 2026-07-02 (PR #21 ouverte + revue de cohérence de tous les .md)
 
 > **2026-07-02 (suite 114)** : deux choses.

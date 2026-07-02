@@ -39,6 +39,15 @@ struct ComponentReanchorResult {
 class ComponentReanchor {
 public:
     struct Params {
+        // Explicit defaulted ctor: works around a GCC front-end bug (PR 88857)
+        // where a nested aggregate's default member initializers aren't
+        // resolved when the aggregate is built via `{}` as the default
+        // argument of a sibling member function of the enclosing class (see
+        // estimate() below) — hits exactly this shape and fails with
+        // "could not convert '<brace-enclosed initializer list>()' ...".
+        // No behavior change: same defaults, still built with `{}` everywhere.
+        Params() = default;
+
         /// Gating radius (px) around a component's predicted image position.
         /// A detection farther than this from every predicted position is
         /// unmatched. Should comfortably exceed expected drift.
