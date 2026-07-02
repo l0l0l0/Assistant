@@ -141,7 +141,7 @@ main.cpp
        ├─ CameraCapture (thread séparé → frameReady(FrameRef, captureNs) → CameraView)
        ├─ CameraCalibration (YAML, undistort)
        ├─ IBomParser (HTML → JSON → IBomProject, supporte LZ-String)
-       ├─ OverlayRenderer (pads + silkscreen + labels sur QImage)
+       ├─ OverlayRenderer (rendu espace carte 1× → warpé par CameraView via QTransform projectif)
        ├─ Homography (pcbToImage, transformRect, setMatrix)
        ├─ HeatmapRenderer (heatmap défauts)
        ├─ TrackingWorker (QThread dédié ORB+RANSAC, downscale 0.5×)
@@ -255,14 +255,14 @@ Defaults à connaître :
 - Caméra USB (MSMF/V4L2, 1920×1080@30fps), sélecteur de device
 - iBOM parsing (JSON direct + LZ-String compressé) → overlay pads/silkscreen/labels + BOM panel
 - Calibration caméra (checkerboard configurable, PDF patron intégré)
-- Homographie manuelle (4 points) + live tracking (ORB + RANSAC, thread dédié)
+- Homographie manuelle (4 points) + live tracking (flow LK à cadence caméra + re-seed ORB/MAGSAC, thread dédié)
 - Dynamic scale px/mm (depuis homographie ou pads iBOM) + adaptateur optique (0.5×–2×)
 - Settings dialog `Ctrl+,` (4 onglets, sauvegarde JSON)
 - Overlay toggles (Pads / Silkscreen / Fabrication), opacity slider
 - Camera fullscreen (double-clic → plein écran, Escape retour)
 - Dark/Light theme (`Theme.h` centralise toutes les couleurs — Catppuccin Mocha/Latte)
 - Help dialog (8 onglets), alignement 2 points
-- ORB tracking (TrackingWorker) : Lowe's ratio test, downscale configurable, timing spdlog::debug
+- Tracking (TrackingWorker) : flow LK par défaut (FB-check + pruning), ORB Lowe/MAGSAC en re-seed, masque escaladant, gates anti-saut/sanité, downscale configurable, logs verbose `[track]`
 
 ---
 
