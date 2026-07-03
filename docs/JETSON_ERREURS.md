@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 55 | 2026-07-02 | tests/test_component_reanchor.cpp — build | ✅ RÉSOLU | [`ai::Detection` ne résout pas à portée globale — `ai` est le namespace imbriqué `ibom::ai`, visible sans qualification seulement depuis `namespace ibom`](#erreur-55--aidetection-ne-resout-pas-a-portee-globale-dans-le-test) |
 | 54 | 2026-07-02 | TrackingWorker / Application — terrain | 🟡 CONTOURNÉ | [PCB soulevé puis reposé → live tracking « perd le nord » et ne récupère jamais — le gate anti-saut exige la continuité avec une pose devenue obsolète ; mitigations : bypass après 2 s sans pose saine + re-anchor automatique sur état Lost](#erreur-54--pcb-souleve-puis-repose--tracking-jamais-recupere) |
 | 53 | 2026-07-02 | ComponentReanchor.h — 1er build Jetson de PR #21 | ✅ RÉSOLU | [Build échoue : `const Params& params = {}` ne compile pas — bug GCC (nested aggregate + DMI utilisée comme argument par défaut d'une méthode sœur, PR GCC 88857)](#erreur-53--componentreanchor-params--bug-gcc-aggregat-imbrique--argument-par-defaut) |
 | 52 | 2026-07-01 | Application.cpp — updateDynamicScale | ✅ RÉSOLU | [Méthode d'échelle `IBomPads` : `bestDist` remis à zéro par composant → `padB` = pad le plus loin du *dernier* composant, pas globalement ; + scan de tous les pads à chaque émission d'homographie (jusqu'à ~30 Hz)](#erreur-52--updatedynamicscale-ibompads-recherche-du-pad-le-plus-eloigne-boguee--scan-par-emission) |
@@ -1385,6 +1386,28 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 55 — `ai::Detection` ne résout pas à portée globale dans le test
+
+**Date :** 2026-07-02
+**Composant :** `tests/test_component_reanchor.cpp` — build Jetson de la suite 118
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+```
+test_component_reanchor.cpp:46:1: error: 'ai' does not name a type
+   46 | ai::Detection detectionAt(cv::Point2f c)
+note: 'ibom::ai' declared here
+```
+
+### Cause
+`Detection` vit dans `namespace ibom::ai`. Le code de production (`ComponentReanchor.{h,cpp}`) écrit `ai::Detection` **depuis l'intérieur de `namespace ibom::overlay`**, où la recherche de nom remonte à `ibom` et trouve `ibom::ai`. Le fichier de test est à **portée globale** : `ai::` n'y résout rien.
+
+### Solution appliquée ✅
+Alias de namespace en tête du test : `namespace ai = ibom::ai;` — la même orthographe `ai::Detection` fonctionne alors partout dans le fichier, sans divergence avec le code de production.
+
+### Leçon
+Un test qui copie l'orthographe des types du code de production doit reproduire son **contexte de namespace** (être dans le même namespace, ou poser un alias). Les qualifications relatives (`ai::`, `overlay::`…) qui compilent dans `src/` ne compilent pas forcément à portée globale dans `tests/`.
 
 ## ERREUR 54 — PCB soulevé puis reposé : tracking jamais récupéré
 

@@ -19,6 +19,10 @@
 #include <vector>
 
 using ibom::overlay::ComponentReanchor;
+// The production code refers to ai::Detection from inside namespace
+// ibom::overlay, where `ai` resolves relative to `ibom`. This file is at
+// global scope — alias the nested namespace so the same spelling works.
+namespace ai = ibom::ai;
 
 namespace {
 
