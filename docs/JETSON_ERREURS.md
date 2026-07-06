@@ -15,6 +15,27 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 56 | 2026-07-02 | ComponentReanchor / IBomParser — Component::position | ✅ RÉSOLU | [`bootstrap: degenerate component layout` — `Component::position` reste (0,0) quand l'iBOM n'a pas de champ `center` → tout le re-anchor composant (bootstrap ET estimate, modèle compris) cassé ; fix : utiliser le centre de la bbox](#erreur-56--componentposition-non-remplie--re-anchor-composant-degenere) |
+| 55 | 2026-07-02 | tests/test_component_reanchor.cpp — build | ✅ RÉSOLU | [`ai::Detection` ne résout pas à portée globale — `ai` est le namespace imbriqué `ibom::ai`, visible sans qualification seulement depuis `namespace ibom`](#erreur-55--aidetection-ne-resout-pas-a-portee-globale-dans-le-test) |
+| 54 | 2026-07-02 | TrackingWorker / Application — terrain | 🟡 CONTOURNÉ | [PCB soulevé puis reposé → live tracking « perd le nord » et ne récupère jamais — le gate anti-saut exige la continuité avec une pose devenue obsolète ; mitigations : bypass après 2 s sans pose saine + re-anchor automatique sur état Lost](#erreur-54--pcb-souleve-puis-repose--tracking-jamais-recupere) |
+| 53 | 2026-07-02 | ComponentReanchor.h — 1er build Jetson de PR #21 | ✅ RÉSOLU | [Build échoue : `const Params& params = {}` ne compile pas — bug GCC (nested aggregate + DMI utilisée comme argument par défaut d'une méthode sœur, PR GCC 88857)](#erreur-53--componentreanchor-params--bug-gcc-aggregat-imbrique--argument-par-defaut) |
+| 52 | 2026-07-01 | Application.cpp — updateDynamicScale | ✅ RÉSOLU | [Méthode d'échelle `IBomPads` : `bestDist` remis à zéro par composant → `padB` = pad le plus loin du *dernier* composant, pas globalement ; + scan de tous les pads à chaque émission d'homographie (jusqu'à ~30 Hz)](#erreur-52--updatedynamicscale-ibompads-recherche-du-pad-le-plus-eloigne-boguee--scan-par-emission) |
+| 51 | 2026-07-01 | TrackingWorker — buildBoardMask | ✅ RÉSOLU | [Masque de détection board sans récupération : si la carte sort de la zone masquée, `m_lastHomography` ne se met plus jamais à jour → tracking perdu définitivement (mode référence, aucun compteur d'échec)](#erreur-51--masque-board-fige-apres-perte--pas-de-fallback-plein-cadre) |
+| 50 | 2026-06-20 | tests/CMakeLists.txt — link PR #20 | ✅ RÉSOLU | [`test_tracking_worker` ne linke pas : `cv::calcOpticalFlowPyrLK` (opencv_video) + `cv::cuda::ORB::create` (opencv_cudafeatures2d) non résolus — le test linkait un sous-ensemble OpenCV figé](#erreur-50--test_tracking_worker-ne-linke-pas-modules-opencv-manquants) |
+| 49 | 2026-06-20 | TrackingWorker.h — build PR #20 | ✅ RÉSOLU | [Build Jetson de PR #20 échoue : `processIncremental` déclaré deux fois dans `TrackingWorker.h` (artefact du refactor Phases 1-3)](#erreur-49--processincremental-declare-deux-fois-build-pr-20) |
+| 48 | 2026-06-19 | Application.cpp — sélection PCB Map | ✅ RÉSOLU | [Clic sur la PCB Map ne sélectionne pas le composant visé : recherche par centre le plus proche (`c.position`) peu fiable sur carte dense → hit-test bbox](#erreur-48--clic-pcb-map-ne-selectionne-pas-le-bon-composant-nearest-center-peu-fiable) |
+| 47 | 2026-06-19 | TrackingWorker.cpp — Live Tracking | ✅ RÉSOLU | [Overlay "vibre" pixel par pixel en Live Tracking sur scène statique — homographie refaite de zéro chaque frame sans lissage temporel](#erreur-47--overlay-vibre-en-live-tracking-sur-scene-statique-pas-de-lissage) |
+| 46 | 2026-06-19 | Application.cpp — overlay caméra | ✅ RÉSOLU | [« Reset Alignment ne fait rien » : l'overlay est dessiné seulement si `m_homography->isValid()`, donc quand l'homographie devient invalide le bloc est sauté et la dernière image d'overlay reste figée à l'écran (jamais effacée)](#erreur-46--reset-alignment-ne-fait-rien-overlay-fige) |
+| 45 | 2026-06-19 | IBomParser.cpp — détection pin 1 | ✅ RÉSOLU | [`pin1` lu uniquement comme booléen alors que l'iBOM l'encode en entier → pin 1 jamais détectée pour les parts dont le pad pin 1 n'est pas nommé "1" (ex. ESP32 U7)](#erreur-45--pin1-ibom-entier-non-detecte) |
+| 44 | 2026-06-19 | BoardLocator.cpp — Auto-Align | ✅ RÉSOLU | [Auto-Align via profondeur "réussit" à score faible (0.13) sur carte coplanaire → overlay décalé ; la feuille blanche sous la carte ne servait à rien car le contour 2D n'était jamais essayé](#erreur-44--auto-align-depth-faible-score-contour-jamais-essaye) |
+| 43 | 2026-06-19 | Application — sortie process | 🔴 OUVERT | [Segmentation fault au moment de quitter l'app (après "Application exiting with code 0") — non investigué](#erreur-43--segfault-a-la-sortie-de-lapplication) |
+| 42 | 2026-06-19 | Application.cpp / BoardMinimap | ✅ RÉSOLU | [Clic minimap déplaçait tout l'overlay sur D405 (anchor 1-point pensé pour microscope FOV étroit) au lieu de surligner le composant](#erreur-42--clic-minimap-deplace-loverlay-sur-realsense-au-lieu-de-highlighter) |
+| 41 | 2026-06-18 | BoardLocator.cpp — Auto-Align depth | 🟡 CONTOURNÉ | [Auto-Align D405 intermittent : carte posée à plat sur une surface coplanaire → le plan de profondeur englobe carte + table (2.5×), rejet par `validateSize()`](#erreur-41--auto-align-d405-carte-coplanaire-avec-la-table) |
+| 40 | 2026-06-18 | StatsPanel.cpp — Inspection Progress | 🔴 OUVERT | [`StatsPanel::setTotalComponents()` jamais appelé — le panneau Inspection Progress affiche toujours "No inspection data" / 0%](#erreur-40--settotalcomponents-jamais-appele--inspection-progress-toujours-a-zero) |
+| 39 | 2026-06-18 | BoardLocator.cpp / Application.cpp / RealSenseCapture.cpp / StatsPanel.cpp — D405 glare | ✅ RÉSOLU | [Distance/Auto-Align/self-cal faux sous glare D405 — depth fill bas non détecté](#erreur-39--distanceauto-alignself-cal-faux-sous-glare-d405) |
+| 38 | 2026-06-18 | Application.cpp / BoardLocator — Auto-Align D405 | ✅ RÉSOLU | [Auto-Align échoue sur D405 : scale px/mm périmé (calibration checkerboard à une autre distance/caméra) rejette le bon contour](#erreur-38--auto-align-echoue-sur-d405-scale-pxmm-perime) |
+| 37 | 2026-06-18 | Application.cpp / build Jetson | ✅ RÉSOLU | [Build Jetson échoue : variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`](#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard) |
+| 36 | 2026-06-18 | BoardLocator / Application — Auto-Align | ✅ RÉSOLU | [Audit Auto-Align : projet périmé dans le callback, pas de seuil de score, pas de filtre de couche, race avec alignement manuel](#erreur-36--audit-auto-align-projet-perime-pas-de-seuil-pas-de-filtre-de-couche-race) |
 | 35 | 2026-06-18 | TrackingWorker / ORB | ✅ RÉSOLU | [ORB tracking se verrouille sur le fond statique au lieu de la carte déplacée à la main — pas de masque de détection sur la zone carte](#erreur-35--orb-tracking-verrouille-sur-le-fond-statique-au-lieu-de-la-carte) |
 | 34 | 2026-06-17 | SettingsDialog / device combo | ✅ RÉSOLU | [Settings → Camera affiche "No camera detected" alors que la D405 streame — `enumerateCameras()` n'avait pas le même garde-fou que `Application::refreshCameraDeviceList()`](#erreur-34--settings-no-camera-detected-sur-d405-active) |
 | 33 | 2026-06-17 | IBomParser / minimap bbox | ✅ RÉSOLU | [Bounding boxes composants décalées/superposées sur la minimap — `bbox.pos` lu comme coin, `relpos`/`angle` iBOM ignorés](#erreur-33--bbox-composants-decalees-relposangle-ignores) |
@@ -1319,3 +1340,520 @@ Masquage de la détection ORB à la zone de la carte :
 
 ### Leçon
 Pour du tracking incrémental "objet tenu à la main sous caméra fixe", ne jamais laisser un détecteur de features tourner sans masque sur une scène contenant un fond statique potentiellement riche en texture — RANSAC n'a aucune notion sémantique de "l'objet d'intérêt", il optimise juste la cohérence du plus grand sous-ensemble.
+
+## ERREUR 36 — Audit Auto-Align : projet périmé, pas de seuil, pas de filtre de couche, race
+
+**Date :** 2026-06-18
+**Composant :** `src/overlay/BoardLocator.{h,cpp}`, `src/app/Application.{h,cpp}`
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Pas un bug rapporté par l'utilisateur — trouvé par un audit demandé explicitement (« peux tu faire un audit pour trouver des bugs ») sur le diff Auto-Align (`git diff origin/main HEAD`, 9 fichiers/695 lignes), via une revue multi-angles (code-review skill).
+
+### Causes et corrections
+1. **Projet iBOM périmé** — le callback `finished` de la lambda Auto-Align lisait le membre live `m_ibomProject` (peut changer ou devenir nul pendant la détection sur thread worker, si l'utilisateur charge un autre iBOM en attendant) au lieu de la copie `project` capturée au moment du dispatch. → `pcbCorners` reconstruit depuis `project->boardInfo.boardBBox`, `project` ajouté à la capture lambda.
+2. **`result.found` toujours vrai** — `BoardLocator::disambiguate()` n'appliquait aucun seuil minimal sur le score d'orientation ; un iBOM sans `boardOutline` ni composants sur la couche active fait que tous les 8 candidats scorent exactement 0.0, et le premier "gagne par défaut" (`bestScore` initialisé à -1.0) → reporté comme succès. → constante `kMinAcceptableScore = 0.10`, `result.found = !bestImgCorners.empty() && bestScore >= kMinAcceptableScore`.
+3. **Filtre de couche manquant** — `scoreOrientation()` rendait tous les composants (front+back) alors qu'`OverlayRenderer` ne rend que `m_activeLayer` ; dilue le score sur une carte double-face. → paramètre `ibom::Layer activeLayer` propagé `locate()`→`disambiguate()`→`scoreOrientation()`, filtre `if (comp.layer != activeLayer) continue;`.
+4. **Race avec un alignement manuel concurrent** — aucune notion d'ordre entre le résultat Auto-Align (arrivant après un délai sur thread worker) et un alignement manuel déclenché pendant ce délai ; le dernier à arriver écrasait l'autre silencieusement. → compteur `Application::m_alignmentEpoch`, incrémenté à chaque alignement appliqué, capturé au dispatch d'Auto-Align et vérifié dans le callback avant d'appliquer le résultat.
+5. **Échelle px/mm pas toujours rafraîchie** — `updateDynamicScale()` peut être un no-op selon `Config::scaleMethod()`. → calcul géométrique direct depuis la nouvelle homographie (même fallback que le handler 4-points manuel).
+
+### Non corrigé (limitation acceptée)
+`validateSize()` reste un no-op quand `expectedPixelsPerMm <= 0` (app jamais calibrée) — le fallback contour perd son principal garde-fou anti-faux-positif dans ce cas. Le seuil de score (point 2 ci-dessus) reste un second filet de sécurité. Documenté dans `docs/AUTO_ALIGN_PLAN.md` ("Risks") plutôt que corrigé ici.
+
+### Leçon
+Un `shared_ptr` capturé par valeur dans une lambda de thread d'arrière-plan garde l'objet en vie (pas de UAF), mais ne garantit pas la cohérence **logique** si le code de complétion mélange ensuite des lectures sur "la copie capturée" et sur "le membre live" qui a pu changer pendant l'attente — toujours lire exclusivement depuis la copie capturée une fois qu'on a basculé sur ce pattern.
+
+## ERREUR 37 — Variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`
+
+**Date :** 2026-06-18
+**Composant :** `src/app/Application.cpp` (`autoAlignBoard()`)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier build réel sur Jetson après le commit de l'audit Auto-Align (#36) :
+```
+error: no match for call to ‘(const cv::Point_<float>) (const char [38])’
+  tr("Auto-Align: aligned via %1 (score %2)")
+```
+Pas détecté ici (pas de toolchain Qt6/OpenCV dans ce conteneur) — remonté seulement au premier build sur la machine Jetson.
+
+### Cause
+Le fix #5 de l'audit #36 (calcul direct du scale px/mm depuis la nouvelle homographie) introduisait deux variables locales `tl`/`tr` (`cv::Point2f`) dans le lambda `finished` de `autoAlignBoard()`. `tr` masque la fonction membre `QObject::tr()` pour le **reste de la portée du lambda** — l'appel `tr("Auto-Align: aligned via %1...")` quelques lignes plus bas tente alors d'appeler l'opérateur `()` sur le `cv::Point2f` local, qui n'existe pas.
+
+Le code existant ailleurs dans le fichier (ex: handler 4-points manuel, ligne ~2058) utilise le même nom `tr` mais sans casser, car la variable y est déclarée dans un sous-bloc `if/else` qui se termine **avant** le prochain appel à `tr(...)`, donc pas de masquage au moment de l'appel — piège purement dépendant de la portée, pas du nom en lui-même.
+
+### Solution appliquée ✅
+Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
+
+### Leçon
+Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 56 — `Component::position` non remplie → re-anchor composant dégénéré
+
+**Date :** 2026-07-02
+**Composant :** `src/overlay/ComponentReanchor.cpp` + `src/ibom/IBomParser.cpp`
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Log terrain (D405, carte réelle, chemin blob model-free de la suite 121) :
+```
+Auto-Align: component bootstrap (blobs) didn't lock (bootstrap: degenerate component layout), falling back to board outline
+```
+à **chaque** tentative → l'Auto-Align composant ne démarre jamais, retombe sur le géométrique (qui échoue aussi, carte coplanaire).
+
+### Cause
+`ComponentReanchor::bootstrap()` et `estimate()` (suite 103/118) prenaient la position des composants dans **`Component::position`**. Or `IBomParser` ne remplit `position` que si le footprint iBOM contient un champ `"center"` (`if (fp.contains("center")) comp.position = readPoint(fp["center"]);`) — **beaucoup d'iBOM ne l'ont pas** (ils ne portent que la `bbox` avec `pos`/`relpos`/`angle`/`size`). Sur la carte de l'utilisateur, `center` est absent → `position` reste à son défaut **(0,0) pour TOUS les composants** → le nuage de composants est un point unique → `layoutDiag ≈ 0` → garde « degenerate component layout ». **Conséquence large** : tout le re-anchor composant était cassé sur ces iBOM, **modèle entraîné compris** (pas seulement les blobs) — jamais détecté avant car ce chemin n'avait jamais tourné en vrai (models/ vide, estimate() jamais atteint faute de pose valide au bon moment).
+
+### Solution appliquée ✅
+1. **`ComponentReanchor.cpp`** : nouveau helper `componentCenter(c)` = **centre de la bbox** (`(minX+maxX)/2, (minY+maxY)/2`), toujours calculée par le parser ; fallback sur `position` si la bbox est dégénérée. Utilisé dans `bootstrap()` et `estimate()` à la place de `c.position`.
+2. **`IBomParser.cpp`** : quand le footprint n'a pas de `"center"`, `comp.position` est désormais initialisée au **centre de la bbox** (après calcul de celle-ci) → `position` redevient significative pour tout autre consommateur.
+3. **Logs enrichis** dans `bootstrap()** : nombre de composants, diag du layout (mm), nombre de détections, et raison d'échec du consensus détaillée (`N comps, M dets`) — pour diagnostiquer la prochaine étape (est-ce le nombre de blobs ? le consensus ?).
+4. **Tests** : `test_component_reanchor` et `test_blob_detector` remplissent maintenant une bbox autour du centre (exercent le vrai chemin bbox au lieu du fallback).
+
+### Leçon
+Un champ « optionnel » d'un format externe (`center` iBOM) utilisé comme s'il était garanti = bombe à retardement. La `bbox` est la source **toujours disponible** de la position d'un composant (c'est déjà ce que l'overlay et la minimap utilisent — cf. ERREUR #33) ; tout code géométrique composant doit s'appuyer dessus, pas sur `position`. Vérifier systématiquement, pour un champ lu d'un JSON externe, ce qui se passe **quand il est absent**.
+
+## ERREUR 55 — `ai::Detection` ne résout pas à portée globale dans le test
+
+**Date :** 2026-07-02
+**Composant :** `tests/test_component_reanchor.cpp` — build Jetson de la suite 118
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+```
+test_component_reanchor.cpp:46:1: error: 'ai' does not name a type
+   46 | ai::Detection detectionAt(cv::Point2f c)
+note: 'ibom::ai' declared here
+```
+
+### Cause
+`Detection` vit dans `namespace ibom::ai`. Le code de production (`ComponentReanchor.{h,cpp}`) écrit `ai::Detection` **depuis l'intérieur de `namespace ibom::overlay`**, où la recherche de nom remonte à `ibom` et trouve `ibom::ai`. Le fichier de test est à **portée globale** : `ai::` n'y résout rien.
+
+### Solution appliquée ✅
+Alias de namespace en tête du test : `namespace ai = ibom::ai;` — la même orthographe `ai::Detection` fonctionne alors partout dans le fichier, sans divergence avec le code de production.
+
+### Leçon
+Un test qui copie l'orthographe des types du code de production doit reproduire son **contexte de namespace** (être dans le même namespace, ou poser un alias). Les qualifications relatives (`ai::`, `overlay::`…) qui compilent dans `src/` ne compilent pas forcément à portée globale dans `tests/`.
+
+## ERREUR 54 — PCB soulevé puis reposé : tracking jamais récupéré
+
+**Date :** 2026-07-02
+**Composant :** `src/overlay/TrackingWorker.cpp` (gate anti-saut lot B) + `src/app/Application.cpp` — rapport terrain (Jetson + D405, build PR #21)
+**Statut :** 🟡 CONTOURNÉ (mitigations posées ; cause racine exacte non confirmée faute de log verbose — à capturer si récidive)
+
+### Symptôme
+Live tracking actif et fonctionnel (« ça va mieux » vs avant les lots). L'utilisateur **soulève le PCB** : le tracking « perd le nord » — puis, la carte **reposée**, **plus rien ne bouge, définitivement**. Aucune récupération automatique.
+
+### Cause (analyse statique — la plus probable)
+Le gate anti-saut (lot B, F4) exige **2 estimées consécutives concordantes** avant d'accepter une pose déplacée de > 15 % de la diagonale — la référence de comparaison étant `m_lastEmittedH`, la **dernière pose émise**. Pendant la manipulation (carte en l'air, floue, occultée par la main), soit aucune pose saine n'est produite, soit les poses saines sont retenues en attente de confirmation qui n'arrive jamais (mouvement continu → deux ticks consécutifs diffèrent de plus que la tolérance). Une fois la carte reposée, chaque fit sain est comparé à une `m_lastEmittedH` **obsolète** (la pose d'avant/pendant le soulèvement) : la logique de continuité peut rester coincée selon la séquence exacte (alternance flow/ORB, re-seeds, poses aberrantes émises pendant la manip). D'autres facteurs possibles non exclus : référence ORB ne matchant plus (éclairage/aspect changé après manipulation), interaction avec le re-seed seamless (lot D). **Sans log verbose de l'épisode, la chaîne exacte n'est pas tranchée** — les deux mitigations ci-dessous couvrent toute la classe de problème.
+
+### Mitigations appliquées 🟡 (suite 117)
+1. **Worker — bypass de récupération du gate anti-saut** : nouvel horodatage `m_lastHealthyPoseMs` rafraîchi à chaque décision de pose saine (EMIT **ou** hold scène-statique — les deux attestent d'un fit cohérent). Si **> 2 s** se sont écoulées sans pose saine au moment où un fit sain à grand déplacement arrive, la confirmation à 2 estimées est **bypassée** : la pose est acceptée immédiatement avec snap des filtres 1€ (log `[track] jump accepted (recovery after N ms...)`). Rationale : après une longue sécheresse, « la pose précédente » n'a plus de valeur de prior — exiger la continuité avec elle est précisément ce qui tue la reprise. Les holds statiques rafraîchissant l'horodatage, le gate reste **pleinement armé** pendant la visualisation statique normale (un fit dégénéré isolé y reste bloqué comme avant).
+2. **Application — re-anchor automatique sur perte** : à la transition vers l'état **Lost** (live mode + iBOM chargé), une chaîne de récupération s'arme (une seule à la fois, `m_lostRecoveryArmed`) : après 800 ms (le temps que le worker se remette seul — masque plein-cadre + bypass ci-dessus), si toujours Lost → **re-localisation d'office** : `componentReanchor(silent)` si un détecteur IA est chargé, sinon `autoAlignBoard(silent)` — **indépendamment du réglage `reanchor_enabled`** (c'est de la récupération de perte, pas de la correction périodique de dérive). Re-tentative toutes les 3 s tant que Lost persiste ; la chaîne s'éteint dès que le tracking récupère ou que le live mode s'arrête. Message status : « Tracking: LOST — re-anchoring automatically… ».
+
+### Mise à jour (suite 120) — back-off de la boucle de récupération
+Retour terrain (log utilisateur) : sur une carte **plein cadre posée à plat sur une surface coplanaire** et **sans détecteur IA chargé**, la chaîne de récupération LOST relançait `autoAlignBoard(silent)` **toutes les 3 s à l'infini** — BoardLocator échoue structurellement là (région depth ≫ carte, ERREUR #41) → spam log sans aucun espoir de succès. Fix : `m_lostRecoveryAttempts` — les 3 premières tentatives géométriques restent à 3 s, puis **back-off à 15 s** + **un message utilisateur unique** (« Tracking lost — auto re-anchor can't recover on this view. Align manually…, lift the board…, or load an AI model »). Avec un détecteur chargé, la cadence reste à 3 s (le bootstrap composant peut réussir sur cette scène — c'est justement son cas d'usage). **Ça ne résout pas la cause du LOST** (voir ci-dessous), ça rend juste l'échec honnête et non-spammant. La vraie sortie pour cette scène = **le modèle `component_detector.onnx`** (bootstrap détection-first) ou l'alignement manuel.
+
+### Reste à faire pour clore
+Reproduire l'épisode (soulever/reposer la carte) avec **Dev → Verbose debug logging** actif et fournir le log : les entrées `[track] HELD jump` / `jump accepted (recovery...)` / `detect/match miss` / `seamless ORB re-seed` autour de l'épisode permettront de confirmer **pourquoi le tracker part LOST et n'y revient pas seul** (référence ORB périmée après manipulation ? carte réellement déplacée ? peu de texture en gros plan ?) et de passer l'entrée en ✅.
+
+### Leçon
+Tout gate de continuité (comparaison à « la dernière bonne pose ») doit avoir une **péremption** : au-delà d'un certain âge, la référence de continuité n'est plus une information mais un piège. Même principe que l'ERREUR #51 (masque périmé → fallback plein cadre) : un mécanisme conditionné à l'état passé doit toujours avoir un chemin de dégradation quand cet état devient obsolète.
+
+## ERREUR 53 — ComponentReanchor Params : DMI d'aggrégat imbriqué requis avant fin de la classe englobante
+
+**Date :** 2026-07-02
+**Composant :** `src/overlay/ComponentReanchor.{h,cpp}` — build Jetson de PR #21 (empilée sur PR #20)
+**Statut :** ✅ RÉSOLU (2 itérations — la 1ère tentative a introduit une 2e erreur, voir « Fausse piste » ci-dessous)
+
+### Symptôme (1ère itération)
+Premier build Jetson tenté sur `claude/live-tracking-analysis-tr2h3j` : échec dès `[19/36]` sur `ComponentReanchor.cpp` **et** `Application.cpp` (qui inclut le header) :
+```
+ComponentReanchor.h:80:33: error: could not convert ‘<brace-enclosed initializer list>()’ from
+  ‘<brace-enclosed initializer list>’ to ‘const ibom::overlay::ComponentReanchor::Params&’
+        const Params& params = {});
+```
+`Params` est une struct **imbriquée** dans `ComponentReanchor`, pur aggrégat (uniquement des initialiseurs de membre par défaut — DMI —, aucun constructeur déclaré). `estimate()`, méthode **statique sœur** de `Params` dans la même classe englobante, la prend en paramètre par défaut : `const Params& params = {}`.
+
+### Fausse piste (corrigée en 2e itération)
+Le diagnostic initial pointait vers un bug front-end GCC ([PR 88857](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88857)) et proposait comme fix un constructeur par défaut explicite `Params() = default;`. **Ce fix a fait régresser le build** avec une 2e erreur, cette fois sans ambiguïté sur sa nature :
+```
+ComponentReanchor.h:89:33: error: default member initializer for
+  ‘ibom::overlay::ComponentReanchor::Params::maxMatchDistPx’ required before the end of its enclosing class
+```
+En ajoutant un constructeur déclaré (même `= default`) à `Params`, sa construction par défaut cesse d'être une aggregate-init mécanique et devient un vrai appel de constructeur — dont la définition implicite a besoin des DMI. Or c'est une **règle du standard C++** (pas un bug compilateur) : un DMI ne peut pas être requis pour synthétiser un constructeur **avant que la classe englobante (`ComponentReanchor`, pas seulement `Params`) ne soit complète** — et ici le besoin surgit dès `estimate()` (ligne 89), donc *avant* l'accolade fermante de `ComponentReanchor`. Rétrospectivement, l'erreur de la 1ère itération était probablement déjà une manifestation de cette même règle standard (via le chemin d'aggregate-init plutôt que constructeur), pas un bug GCC isolé.
+
+### Solution appliquée ✅
+`Params` redevient un pur aggrégat (retrait du constructeur explicite). `estimate()` est scindée en **deux surcharges** : la forme complète (6 arguments, **aucun défaut**, `classOfComponent` et `params` tous deux requis) et une **surcharge de commodité** (5 arguments, seul `classOfComponent = {}` par défaut — `std::vector`, un type sans lien avec `ComponentReanchor`, donc hors du problème). La surcharge à 5 arguments est **définie dans le `.cpp`**, où elle construit `Params{}` avant de déléguer à la forme complète — à cet endroit, `ComponentReanchor` (et son membre `Params`) est un type **déjà complet**, donc l'aggregate-init des DMI n'est plus requise avant la fin de sa classe englobante. Seul appelant existant (`Application.cpp:1374`, 4 arguments explicites) : résout sans ambiguïté vers la surcharge à 5 arguments. Le code n'avait **jamais été compilé** avant ce build (suite 103 : « ⚠️ Non compilé ici » à chaque mention) — c'est le premier build Jetson qui touche réellement `ComponentReanchor.{h,cpp}`.
+
+### Leçon
+Une struct **imbriquée** utilisée comme valeur par défaut `= {}` d'un paramètre d'une méthode **de la même classe englobante** viole une règle standard dès que sa construction implique la moindre "instanciation" (DMI requis pour un constructeur) déclenchée avant que l'englobant ne soit complet — que le type soit un aggrégat pur (le chemin échoue silencieusement avec un message de conversion confus) ou qu'on lui ajoute un constructeur explicite (le chemin échoue avec un message explicite mais toujours à cause de la même contrainte). **Le vrai fix n'est jamais côté `Params`** : c'est de sortir la construction de la valeur par défaut du corps de la classe — via une surcharge sans ce paramètre, définie hors-ligne (`.cpp` ou après l'accolade fermante de la classe), là où l'englobant est garanti complet. Rappel plus large (déjà noté en 1ère itération, confirmé ici) : tout code marqué « ⚠️ Non compilé ici » doit être traité comme **non validé même syntaxiquement** jusqu'au premier build réel ; et un fix non compilable localement doit être vérifié avec un soin particulier avant d'être proposé comme définitif — la 1ère itération de ce fix, plausible en lecture, s'est révélée fausse dès le build suivant.
+
+## ERREUR 52 — `updateDynamicScale` IBomPads : recherche du pad le plus éloigné boguée + scan par émission
+
+**Date :** 2026-07-01
+**Composant :** `src/app/Application.cpp` — `updateDynamicScale()` (branche `ScaleMethod::IBomPads`)
+**Statut :** ✅ RÉSOLU (fix appliqué en suite 109 — à valider au prochain build Jetson)
+
+### Symptôme
+Avec `scaleMethod = IBomPads`, l'échelle px/mm peut être instable ou fausse : elle est calculée entre `padA` (premier pad du premier composant) et un `padB` qui n'est **pas** le pad le plus éloigné de la carte.
+
+### Cause
+Dans la boucle de recherche (`Application.cpp:3728-3740`), `double bestDist = 0;` est déclaré **à l'intérieur** de la boucle sur les composants → remis à zéro à chaque composant, et `padB` écrasé à chaque itération. Résultat : `padB` = pad le plus éloigné de `padA` **dans le dernier composant qui a des pads**, qui peut être voisin de `padA` (« too close, unreliable » n'attrape que < 1 mm). Par ailleurs `updateDynamicScale()` est appelé **à chaque émission d'homographie** (`Application.cpp:1603`, jusqu'à ~30 Hz avec l'optical flow) et cette branche re-scanne tous les pads de la carte à chaque appel.
+
+### Solution appliquée ✅ (suite 109)
+1. La paire de pads de référence est désormais **cachée par projet** (`m_scaleRefProject` comme tag d'identité + positions copiées par valeur) et recalculée en un seul passage O(n) : extrêmes le long des deux diagonales (x+y et x−y), on garde la paire la plus éloignée des deux candidates — pas le diamètre exact, mais ≥ diagonale/√2, largement suffisant comme base d'échelle.
+2. L'appel depuis le handler `homographyUpdated` (live tracking) est **throttlé à ~5 Hz** (`m_lastScaleUpdateMs`, 200 ms). Les appels événementiels (alignement, re-anchor) restent directs et non throttlés.
+
+La méthode par défaut (`Homography`) n'était pas affectée par le bug de recherche, seulement par l'absence de throttle. Analyse complète : [LIVE_TRACKING_ANALYSE_2026-07.md](LIVE_TRACKING_ANALYSE_2026-07.md) (finding **F7**).
+
+### Leçon
+Déclarer les accumulateurs de recherche (`best…`) **hors** de la boucle qu'ils accumulent. Toute fonction branchée sur `homographyUpdated` doit être considérée comme appelée à cadence caméra (30 Hz), pas « de temps en temps ».
+
+## ERREUR 51 — Masque board figé après perte : pas de fallback plein cadre
+
+**Date :** 2026-07-01
+**Composant :** `src/overlay/TrackingWorker.cpp` — `buildBoardMask()` / `processReference()`
+**Statut :** ✅ RÉSOLU (fix appliqué en suite 109 + test de régression — à valider au prochain build Jetson)
+
+### Symptôme
+En live tracking (mode référence), si la carte se déplace vite/loin entre deux ticks ORB (main qui bouge la carte, bump de la caméra, FOV changé), le suivi peut se perdre **définitivement** : l'overlay reste figé et ne ré-accroche jamais, jusqu'à un re-anchor manuel (Auto-Align) ou périodique.
+
+### Cause
+Le masque de détection ORB (`buildBoardMask`, `TrackingWorker.cpp:137-171` — introduit par l'ERREUR #35 pour empêcher le verrouillage sur le fond) projette le polygone carte via `m_lastHomography`, qui n'est mise à jour **que sur estimation réussie** (`:459`, `:681`, `:789`). Si la carte sort de la zone masquée (marge ×1.6 seulement), l'ORB ne détecte plus que du fond dans un masque périmé → aucun match → aucune mise à jour de `m_lastHomography` → **le masque reste faux pour toujours** (boucle morte silencieuse). Le chemin référence n'a **aucun compteur d'échecs** (`m_lostFrames` ne sert qu'au mode incrémental) : `processReference` sort par des `return` muets (`:662`, `:667`), sans même passer l'état à `Lost`.
+
+### Solution appliquée ✅ (suite 109)
+`m_lostFrames` (jusque-là réservé au mode incrémental) compte désormais les échecs consécutifs **dans les deux modes** via le helper `noteDetectMiss()` (qui passe aussi l'état à Lost après 4 échecs). Dans `processFrame`, le masque **escalade** avec ce compteur : marge normale ×1.6 (< 3 échecs) → marge élargie ×2.5 (3–5) → **masque abandonné** = détection plein cadre (≥ 6), jusqu'à ré-acquisition (reset du compteur à tout fit sain — référence, flow ou incrémental). Garde-fous : (a) l'escalade ne s'applique qu'une fois une référence capturée — la **capture** de référence reste toujours masquée, sinon des keypoints de fond contamineraient le set de référence (retour de l'ERREUR #35) ; (b) `m_lastHomography` (donc le masque) et le seed optical-flow ne sont plus mis à jour que par un fit **sain** (`inliers ≥ minMatchCount`) — une estimée dégénérée ne peut plus pointer le masque au mauvais endroit. Au passage : le chemin référence rapporte enfin `Locked` (le badge UI restait sur « LOST » en ORB pur — finding F5). **Test de régression ajouté** (`tests/test_tracking_worker.cpp` : « re-acquires after the board leaves the masked area » — carte translatée de 400 px hors masque → ré-acquisition ≤ 12 frames + pose correcte + badge Locked). Analyse complète : [LIVE_TRACKING_ANALYSE_2026-07.md](LIVE_TRACKING_ANALYSE_2026-07.md) (finding **F2**).
+
+### Leçon
+Tout mécanisme qui **conditionne la perception à la dernière estimation** (masque, ROI, fenêtre de recherche) doit avoir un chemin de dégradation vers « chercher partout » après N échecs, sinon une seule sortie du domaine de validité devient irréversible.
+
+## ERREUR 50 — `test_tracking_worker` ne linke pas : modules OpenCV manquants
+
+**Date :** 2026-06-20
+**Composant :** `tests/CMakeLists.txt` (+ `CMakeLists.txt` racine)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Après le fix #49, le build avance : **le binaire `MicroscopeIBOM` compile ET linke** (`[63/64]`), mais le **test** `test_tracking_worker` échoue au link :
+
+```
+undefined reference to `cv::calcOpticalFlowPyrLK(...)'
+undefined reference to `cv::cuda::ORB::create(int, float, int, int, int, int, int, int, int, bool)'
+```
+
+### Cause
+La cible de test `test_tracking_worker` (dans `tests/CMakeLists.txt`) linkait un **sous-ensemble OpenCV figé** : `opencv_core opencv_imgproc opencv_calib3d opencv_features2d`. Or le refactor Phase 3 de `TrackingWorker.cpp` ajoute deux nouvelles dépendances : (a) `cv::calcOpticalFlowPyrLK` → module **`opencv_video`** ; (b) `cv::cuda::ORB::create` → module **`opencv_cudafeatures2d`** (compilé car `IBOM_HAVE_OPENCV_CUDA=1` est posé **globalement** via `add_compile_definitions`, donc le test compile aussi le chemin GPU). Ni `video` ni les modules CUDA n'étaient dans la liste de link du test. La cible **principale** linke `${OpenCV_LIBS}` (jeu complet trouvé à la racine, incluant les modules CUDA optionnels) → elle, linkait sans souci.
+
+### Solution appliquée ✅
+1. `tests/CMakeLists.txt` : `test_tracking_worker` linke désormais **`${OpenCV_LIBS}`** (comme la cible principale) au lieu du sous-ensemble explicite → récupère automatiquement `opencv_video` + les modules CUDA optionnels présents.
+2. `CMakeLists.txt` racine : ajout du composant **`video`** à `find_package(OpenCV ... COMPONENTS …)` pour rendre la dépendance explicite et garantir que `${OpenCV_LIBS}` contient `opencv_video` pour les deux cibles.
+
+### Leçon
+Quand un module ajoute une dépendance OpenCV (ici video + cuda), les cibles de **test** qui recompilent ce `.cpp` avec une liste de link figée cassent même si la cible principale (qui linke `${OpenCV_LIBS}`) passe. Préférer `${OpenCV_LIBS}` pour toute cible recompilant un `.cpp` du tronc, ou tenir la liste explicite synchronisée. Penser que `IBOM_HAVE_OPENCV_CUDA` est **global** : tout `.cpp` qui inclut le chemin GPU a besoin des libs CUDA au link, tests compris.
+
+## ERREUR 49 — `processIncremental` déclaré deux fois (build PR #20)
+
+**Date :** 2026-06-20
+**Composant :** `src/overlay/TrackingWorker.h`
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier build Jetson de la PR #20 (`claude/pensive-euler-pvde0v`, refactor Live Tracking Phases 1-3, `-DIBOM_HAVE_OPENCV_CUDA=1`). Échec à la compilation de toute cible incluant `TrackingWorker.h` (test_tracking_worker + MOC MicroscopeIBOM) :
+
+```
+src/overlay/TrackingWorker.h:163:10: error: 'void ibom::overlay::TrackingWorker::processIncremental(...)' cannot be overloaded with 'void ibom::overlay::TrackingWorker::processIncremental(...)'
+  163 |     void processIncremental(const std::vector<cv::KeyPoint>& kp, const cv::Mat& desc);
+src/overlay/TrackingWorker.h:161:10: note: previous declaration ...
+```
+
+### Cause
+Artefact de copier-coller du refactor multi-phases : la déclaration de `processIncremental` (avec son commentaire `/// Incremental matching...`) apparaissait **deux fois de suite** (lignes 160-161 et 162-163). Deux déclarations identiques de la même méthode = surcharge impossible → erreur. Le `.cpp` ne la définit qu'une fois, donc seul le header était en faute. Jamais attrapé avant car PR #20 n'avait **jamais été compilée** (cf. son propre descriptif) — la CI ne build pas le C++, seul un build Jetson l'attrape (rappel récurrent, cf. erreurs #19/#20).
+
+### Solution appliquée ✅
+Suppression de la paire commentaire + déclaration en double dans `TrackingWorker.h` (on garde une seule déclaration). Aucune autre modification.
+
+### Leçon
+Après un refactor lourd d'un header `Q_OBJECT` (MOC), faire un `grep -c 'void <method>'` sur les nouvelles méthodes pour repérer les doublons avant de pousser. Toute PR non compilée sur la cible doit être considérée comme « probablement cassée » tant qu'un build Jetson ne l'a pas validée.
+
+## ERREUR 48 — Clic PCB Map ne sélectionne pas le bon composant (nearest-center peu fiable)
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` — handler `BoardMinimap::anchorRequested`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+« On ne peut toujours pas cliquer sur le composant dans la map pour le sélectionner » : cliquer sur une part dans la PCB Map ne sélectionne pas (ou sélectionne un mauvais) composant, en multi-align comme en sélection simple.
+
+### Cause
+Les deux chemins de clic minimap (branche multi-align + branche RealSense) cherchaient le composant dont le **centre** (`c.position`) était le plus proche du point cliqué (`std::hypot` min). Sur une carte dense, le centre d'un gros composant voisin peut être plus proche du clic que le petit composant qu'on vise pile dessus → mauvaise sélection, impression que « ça ne marche pas ».
+
+### Solution appliquée
+Nouveau helper `Application::componentAtPcb(cv::Point2f)` : **hit-test bbox** d'abord — parmi les composants Front dont la bbox **contient** le point cliqué, prendre le **plus petit** (le plus spécifique) ; repli sur le centre le plus proche uniquement si le clic tombe sur du board nu (aucune bbox ne contient le point). Utilisé dans les deux chemins. Fichiers `src/app/Application.{h,cpp}`.
+
+### Leçon
+Pour « cliquer sur un objet pour le sélectionner », tester l'**appartenance géométrique** (point-dans-bbox/polygone) avant de retomber sur une distance au centre. Le nearest-center seul échoue dès que les objets ont des tailles très différentes et se touchent.
+
+---
+
+## ERREUR 47 — Overlay vibre en Live Tracking sur scène statique (pas de lissage)
+
+**Date** : 2026-06-19
+**Composant** : `TrackingWorker.cpp` — Live Tracking (ORB+RANSAC)
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Retour utilisateur (après confirmation que le live tracking fonctionne bien : 4/4 inliers, erreur 0.000px) : « c'est pas mal le live tracking mais ça vibre après si je ne bouge rien ». L'overlay tremble visiblement de quelques pixels alors que la caméra et la carte sont parfaitement immobiles.
+
+### Cause
+`processReference()` et `processIncremental()` recalculent une homographie **entièrement nouvelle** à chaque frame traitée (ORB + BFMatcher + `cv::findHomography` RANSAC), sans aucun lissage temporel ni comparaison avec l'estimée précédente. Même sur une scène strictement statique, le bruit de localisation sub-pixel des keypoints ORB (et la sélection aléatoire des inliers par RANSAC) fait varier légèrement le fit d'une frame à l'autre. Cette variation, bien que faible en pixels, est directement visible sur l'overlay qui suit cette homographie à chaque update.
+
+### Solution appliquée
+Nouvelle méthode `TrackingWorker::smoothHomography(rawH)` appliquée uniquement à la **valeur émise** (`homographyUpdated`), pas aux accumulateurs internes (`m_cumulativeH`, `m_lastHomography`) :
+1. Projette `m_pcbPolygon` (4 coins du board bbox, déjà disponibles via `setBoardPolygon()`) à travers la dernière estimée **lissée** (`m_smoothedHomography`) et la nouvelle estimée **brute**.
+2. Mesure le déplacement max des coins projetés entre les deux.
+3. Déplacement ≤ 1.5px → bruit, blend très amorti (poids 0.15 sur la nouvelle estimée) ; ≥ 12px → vrai mouvement, blend = 1.0 (aucun lag) ; entre les deux → rampe linéaire.
+4. Refit une homographie via `cv::findHomography(pcbPolygon, blendedPts, method=0)` (DLT least-squares).
+
+Repli sans lissage si `m_pcbPolygon` a moins de 4 points. Reset dans `resetReference()`. Fichiers `src/overlay/TrackingWorker.{h,cpp}`.
+
+### Leçon
+Une estimée géométrique (homographie, pose...) recalculée indépendamment à chaque frame depuis des données bruitées (keypoints, RANSAC) **vibrera visuellement** même sans mouvement réel, sauf lissage temporel explicite. Le lissage doit comparer un déplacement géométrique concret (ici : déplacement des coins projetés en pixels) plutôt que les coefficients bruts de la matrice — moyenner des matrices d'homographie élément par élément n'a pas de sens géométrique direct.
+
+### Suivi (suite 86) — Phase 1 du plan Live Tracking
+Au-delà du lissage (suite 82), 4 mesures s'attaquent aux **causes** (cf. [LIVE_TRACKING_PLAN.md](LIVE_TRACKING_PLAN.md)) : (1) **gate de scène statique** — si l'estimée ne bouge quasi pas vs la dernière émise, ne rien émettre (overlay figé, plus de scintillement) ; (2) **USAC_MAGSAC** + seed fixe (estimateur déterministe, supprime la variation du tirage RANSAC) ; (3) **cornerSubPix** (réduit le jitter de quantification ORB à la source) ; (4) **gate inliers + hystérésis** (fige au lieu de sauter quand le matching se dégrade). Fichiers `src/overlay/TrackingWorker.{h,cpp}`. Phases 2-3 (1€ Filter, modèle adaptatif, GPU) à venir.
+
+---
+
+## ERREUR 46 — « Reset Alignment ne fait rien » (overlay figé)
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` — pipeline de rendu de l'overlay caméra
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Cliquer le bouton « Reset Alignment » ne change rien visuellement : l'overlay (pads/silkscreen jaunes) reste affiché exactement au même endroit sur l'image caméra.
+
+### Cause
+Dans le handler de frame, le bloc qui dessine l'overlay et appelle `cameraView()->setOverlayImage(overlay)` est gardé par `if (m_ibomProject && m_homography && m_homography->isValid())`. Reset appelle `m_homography->reset()` → `isValid()` devient `false` → le bloc est **entièrement sauté**. Or `CameraView` conserve sa dernière `m_overlay` (image membre) et continue de la peindre à chaque `paintEvent` : comme `setOverlayImage()` n'est plus jamais rappelé, **la dernière image d'overlay reste figée** à l'écran. Reset modifiait bien l'état interne mais l'affichage ne se mettait jamais à jour → impression que « ça ne fait rien ».
+
+### Solution appliquée
+Ajout d'un `else if (!m_pickingHomographyPoints)` après le bloc overlay : quand il n'y a pas d'homographie valide, pousser une image transparente `setOverlayImage(QImage())` pour **effacer** l'overlay résiduel. Le cas `m_pickingHomographyPoints` est exclu car le picking 4-points dessine son propre overlay juste après. Fichier `src/app/Application.cpp`.
+
+### Leçon
+Un widget qui met en cache une image (`m_overlay`) doit être **explicitement** vidé quand la source disparaît : un `if` qui saute le push laisse la dernière image affichée. Toujours prévoir le chemin « plus rien à afficher », pas seulement « voici la nouvelle image ».
+
+---
+
+## ERREUR 45 — `pin1` iBOM (entier) non détecté
+
+**Date** : 2026-06-19
+**Composant** : `IBomParser::parsePads()`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+En multi-align, choisir « Pin 1 » sur U7 (module ESP32) affiche « U7 has no pin-1 pad in the iBOM — use the corners method ». Or l'iBOM **connaît** la pin 1 de U7 (visible/surlignée dans le viewer iBOM, pointée par l'utilisateur). La pin 1 n'est détectée pour **aucune** part dont le pad pin 1 n'est pas nommé exactement "1"/"A1".
+
+### Cause
+Le parser ne lisait le champ `pin1` du pad **que s'il était un booléen** (`p["pin1"].is_boolean()`). Or dans le JSON iBOM réel, `pin1` est encodé en **entier** (`1`/`0`). `is_boolean()` renvoyait donc `false` → on tombait sur l'heuristique de repli `pad.pinNumber == "1" || "A1"`. Pour un module ESP32, le pad pin 1 a un `num` qui n'est pas "1" → jamais marqué `isPin1`.
+
+### Solution appliquée
+`parsePads()` : si le pad contient `pin1`, l'interpréter quel que soit le type — **booléen** (`get<bool>`), **nombre** (`!= 0`), ou **string** ("1"/"true") ; sinon repli sur le `num`. Fichier `src/ibom/IBomParser.cpp`.
+
+### Leçon
+Ne jamais présumer du **type JSON** d'un champ iBOM : `pin1`, comme beaucoup de flags iBOM, est un entier, pas un booléen. Lire défensivement (number OU bool OU string).
+
+---
+
+## ERREUR 44 — Auto-Align depth faible score, contour jamais essayé
+
+**Date** : 2026-06-19
+**Composant** : `BoardLocator::locate()`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Sur D405, carte posée à plat avec une **feuille blanche** glissée dessous (pour aider). Auto-Align "réussit" mais l'overlay déborde nettement sur la gauche (hors carte). Log : `BoardLocator: Board located via depth, edge-agreement score 0,13` puis `Auto-Align succeeded via depth (score 0.13)`. Score 0.13 = juste au-dessus de `kMinAcceptableScore = 0.10` → accepté mais placement médiocre. L'utilisateur : « mais j'ai mis une feuille blanche dessous » — et pourtant ça ne change rien.
+
+### Cause
+Deux problèmes combinés :
+1. **La feuille blanche n'aide que le contour 2D**, pas la profondeur. `locateViaDepth()` segmente un plan par distance — totalement aveugle à la couleur/luminance. Une feuille blanche **coplanaire** avec la carte (même hauteur) ne fait aucune différence en profondeur : le plan ±15mm englobe toujours carte + feuille.
+2. **`locate()` essayait la profondeur en premier et, dès qu'elle réussissait, ne tentait JAMAIS le contour** (`if (depth) … else { contour }`). Donc même quand la profondeur produit un quad médiocre (score 0.13), le contour 2D — qui lui exploiterait le contraste vert-sur-blanc de la feuille — n'était pas exécuté. La feuille blanche était donc structurellement inutilisable.
+
+### Solution appliquée ✅
+`locate()` réécrit en **course des deux méthodes quand le score profondeur est faible** :
+- Profondeur essayée + désambiguïsée → score réel.
+- Si pas de résultat **ou** score < `kStrongScore = 0.30` : on lance **aussi** le contour, on le désambiguïse, et on **garde le meilleur score** des deux (le contour ne remplace que s'il est strictement supérieur et passe `kMinAcceptableScore`).
+- Au-dessus de `kStrongScore`, la profondeur est jugée fiable → contour sauté (gain de temps).
+- Message d'échec combiné (Depth + Contour) si rien d'exploitable.
+
+Ainsi la feuille blanche paie enfin : sur carte coplanaire, la profondeur fusionne carte+surface (score bas), mais le contour détecte les arêtes nettes carte verte/feuille blanche et gagne.
+
+### Leçon
+Quand on offre plusieurs stratégies de détection avec des forces complémentaires (profondeur = robuste au contraste mais aveugle à la couplanarité ; contour = sensible au contraste mais exploite la couleur), ne pas faire un simple fallback « A sinon B » : un succès **faible** de A masque B. Préférer une course « si A est faible, essayer B et garder le meilleur ». Et bien expliquer à l'utilisateur quel levier agit sur quelle méthode (la feuille blanche → contour, la surélévation → profondeur) — sinon il optimise pour la mauvaise.
+
+## ERREUR 43 — Segfault à la sortie de l'application
+
+**Date** : 2026-06-19
+**Composant** : `Application` — arrêt/destruction
+**Statut** : 🔴 OUVERT
+
+### Symptôme
+Dans le log terminal fourni par l'utilisateur, juste après la fermeture normale de la fenêtre :
+```
+[09:21:11.877] [info] [:] Application exiting with code 0
+QMainWindow::saveState(): 'objectName' not set for QToolBar 0xaaaaef79a040 'Main'
+Segmentation fault (core dumped)
+```
+Le message « exiting with code 0 » et le warning Qt sortent **avant** le crash — donc `main()` est sorti proprement, et le segfault survient pendant le déroulement des destructeurs/cleanup process (probablement lié à l'ordre de destruction des `QThread`s : `m_trackingThread`/`m_datasetThread`, ou à un objet Qt détruit après son parent).
+
+### Cause
+Non investigué. Pistes à explorer la prochaine fois que ça se reproduit :
+- Ordre de destruction `Application::~Application()` vs `QApplication` (créée dans `main.cpp` avant `Application`, donc devrait être détruite après — à vérifier que rien dans `~Application()` ne déclenche un signal/slot Qt après que `QApplication` a commencé sa propre destruction).
+- Les deux `QThread` dédiés (`m_trackingThread`, `m_datasetThread`) : `quit()`/`wait()` bien appelés avant la destruction du worker (`deleteLater` sur `finished`) ? Un `deleteLater` qui n'a pas le temps de s'exécuter avant la fin de la boucle d'événements peut laisser un objet Qt à moitié détruit.
+- Corrélation avec le warning `QMainWindow::saveState(): 'objectName' not set for QToolBar 'Main'` — possible mais pas confirmé ; ce warning seul ne devrait pas crasher.
+
+### Solution appliquée
+Aucune — pas encore reproduit/isolé. Noté ici uniquement parce que l'utilisateur en a fourni le log, par souci de ne pas le perdre.
+
+### Leçon
+Si ce crash se reproduit et qu'on a le temps d'investiguer : lancer sous `gdb`/`valgrind --tool=memcheck` au moment du `Stop-Process`/fermeture de fenêtre pour obtenir une stack trace, plutôt que d'essayer de deviner depuis le seul "exiting with code 0" + segfault.
+
+## ERREUR 42 — Clic minimap déplace l'overlay sur RealSense au lieu de highlighter
+
+**Date** : 2026-06-19
+**Composant** : `Application.cpp` (handler `BoardMinimap::anchorRequested`) / `src/gui/BoardMinimap.{h,cpp}`
+**Statut** : ✅ RÉSOLU
+
+### Symptôme
+Utilisateur sur D405 : « je vois que quand on clique sur la mini map ça ne fonctionne toujours pas. ça fais bouger tout l'overlay de la carte alors ça devrait highlighter le composant. » Log terminal confirme : chaque clic minimap produit `Homography computed: 4/4 inliers, error: 0.000 px` + `Minimap anchor: PCB (x, y) → image center` — l'overlay entier se redéplace/réoriente à chaque clic.
+
+### Cause
+`BoardMinimap::anchorRequested(pcbPoint)` était câblé sans condition de backend à un re-ancrage 1-point (recalcule l'homographie complète pour centrer le FOV caméra sur le point cliqué). Cette fonctionnalité est pensée pour le **microscope à FOV étroit** (`docs/MICROSCOPE_PLACEMENT_PLAN.md`) où toute la carte n'est jamais visible en même temps — recentrer la vue caméra sur un point cliqué a du sens là. Sur **RealSense (FOV large)**, la carte entière est déjà visible : « recentrer le FOV » n'a aucun sens et produit juste l'effet rapporté (overlay qui sursaute à chaque clic anodin).
+
+### Solution appliquée ✅
+Handler bifurqué selon `m_config->cameraBackend()` :
+- **RealSense** : recherche linéaire du composant `Layer::Front` le plus proche du point cliqué (distance euclidienne en mm, pas de seuil de distance — toujours le plus proche), puis applique exactement le même effet qu'un clic dans le BOM panel (`m_overlayRenderer->setHighlightedRefs()`, `boardMinimap()->setSelectedRef()`, `bomPanel()->highlightComponent()`). Aucune homographie touchée.
+- **Microscope (V4L2)** : comportement de re-ancrage inchangé.
+
+### Leçon
+Une fonctionnalité conçue pour un cas d'usage spécifique (FOV étroit) ne doit pas être câblée globalement sur tous les backends sans vérifier qu'elle reste pertinente pour chacun — ici le bug n'était pas un défaut d'implémentation de l'anchor lui-même (l'homographie était calculée correctement, 0.000px d'erreur) mais un mauvais choix de comportement par défaut pour le backend RealSense.
+
+## ERREUR 41 — Auto-Align D405 : carte coplanaire avec la table
+
+**Date :** 2026-06-18
+**Composant :** `src/overlay/BoardLocator.cpp` (`locateViaDepth()` + `validateSize()`)
+**Statut :** 🟡 CONTOURNÉ (message corrigé + workaround physique ; pas de séparation logicielle carte/fond coplanaire à ce stade)
+
+### Symptôme
+Auto-Align D405 **intermittent** sur la même scène (log utilisateur, distance 72mm, scale 6.1 px/mm, depth fill 87%) :
+```
+21:04:04 BoardLocator: Board located via depth, edge-agreement score 0,26
+21:04:04 Auto-Align succeeded via depth (score 0.26)          ← SUCCÈS
+21:04:32 candidate quad area (356855 px^2) doesn't match the board outline
+         at the known scale (142237 px^2)                     ← ÉCHEC
+21:05:03 candidate quad area (355897 px^2) ... (142237 px^2)  ← ÉCHEC
+```
+Ratio aire = 356855 / 142237 = **2.509×**, juste au-dessus de `kAreaTolerance = 2.5` (≈1.58× en linéaire). La même scène réussit puis échoue sans réalignement.
+
+### Cause
+La carte est posée **à plat sur la table en bois** → carte et table autour sont à la **même distance** (coplanaires). `locateViaDepth()` prend la médiane de profondeur sur la ROI centrale (= surface carte, 72mm) puis masque tous les pixels à ±`kDepthBandMm` (15mm) de cette référence — ce qui inclut la carte **plus une marge de table tout autour** au même plan. Le `minAreaRect` du plus grand contour englobe donc carte+table → ~1.58× trop grand en linéaire. Comme on est pile sur le seuil (2.509 vs 2.5), le résultat **dépend de la quantité de table coplanaire visible à l'instant t** (angle/cadrage de la carte) : quand la carte ressort assez (moins de table dans le plan), l'aire matche → succès (21:04:04) ; un instant plus tard, plus de table balayée dans le plan → 2.5× → rejet. C'est une **limite fondamentale** de la segmentation par plan de profondeur quand la carte est à fleur d'une surface : aucune marche de profondeur ne les sépare.
+
+### Pourquoi ne PAS juste élargir `kAreaTolerance`
+Accepter le quad de 356855 px² (carte+table) ferait mapper les coins de la **carte** sur les coins de la **table** → overlay trop grand et mal placé (exactement le symptôme « overlay en haut à droite / mal placé » des sessions précédentes). Le garde-fou taille fait son travail ici ; le desserrer réintroduirait le mauvais placement.
+
+### Solution appliquée (partielle) ✅
+- `validateSize()` : message **directionnel** au lieu du « make sure the whole board is in frame » trompeur (qui suggère « trop petit / hors cadre » alors qu'ici c'est « trop grand »). Si `ratio > kAreaTolerance` → « detected region … is larger than the board … probably merged with a coplanar background. Lift the board off the table/surface so it stands out in depth, or use manual alignment ». Si `ratio < 1/kAreaTolerance` → message « smaller … make sure the whole board is in frame ».
+
+### Workaround utilisateur (immédiat, fiable)
+- **Surélever la carte** de la table (la poser sur une petite boîte/support) → elle ressort en profondeur, le plan ±15mm n'attrape plus la table, l'aire matche → Auto-Align fiable. C'est le mode d'emploi attendu de la méthode depth.
+- Ou **alignement manuel 4-points** — confirmé fonctionnel dans le même log (21:06, « Manual homography computed successfully, error=0.000px »).
+
+### Piste de fix logiciel (non implémentée — à valider avec l'utilisateur avant)
+Pour gérer le cas « carte à plat sur surface coplanaire » sans intervention physique, il faudrait **raffiner le plan de profondeur avec un signal couleur/arête** : à l'intérieur du masque de plan, isoler la sous-région à forte densité d'arêtes (PCB = traces/silkscreen/composants, très texturé) du fond relativement uniforme (table), puis fitter le `minAreaRect` sur cette sous-région seulement. Risqué à coder à l'aveugle (pas de matériel ici) — peut régresser le cas qui marche (carte surélevée). Reporté tant que l'utilisateur ne le demande pas explicitement.
+
+### Leçon
+La segmentation par plan de profondeur suppose que l'objet est le plan le plus proche **distinct** — un objet à fleur d'une surface plus grande viole cette hypothèse et la profondeur seule ne peut pas les séparer. Quand un garde-fou taille tape pile sur le seuil (2.51 vs 2.5), le comportement devient intermittent et dépendant du cadrage : signe qu'il faut un signal supplémentaire (couleur/arête) ou une contrainte de scène (surélever), pas un simple ajustement de seuil.
+
+---
+
+## ERREUR 40 — `setTotalComponents()` jamais appelé — Inspection Progress toujours à zéro
+
+**Date :** 2026-06-18
+**Composant :** `src/gui/StatsPanel.{h,cpp}`
+**Statut :** 🔴 OUVERT (constaté en creusant un rapport utilisateur, pas encore corrigé)
+
+### Symptôme
+Sur un screenshot utilisateur (D405, carte visible, après reboot de l'app), le panneau « Inspection Progress » affiche « No inspection data » et 0% alors que la carte semble correctement chargée (overlay partiellement visible). `Placed`/`Missing`/`Defects`/`Pending` sont tous à 0.
+
+### Cause
+`StatsPanel::updateSummaryLabel()` affiche « No inspection data » dès que `m_total == 0` (`StatsPanel.cpp:336`). `m_total` n'est modifié que par `StatsPanel::setTotalComponents(int total)` (`StatsPanel.cpp:214`) — **grep sur tout `src/` : cette méthode n'est appelée nulle part**, y compris dans `Application.cpp` au chargement d'un iBOM (`loadIBomFile()`) ou au démarrage d'inspection (`startInspection()`). Le panneau affichera donc **toujours** « No inspection data » / 0%, qu'un iBOM soit chargé ou non — l'indicateur ne reflète rien.
+
+### Impact sur le diagnostic en cours
+Repéré en tentant de déterminer, à partir d'un screenshot, si un iBOM était chargé au moment où l'utilisateur a signalé qu'« Auto-Align ne fonctionne pas » après reboot. Ce panneau ne peut **pas** servir de signal pour ça tant qu'il n'est pas câblé — toujours à 0 par construction actuelle, qu'on ait un projet chargé ou pas.
+
+### Solution (pas encore appliquée)
+Appeler `m_mainWindow->statsPanel()->setTotalComponents(...)` après chargement d'un iBOM réussi (`loadIBomFile()`, count = `m_ibomProject->components.size()`) et le maintenir à jour quand `m_placedRefs` change (placement/retrait de composants). Périmètre exact (quels événements doivent incrémenter `Placed`/`Missing`/`Defects`) à clarifier avant d'implémenter — pas fait dans cette session pour rester focalisé sur le rapport glare/Auto-Align en cours.
+
+### Leçon
+Une méthode publique définie mais jamais appelée dans un GUI Qt ne provoque ni erreur de compilation ni warning évident — seul un grep cross-fichier (`setTotalComponents(` dans tout `src/`) l'a révélée. À surveiller : tout nouveau setter ajouté à un panneau d'affichage doit être immédiatement câblé à un site d'appel, sinon il devient un panneau mort silencieux.
+
+---
+
+## ERREUR 39 — Distance/Auto-Align/self-cal faux sous glare D405
+
+**Date :** 2026-06-18
+**Composant :** `src/overlay/BoardLocator.cpp` (`locateViaDepth()`), `src/app/Application.cpp` (handler `depthFrameReady`), `src/camera/RealSenseCapture.cpp` (self-cal on-chip), `src/gui/StatsPanel.cpp` (Event Log)
+**Statut :** ✅ RÉSOLU (code) — ⚠️ non testé sur le matériel réel à ce stade
+
+### Symptôme
+Deux rapports utilisateur distincts, même session :
+1. Screenshot D405 avec un reflet/éblouissement visible sur la carte (carte glossy) : panneau Statistics affiche **« Distance: 104.0 mm »** alors que la distance réelle mesurée par l'utilisateur est **~70 mm**, et **« Depth fill: 11% »**. Auto-Align échoue : `BoardLocator::locateViaDepth()` trouve un candidat de **4702 px²** contre une aire de carte attendue de **123295 px²** (~26× trop petit).
+2. Après reboot de l'app : self-calibration on-chip D405 échoue ses 3 tentatives avec le message **« Not enough ... »** (tronqué dans la colonne Message de l'Event Log), puis « RealSense streaming pipeline restored after calibration » (retour au pipeline normal, calibration usine conservée).
+
+### Cause
+Reflet spéculaire / éblouissement sur une carte PCB glossy confond l'appariement stéréo IR du D405 → une grande partie de la frame de profondeur devient invalide (pixels à 0). Conséquences en cascade, toutes dérivées de cette même frame corrompue :
+- La médiane sur la ROI centrale (`Application.cpp`, handler `depthFrameReady`) mélange échantillons valides et bords de zones invalides → distance fausse mais plausible (104mm au lieu de 70mm).
+- `BoardLocator::locateViaDepth()` segmente le plan le plus proche à partir du masque profondeur → avec 11% de pixels valides, le contour obtenu est minuscule/sans rapport avec la carte réelle (4702 px² vs 123295 attendus) plutôt que de représenter la vraie carte.
+- Recherche web (confirmée) : le firmware D4xx lui-même applique un garde-fou identique pour sa propre self-calibration on-chip — message officiel `"Not enough depth pixels! (Fill_Factor_LOW). Please retry in different lighting conditions"` ([GitHub issues IntelRealSense/librealsense](https://github.com/IntelRealSense/librealsense/issues/10822)). C'est exactement le même phénomène (fill factor bas) qui fait échouer la self-cal ET corrompt la distance/Auto-Align — pas une coïncidence, une seule cause physique (glare) avec trois symptômes différents.
+
+### Solution appliquée ✅
+1. **`BoardLocator.cpp`** : nouvelle constante `kMinDepthFillRatio = 0.20` (espace de noms anonyme, à côté de `kMinAcceptableScore`). `locateViaDepth()` calcule le ratio de pixels non-nuls sur toute la frame **avant** toute segmentation et échoue explicitement (`reason = "depth data too sparse (X% valid) — likely glare/reflection off the board surface; reduce lighting glare or try the contour method"`) si sous le seuil — au lieu de segmenter un plan minuscule/faux et de laisser `validateSize()` le rejeter (ou pire, l'accepter) sans explication claire.
+2. **`Application.cpp`** (handler `depthFrameReady`) : même garde, calculée une fois et réutilisée pour `sp->setFillRate(...)` puis comparée à `kMinDepthFillRatio` (dupliqué localement, même valeur 0.20) — sous le seuil, `sp->setDistance(0.0)` (affiche « — », sentinelle déjà gérée) et **return** avant le calcul de la médiane/`m_lastDepthDistanceMm`/scale px/mm, qui ne seraient plus mis à jour avec une valeur dérivée d'une frame majoritairement invalide.
+3. **`RealSenseCapture.cpp`** (bloc self-cal on-chip) : nouveau `else if (lastErr.find("Not enough") != std::string::npos)` dans la construction du message d'aide après les 3 tentatives échouées — distinct du cas déjà géré `"HW not ready"` ([ERREUR #30](#erreur-30--self-calibration-d405-hw-not-ready)).
+   - **Correction importante (suite 64)** : l'utilisateur a montré une capture où **Depth fill = 86%** (live stream sain) mais la self-cal échoue quand même « Not enough … ». **Le fill du live stream est sans rapport avec le succès de l'OCC** : la self-cal tourne sur **son propre profil 256×144@90** (cf. [ERREUR #30](#erreur-30--self-calibration-d405-hw-not-ready), contrainte firmware) et échantillonne une **région centrale**. La vraie exigence Intel ([doc self-calibration D400](https://dev.realsenseai.com/docs/intel-realsense-self-calibration-for-d400-series-depth-cameras/), [page produit](https://www.intelrealsense.com/self-calibration-for-depth-cameras/)) : **surface plane, texturée, remplissant tout le champ de vision**, à distance modérée, caméra perpendiculaire. Une petite carte PCB inclinée à ~7cm (limite proche du D405) ne satisfait pas ça → `Fill_Factor_LOW`. Message corrigé en conséquence : demande une surface plane/texturée remplissant le cadre, précise que c'est **indépendant du « Depth fill % » live**, et rappelle que l'OCC est **optionnelle** (réduit seulement le bruit de profondeur ; la calibration usine reste valide et Auto-Align/overlay marchent sans).
+4. **`StatsPanel.cpp`** (`appendEventRow()`) : `msgItem->setToolTip(message)` — la colonne Message de l'Event Log tronque visuellement les messages longs (c'est ce « Not enough … » tronqué qui a motivé ce fix) ; le texte complet était auparavant seulement récupérable via le fichier log, pas dans l'UI.
+
+### Leçon
+Un taux de remplissage (« fill ratio ») bas sur une frame de profondeur doit être traité comme **donnée invalide à rejeter explicitement**, pas comme une mesure bruitée à exploiter quand même — toute grandeur dérivée (distance médiane, segmentation de plan, scale px/mm sténopé) devient alors fausse-mais-précise-en-apparence, ce qui est strictement pire qu'un échec clair (un nombre qui a l'air correct n'invite pas à la méfiance). Le seuil choisi (20%) n'est pas arbitraire : le firmware D4xx applique le même principe en interne pour sa propre self-calibration, ce qui confirme la pertinence de la garde côté application plutôt que de compter uniquement sur le firmware pour s'en apercevoir trop tard (et seulement pour la self-cal, pas pour Auto-Align ni l'affichage Distance).
+
+**À valider au prochain build Jetson** : sous glare/reflet (Depth fill bas), la Distance doit afficher « — » plutôt qu'une valeur fausse, Auto-Align doit échouer proprement avec le message glare au lieu de proposer un mauvais placement, et le message complet d'un échec self-cal doit être lisible au survol dans l'Event Log.
+
+**Note (suite 64)** : la self-cal qui « ne passe pas » à 86% de fill n'est **pas** un bug applicatif — c'est un échec attendu de l'OCC firmware quand la scène ne remplit pas ses exigences (surface plane texturée plein cadre). Côté code on ne peut que mieux l'expliquer (fait) ; la calibration usine suffit pour l'usage de l'app. Aucune action code supplémentaire prévue tant que l'utilisateur ne demande pas spécifiquement à faire passer l'OCC (auquel cas → pointer une surface texturée plein cadre, ou retirer carrément le bouton self-cal s'il prête à confusion).
+
+---
+
+## ERREUR 38 — Auto-Align échoue sur D405 : scale px/mm périmé
+
+**Date :** 2026-06-18
+**Composant :** `src/app/Application.cpp` (`autoAlignBoard()`), `src/overlay/BoardLocator.cpp` (`validateSize()`)
+**Statut :** ✅ RÉSOLU
+
+### Symptôme
+Premier test réel d'Auto-Align sur D405 (log utilisateur) :
+```
+BoardLocator: Depth: candidate quad area (381762 px^2) doesn't match the board
+outline at the known scale (32771 px^2) — make sure the whole board is in frame.
+Contour: no board-shaped quad found in the frame...
+Auto-Align failed: ...
+```
+Ratio aire ≈ 11.65× (≈ 3.4× en linéaire) — bien au-delà de `kAreaTolerance = 2.5`. La méthode profondeur a très probablement trouvé le **vrai** plan de la carte (c'est tout l'intérêt de la segmentation par profondeur), mais `validateSize()` l'a rejeté car le `expectedPixelsPerMm` passé à `BoardLocator::locate()` était faux.
+
+### Cause
+`autoAlignBoard()` calculait `expectedPixelsPerMm` depuis `m_currentPixelsPerMm`/`m_basePixelsPerMm`, eux-mêmes alimentés soit par la dernière calibration checkerboard sauvegardée (`m_calibration->pixelsPerMm()`, potentiellement faite avec une autre caméra ou à une autre distance de travail), soit par un live-update **uniquement si `Config::scaleMethod() == ScaleMethod::Depth`** (cf. handler `depthFrameReady`, ligne ~1382). Avec `scaleMethod` sur autre chose que `Depth` (valeur par défaut probable), aucun de ces deux chemins ne reflète l'échelle réelle de la D405 à sa distance de travail actuelle → écart de 3.4× exactement le genre d'erreur que `validateSize()` est censé éviter de laisser passer à l'envers (ici elle bloque un **vrai positif**).
+
+### Solution appliquée ✅
+- Nouveau membre `Application::m_lastDepthDistanceMm`, mis à jour **sans condition** sur `scaleMethod()` dans le handler `depthFrameReady` (juste après `sp->setDistance(distMm)`) — donc toujours disponible dès qu'un flux profondeur D405 arrive, indépendamment du réglage d'échelle choisi par l'utilisateur.
+- `autoAlignBoard()` calcule maintenant `expectedPixelsPerMm` en priorité via la géométrie sténopé (`fx / distance_mm`, `fx` via `RealSenseCapture::colorFx()`) quand une D405 + une distance valide sont disponibles — c'est exactement la même formule déjà utilisée par le live-update `ScaleMethod::Depth`, juste rendue disponible à Auto-Align sans dépendre de ce réglage. Fallback inchangé (`m_currentPixelsPerMm` puis `m_basePixelsPerMm`) si pas de D405/distance.
+
+### Leçon
+Une calibration checkerboard sauvegardée encode une distance de travail implicite — la réutiliser pour valider la taille d'un contour détecté à une distance différente (autre caméra, autre setup) peut rejeter un résultat **correct**. Quand une mesure de distance physique directe est disponible (profondeur D405), préférer la dériver à la volée plutôt que de faire confiance à un scale mis en cache, même récent.

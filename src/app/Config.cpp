@@ -135,6 +135,19 @@ bool Config::load(const std::string& path)
             for (const auto& e : j["ibom_recent"])
                 if (e.is_string()) m_recentIbomFiles.push_back(e.get<std::string>());
         }
+        if (j.contains("last_alignment")) {
+            auto& la = j["last_alignment"];
+            m_savedAlignment.valid        = la.value("valid", false);
+            m_savedAlignment.ibomFilePath = la.value("ibom_file", std::string());
+            m_savedAlignment.pixelsPerMm  = la.value("pixels_per_mm", 0.0);
+            m_savedAlignment.timestamp    = la.value("timestamp", std::string());
+            if (la.contains("matrix") && la["matrix"].is_array() && la["matrix"].size() == 9) {
+                for (size_t i = 0; i < 9; ++i)
+                    m_savedAlignment.matrix[i] = la["matrix"][i].get<double>();
+            } else {
+                m_savedAlignment.valid = false;
+            }
+        }
 
         // AI
         if (j.contains("ai")) {
@@ -162,6 +175,7 @@ bool Config::load(const std::string& path)
             m_voiceControl   = feat.value("voice_control", m_voiceControl);
             m_remoteView     = feat.value("remote_view", m_remoteView);
             m_remoteViewPort = feat.value("remote_view_port", m_remoteViewPort);
+            m_verboseLogging = feat.value("verbose_logging", m_verboseLogging);
         }
 
         // Tracking
@@ -173,6 +187,15 @@ bool Config::load(const std::string& path)
             m_matchDistanceRatio = trk.value("match_distance_ratio", m_matchDistanceRatio);
             m_ransacThreshold    = trk.value("ransac_threshold", m_ransacThreshold);
             m_trackingDownscale  = trk.value("downscale", m_trackingDownscale);
+            m_trackingModel      = trk.value("model", m_trackingModel);
+            m_oneEuroMinCutoff   = trk.value("one_euro_min_cutoff", m_oneEuroMinCutoff);
+            m_oneEuroBeta        = trk.value("one_euro_beta", m_oneEuroBeta);
+            m_trackingClahe      = trk.value("clahe", m_trackingClahe);
+            m_trackingOpticalFlow = trk.value("optical_flow", m_trackingOpticalFlow);
+            m_trackingGpuMode    = trk.value("gpu_mode", m_trackingGpuMode);
+            m_reanchorEnabled    = trk.value("reanchor_enabled", m_reanchorEnabled);
+            m_reanchorIntervalS  = trk.value("reanchor_interval_s", m_reanchorIntervalS);
+            m_reanchorMinScore   = trk.value("reanchor_min_score", m_reanchorMinScore);
 
             // Migration: legacy match_distance_ratio values were distance multipliers
             // (typically 2.0); the new semantics is Lowe's ratio test in [0,1].
@@ -181,6 +204,22 @@ bool Config::load(const std::string& path)
                              m_matchDistanceRatio);
                 m_matchDistanceRatio = 0.75;
             }
+
+            // Migration v2: move pre-existing configs onto the fast-path
+            // tracking defaults (optical flow at camera rate, Auto model,
+            // 100 ms ORB re-seed) validated on Jetson. Only values still equal
+            // to the OLD defaults are upgraded, so deliberate custom settings
+            // survive; runs until a save() persists defaults_v (idempotent).
+            const int defaultsV = trk.value("defaults_v", 1);
+            if (defaultsV < 2) {
+                if (trk.value("interval_ms", 200) == 200)  m_trackingIntervalMs  = 100;
+                if (trk.value("model", 3) == 3)            m_trackingModel       = 0;
+                if (!trk.value("optical_flow", false))     m_trackingOpticalFlow = true;
+                spdlog::info("Migrating tracking defaults v{}→2: interval={}ms model={} opticalFlow={}",
+                             defaultsV, m_trackingIntervalMs, m_trackingModel,
+                             m_trackingOpticalFlow);
+            }
+            m_trackingDefaultsV = 2;
         }
 
         // Calibration
@@ -201,6 +240,7 @@ bool Config::load(const std::string& path)
             m_microscopeAnchorRotationDeg = mic.value("anchor_rotation_deg", m_microscopeAnchorRotationDeg);
             m_microscopeIncremental       = mic.value("incremental", m_microscopeIncremental);
             m_microscopeReanchorDriftPx   = mic.value("reanchor_drift_px", m_microscopeReanchorDriftPx);
+            m_hybridDriftCorrection       = mic.value("hybrid_drift_correction", m_hybridDriftCorrection);
         }
 
         // BOM
@@ -291,6 +331,14 @@ bool Config::save(const std::string& path) const
         j["ibom_recent"]      = m_recentIbomFiles;
         j["ibom_auto_reload"] = m_autoReloadIbom;
 
+        j["last_alignment"] = {
+            {"valid",          m_savedAlignment.valid},
+            {"ibom_file",      m_savedAlignment.ibomFilePath},
+            {"matrix",         std::vector<double>(m_savedAlignment.matrix, m_savedAlignment.matrix + 9)},
+            {"pixels_per_mm",  m_savedAlignment.pixelsPerMm},
+            {"timestamp",      m_savedAlignment.timestamp}
+        };
+
         // AI
         j["ai"] = {
             {"models_path",    m_modelsPath},
@@ -313,17 +361,28 @@ bool Config::save(const std::string& path) const
         j["features"] = {
             {"voice_control",    m_voiceControl},
             {"remote_view",      m_remoteView},
-            {"remote_view_port", m_remoteViewPort}
+            {"remote_view_port", m_remoteViewPort},
+            {"verbose_logging",  m_verboseLogging}
         };
 
         // Tracking
         j["tracking"] = {
+            {"defaults_v",           m_trackingDefaultsV},
             {"interval_ms",          m_trackingIntervalMs},
             {"orb_keypoints",        m_orbKeypoints},
             {"min_matches",          m_minMatchCount},
             {"match_distance_ratio", m_matchDistanceRatio},
             {"ransac_threshold",     m_ransacThreshold},
-            {"downscale",            m_trackingDownscale}
+            {"downscale",            m_trackingDownscale},
+            {"model",                m_trackingModel},
+            {"one_euro_min_cutoff",  m_oneEuroMinCutoff},
+            {"one_euro_beta",        m_oneEuroBeta},
+            {"clahe",                m_trackingClahe},
+            {"optical_flow",         m_trackingOpticalFlow},
+            {"gpu_mode",             m_trackingGpuMode},
+            {"reanchor_enabled",     m_reanchorEnabled},
+            {"reanchor_interval_s",  m_reanchorIntervalS},
+            {"reanchor_min_score",   m_reanchorMinScore}
         };
 
         // Calibration
@@ -340,7 +399,8 @@ bool Config::save(const std::string& path) const
             {"anchor_pixels_per_mm", m_microscopeAnchorPixelsPerMm},
             {"anchor_rotation_deg",  m_microscopeAnchorRotationDeg},
             {"incremental",          m_microscopeIncremental},
-            {"reanchor_drift_px",    m_microscopeReanchorDriftPx}
+            {"reanchor_drift_px",    m_microscopeReanchorDriftPx},
+            {"hybrid_drift_correction", m_hybridDriftCorrection}
         };
 
         // BOM

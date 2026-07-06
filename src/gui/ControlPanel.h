@@ -40,10 +40,22 @@ public:
     void setCameraDevices(const QStringList& labels, const QList<int>& indices,
                           int currentIndex = -1);
     void setConfidenceThreshold(float conf);
+    /// Reflect the persisted hybrid drift-correction flag in the checkbox.
+    void setHybridMode(bool enabled);
+    bool hybridMode() const;
+
+    /// Programmatically toggle the Live Tracking checkbox. Goes through
+    /// setChecked() so liveModeChanged fires and the normal enable/disable
+    /// handler runs — UI and Application state stay in sync (used by the
+    /// auto-start-after-alignment flow). No-op if already in that state.
+    void setLiveMode(bool enabled);
     /// Switch UI between USB-microscope and RealSense mode.
     /// Disables/relabels the calibration button when RealSense is active
     /// (factory intrinsics are embedded in the SDK — no checkerboard needed).
     void setCameraBackendUI(bool isRealSense);
+    /// Toggle the Multi-Comp button's label between "start" and "finish" so the
+    /// user knows clicking it again ends the landmark-collection step.
+    void setAlignMultiActive(bool active);
 
 signals:
     void overlayOpacityChanged(float opacity);
@@ -58,9 +70,14 @@ signals:
     void recalibrateRequested();
     void generateCheckerboardRequested();
     void openCalibrationPdfRequested();
+    void alignmentWizardRequested();
     void alignHomographyRequested();
     void alignOnComponentsRequested();
+    void alignMultiRequested();
+    void autoAlignRequested();
+    void resetAlignmentRequested();
     void liveModeChanged(bool enabled);
+    void hybridModeChanged(bool enabled);
 
 private:
     void buildUI();
@@ -96,9 +113,14 @@ private:
     QPushButton* m_btnGenPattern  = nullptr;  // microscope: generate/print board
     QPushButton* m_btnOpenPdf      = nullptr;  // microscope: open patterns PDF
     QPushButton* m_btnRealSense    = nullptr;  // RealSense: sensor controls
+    QPushButton* m_btnAlignWizard  = nullptr;
     QPushButton* m_btnAlign        = nullptr;
     QPushButton* m_btnAlignComps   = nullptr;
+    QPushButton* m_btnAlignMulti   = nullptr;
+    QPushButton* m_btnAutoAlign    = nullptr;
+    QPushButton* m_btnResetAlign   = nullptr;
     QCheckBox*   m_liveMode        = nullptr;
+    QCheckBox*   m_hybridMode      = nullptr;
 };
 
 } // namespace ibom::gui

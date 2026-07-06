@@ -520,7 +520,11 @@ void RealSenseCapture::captureLoop()
             std::lock_guard<std::mutex> lock(m_frameMutex);
             m_latestFrame = shared;
         }
-        emit frameReady(shared);
+        // Monotonic arrival stamp (≈ capture time) — same clock as consumers,
+        // used downstream for latency accounting (F12).
+        const qint64 captureNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        emit frameReady(shared, captureNs);
         ++colorFrames;
 
         // Publish depth as CV_16UC1 in millimetres (aligned to color), after
@@ -778,6 +782,26 @@ void RealSenseCapture::captureLoop()
                                             "your firmware/SDK build may not support on-chip "
                                             "calibration on this D405 (factory calibration is "
                                             "still valid).");
+                        } else if (lastErr.find("Not enough") != std::string::npos) {
+                            // librealsense's own message is e.g. "Not enough depth
+                            // pixels! (Fill_Factor_LOW)". OCC runs on its own
+                            // 256x144@90 profile (not the live stream) and samples
+                            // a central region — so a healthy live "Depth fill %"
+                            // does NOT mean OCC will pass. Intel's requirement is a
+                            // flat, textured surface filling the field of view at a
+                            // moderate distance; a small/tilted board at the D405's
+                            // near limit (~7cm) won't satisfy it.
+                            hint += QString("\n\nOn-chip calibration needs the camera "
+                                            "pointed straight at a FLAT, TEXTURED surface "
+                                            "that FILLS the whole frame (e.g. a textured "
+                                            "wall or a printed sheet), at a moderate "
+                                            "distance — not a small or tilted board at "
+                                            "very close range. Note this is independent "
+                                            "of the live \"Depth fill %\": OCC uses its own "
+                                            "low-res stream.\n\nThis step is OPTIONAL — it "
+                                            "only reduces depth noise. The factory "
+                                            "calibration is valid and Auto-Align / the "
+                                            "overlay work without it.");
                         }
                         emit onChipCalibrationFinished(false, 0.f, hint);
                     }

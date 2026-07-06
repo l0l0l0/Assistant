@@ -66,7 +66,22 @@ find_package(OpenCV REQUIRED COMPONENTS
     calib3d
     dnn
     features2d
+    video          # cv::calcOpticalFlowPyrLK (Phase 3 hybrid tracking)
+    OPTIONAL_COMPONENTS
+    cudafeatures2d
+    cudaimgproc
+    cudaarithm
 )
+
+# Live-tracking GPU path (Phase 3) — only when OpenCV was built with the CUDA
+# modules (Jetson). Guarded by IBOM_HAVE_OPENCV_CUDA in the code; the Windows
+# legacy / non-CUDA builds simply compile the CPU path.
+if(OpenCV_cudafeatures2d_FOUND AND OpenCV_cudaimgproc_FOUND)
+    add_compile_definitions(IBOM_HAVE_OPENCV_CUDA=1)
+    message(STATUS "  OpenCV CUDA:  ON (live-tracking GPU path enabled)")
+else()
+    message(STATUS "  OpenCV CUDA:  OFF (CPU live-tracking only)")
+endif()
 
 # ONNX Runtime
 find_package(onnxruntime CONFIG REQUIRED)
@@ -144,6 +159,9 @@ set(SOURCES
     src/overlay/ComponentOverlay.cpp
     src/overlay/HeatmapRenderer.cpp
     src/overlay/TrackingWorker.cpp
+    src/overlay/BoardLocator.cpp
+    src/overlay/ComponentReanchor.cpp
+    src/overlay/BlobComponentDetector.cpp
 
     # GUI
     src/gui/MainWindow.cpp
@@ -154,6 +172,8 @@ set(SOURCES
     src/gui/BomPanel.cpp
     src/gui/ControlPanel.cpp
     src/gui/InspectionWizard.cpp
+    src/gui/AlignmentWizard.cpp
+    src/gui/MultiAlignDialog.cpp
     src/gui/InspectionPanel.cpp
     src/gui/StatsPanel.cpp
     src/gui/DatasetPanel.cpp
@@ -213,8 +233,12 @@ set(HEADERS
     src/overlay/OverlayRenderer.h
     src/overlay/Homography.h
     src/overlay/ComponentOverlay.h
+    src/overlay/BlobComponentDetector.h
     src/overlay/HeatmapRenderer.h
     src/overlay/TrackingWorker.h
+    src/overlay/OneEuroFilter.h
+    src/overlay/BoardLocator.h
+    src/overlay/ComponentReanchor.h
 
     # GUI
     src/gui/MainWindow.h
@@ -225,6 +249,8 @@ set(HEADERS
     src/gui/BomPanel.h
     src/gui/ControlPanel.h
     src/gui/InspectionWizard.h
+    src/gui/AlignmentWizard.h
+    src/gui/MultiAlignDialog.h
     src/gui/InspectionPanel.h
     src/gui/StatsPanel.h
     src/gui/DatasetPanel.h

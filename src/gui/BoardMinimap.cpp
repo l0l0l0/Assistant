@@ -51,6 +51,14 @@ void BoardMinimap::setPlacedRefs(const std::unordered_set<std::string>& refs)
     update();
 }
 
+void BoardMinimap::setClickTargets(const std::vector<cv::Point2f>& pcbPts,
+                                   const QColor& color)
+{
+    m_clickTargets = pcbPts;
+    m_clickTargetColor = color;
+    update();
+}
+
 // ---------------------------------------------------------------------------
 // Coordinate helpers
 // ---------------------------------------------------------------------------
@@ -141,7 +149,7 @@ void BoardMinimap::paintEvent(QPaintEvent*)
         bool selected = comp.reference == m_selectedRef;
 
         QColor col;
-        if (selected)       col = QColor(255, 220, 50);
+        if (selected)       col = QColor(210, 30, 30);  // dark red, matches the halo
         else if (placed)    col = theme::placedColor().darker(130);
         else                col = theme::accentDark();
 
@@ -157,6 +165,95 @@ void BoardMinimap::paintEvent(QPaintEvent*)
         p.setPen(QPen(col, selected ? 1.2f : 0.8f));
         p.setBrush(fill);
         p.drawRect(r);
+    }
+
+    // Selected component guide: draw its pads and mark pin 1. This is the
+    // visual reference used during multi-component alignment — it lets the user
+    // read the part's orientation and locate pin 1 on the real board before
+    // clicking in the camera image (crucial for irregular footprints like an
+    // ESP32 module where "the body" is otherwise ambiguous).
+    //
+    // Also draw a fixed-size halo + crosshair at the component's center,
+    // independent of its actual bbox size: a small SMD part's highlighted
+    // rect above can be 1-2px on a dense/crowded board and effectively
+    // invisible — the halo guarantees the selection is always spottable.
+    if (!m_selectedRef.empty()) {
+        for (const auto& comp : m_project.components) {
+            if (comp.reference != m_selectedRef) continue;
+
+            QPointF center = pcbToWidget(comp.bbox.center().x, comp.bbox.center().y);
+            const QColor halo(210, 30, 30);  // dark red — clearly visible on the dark map
+
+            p.setPen(QPen(halo, 1.5));
+            p.setBrush(Qt::NoBrush);
+            p.drawLine(QPointF(center.x() - 10, center.y()), QPointF(center.x() + 10, center.y()));
+            p.drawLine(QPointF(center.x(), center.y() - 10), QPointF(center.x(), center.y() + 10));
+            p.drawEllipse(center, 6.0, 6.0);
+
+            if (comp.layer != m_activeLayer) break;  // pads below: front/back only
+
+
+            // Pad outlines (thin) + pin 1 (prominent red "click here" marker:
+            // filled dot + ring + crosshair). The user relies on this red pin
+            // — rather than a green target — when marking pin 1 in multi-align.
+            for (const auto& pad : comp.pads) {
+                QPointF c = pcbToWidget(pad.position.x, pad.position.y);
+                if (pad.isPin1) {
+                    // Dark halo so the red stays visible over yellow pad dots.
+                    p.setPen(QPen(QColor(0, 0, 0, 160), 3.0));
+                    p.setBrush(Qt::NoBrush);
+                    p.drawEllipse(c, 6.0, 6.0);
+                    p.setPen(QPen(QColor(255, 70, 70), 2.0f));
+                    p.drawEllipse(c, 6.0, 6.0);
+                    p.drawLine(QPointF(c.x() - 8, c.y()), QPointF(c.x() + 8, c.y()));
+                    p.drawLine(QPointF(c.x(), c.y() - 8), QPointF(c.x(), c.y() + 8));
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(QColor(255, 70, 70, 230));
+                    p.drawEllipse(c, 3.0, 3.0);
+                } else {
+                    p.setPen(QPen(QColor(255, 220, 50, 200), 0.8f));
+                    p.setBrush(QColor(255, 220, 50, 90));
+                    p.drawEllipse(c, 1.6, 1.6);
+                }
+            }
+            break;
+        }
+    }
+
+    // Click targets: the exact point(s) the user must click in the camera
+    // image to calibrate (multi-component alignment). Drawn last among the
+    // guides, as prominent bright-green numbered rings so they stand out over
+    // the dark-red selection halo and yellow pad dots.
+    if (!m_clickTargets.empty()) {
+        p.setFont(QFont("monospace", 8, QFont::Bold));
+        for (size_t i = 0; i < m_clickTargets.size(); ++i) {
+            QPointF c = pcbToWidget(m_clickTargets[i].x, m_clickTargets[i].y);
+            const QColor ring = m_clickTargetColor;  // green (corners) / red (pads)
+
+            // Same graphic as the pin-1 marker: dark halo + coloured ring +
+            // crosshair + filled centre dot, so "opposite pads" reads the same
+            // way as "pin 1".
+            p.setPen(QPen(QColor(0, 0, 0, 160), 3.0));
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(c, 7.0, 7.0);
+            p.setPen(QPen(ring, 2.0));
+            p.drawEllipse(c, 7.0, 7.0);
+            p.drawLine(QPointF(c.x() - 9, c.y()), QPointF(c.x() + 9, c.y()));
+            p.drawLine(QPointF(c.x(), c.y() - 9), QPointF(c.x(), c.y() + 9));
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(ring.red(), ring.green(), ring.blue(), 230));
+            p.drawEllipse(c, 3.0, 3.0);
+
+            // Number the targets when there is more than one (click order is free).
+            if (m_clickTargets.size() > 1) {
+                p.setPen(QColor(0, 0, 0));
+                p.drawText(QRectF(c.x() + 8, c.y() - 14, 14, 14),
+                           Qt::AlignCenter, QString::number(i + 1));
+                p.setPen(ring);
+                p.drawText(QRectF(c.x() + 7, c.y() - 15, 14, 14),
+                           Qt::AlignCenter, QString::number(i + 1));
+            }
+        }
     }
 
     // FOV rectangle (only when homography is valid and camera size known)

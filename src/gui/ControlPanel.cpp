@@ -212,6 +212,16 @@ QGroupBox* ControlPanel::createCalibrationGroup()
     layout->addWidget(m_btnRealSense);
 
     // ── Alignment + live tracking (both backends) ──
+    // Guided assistant: single entry point that walks through method choice,
+    // instructions, and a final summary. The individual buttons below remain
+    // for power users who already know which method they want.
+    m_btnAlignWizard = new QPushButton(tr("Alignment Assistant…"));
+    m_btnAlignWizard->setToolTip(tr("Step-by-step guide: pick a method, follow the "
+                                    "instructions, and see a summary of the result. "
+                                    "Recommended if you're unsure which alignment to use."));
+    connect(m_btnAlignWizard, &QPushButton::clicked, this, &ControlPanel::alignmentWizardRequested);
+    layout->addWidget(m_btnAlignWizard);
+
     m_btnAlign = new QPushButton(tr("Align: 4 Corners"));
     m_btnAlign->setToolTip(tr("Set alignment by clicking the 4 board corners."));
     connect(m_btnAlign, &QPushButton::clicked, this, &ControlPanel::alignHomographyRequested);
@@ -222,10 +232,47 @@ QGroupBox* ControlPanel::createCalibrationGroup()
     connect(m_btnAlignComps, &QPushButton::clicked, this, &ControlPanel::alignOnComponentsRequested);
     layout->addWidget(m_btnAlignComps);
 
+    m_btnAlignMulti = new QPushButton(tr("Align: Multi-Comp (Beta)"));
+    m_btnAlignMulti->setToolTip(tr("Align using several components (≥2, ≥4 for perspective). "
+                                   "Works on non-rectangular boards.\n"
+                                   "1) Click a component row in the BOM panel.\n"
+                                   "2) Choose 'Pin 1' (one click in the image, most precise — "
+                                   "best for ESP32 & complex footprints) or '2 Opposite Corners' "
+                                   "(two clicks, any diagonal — midpoint is used).\n"
+                                   "The PCB Map highlights the selected part and marks pin 1 "
+                                   "(red dot) to guide you.\n"
+                                   "3) Repeat, then click this button again to finish."));
+    connect(m_btnAlignMulti, &QPushButton::clicked, this, &ControlPanel::alignMultiRequested);
+    layout->addWidget(m_btnAlignMulti);
+
+    m_btnAutoAlign = new QPushButton(tr("Auto-Align (Beta)"));
+    m_btnAutoAlign->setToolTip(tr("Automatically locate the board outline in the current frame "
+                                  "and orient the overlay to match — no clicking required. Works "
+                                  "best with the whole board visible (depth-assisted on RealSense)."));
+    connect(m_btnAutoAlign, &QPushButton::clicked, this, &ControlPanel::autoAlignRequested);
+    layout->addWidget(m_btnAutoAlign);
+
+    m_btnResetAlign = new QPushButton(tr("Reset Alignment"));
+    m_btnResetAlign->setToolTip(tr("Clear the current overlay alignment (and the saved profile "
+                                   "for this board) and start fresh. Use this if a saved/auto "
+                                   "alignment is wrong or the camera/board moved."));
+    connect(m_btnResetAlign, &QPushButton::clicked, this, &ControlPanel::resetAlignmentRequested);
+    layout->addWidget(m_btnResetAlign);
+
     m_liveMode = new QCheckBox(tr("Live Tracking Mode"));
     m_liveMode->setToolTip(tr("Track PCB movement in real-time using feature matching"));
     connect(m_liveMode, &QCheckBox::toggled, this, &ControlPanel::liveModeChanged);
     layout->addWidget(m_liveMode);
+
+    m_hybridMode = new QCheckBox(tr("Hybrid drift correction (beta)"));
+    m_hybridMode->setToolTip(tr("During incremental tracking, snap back to the original "
+                                "anchor view whenever it is recognized again — eliminates "
+                                "long-term drift while keeping smooth tracking. Only affects "
+                                "incremental (narrow-FOV / microscope) tracking."));
+    m_hybridMode->setChecked(true);  // matches Config default; overridden by setHybridMode()
+    m_hybridMode->setStyleSheet("margin-left: 18px;");  // nest under Live Tracking Mode
+    connect(m_hybridMode, &QCheckBox::toggled, this, &ControlPanel::hybridModeChanged);
+    layout->addWidget(m_hybridMode);
 
     // Default to microscope view until the backend is known.
     setCameraBackendUI(false);
@@ -284,6 +331,27 @@ void ControlPanel::setConfidenceThreshold(float conf)
     m_confidenceSpin->setValue(static_cast<double>(conf));
 }
 
+void ControlPanel::setHybridMode(bool enabled)
+{
+    if (!m_hybridMode) return;
+    QSignalBlocker blocker(m_hybridMode);
+    m_hybridMode->setChecked(enabled);
+}
+
+bool ControlPanel::hybridMode() const
+{
+    return m_hybridMode && m_hybridMode->isChecked();
+}
+
+void ControlPanel::setLiveMode(bool enabled)
+{
+    // Deliberately NOT signal-blocked (unlike setHybridMode): the point is to
+    // drive the real enable/disable path in Application through
+    // liveModeChanged, exactly as if the user had clicked the checkbox.
+    if (!m_liveMode || m_liveMode->isChecked() == enabled) return;
+    m_liveMode->setChecked(enabled);
+}
+
 void ControlPanel::setCameraBackendUI(bool isRealSense)
 {
     if (!m_btnCalibrate) return;  // group not built yet
@@ -305,6 +373,13 @@ void ControlPanel::setCameraBackendUI(bool isRealSense)
             : tr("USB microscope: print a checkerboard, then calibrate to correct "
                  "lens distortion and derive px/mm."));
     }
+}
+
+void ControlPanel::setAlignMultiActive(bool active)
+{
+    if (!m_btnAlignMulti) return;
+    m_btnAlignMulti->setText(active ? tr("Finish Align: Multi-Comp")
+                                     : tr("Align: Multi-Comp (Beta)"));
 }
 
 } // namespace ibom::gui

@@ -68,3 +68,8 @@ Makefile
 # Python
 __pycache__/
 *.pyc
+
+# Training pipeline artifacts (datasets, runs, venv) — never commit these
+datasets/
+runs/
+.venv-train/

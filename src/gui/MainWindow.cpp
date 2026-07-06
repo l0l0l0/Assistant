@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "CameraView.h"
+#include "utils/Logger.h"
 #include "PointCloudView.h"
 #include "ViewModeBar.h"
 #include "BomPanel.h"
@@ -19,6 +20,8 @@
 #include <QSignalBlocker>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QApplication>
+#include <QClipboard>
 #include <QMenu>
 #include <QDir>
 #include <QDockWidget>
@@ -130,6 +133,19 @@ void MainWindow::updateFpsDisplay(double fps)
 void MainWindow::updateStatusMessage(const QString& msg)
 {
     m_statusLabel->setText(msg);
+}
+
+void MainWindow::setVerboseLoggingChecked(bool on)
+{
+    if (m_actVerboseLog) {
+        QSignalBlocker block(m_actVerboseLog);
+        m_actVerboseLog->setChecked(on);
+    }
+}
+
+void MainWindow::showBomPanel()
+{
+    if (m_bomDock) m_bomDock->raise();
 }
 
 void MainWindow::updateAiStatus(bool ready, const QString& message)
@@ -324,6 +340,39 @@ void MainWindow::createMenuBar()
             &MainWindow::calibrationMonitorRequested);
 
     devMenu->addSeparator();
+
+    // ── Diagnostics logging ───────────────────────────────────────
+    m_actVerboseLog = devMenu->addAction(tr("Verbose debug logging"));
+    m_actVerboseLog->setCheckable(true);
+    m_actVerboseLog->setToolTip(tr(
+        "Lower the log level to trace so every debug log (camera, tracking, "
+        "optical flow, overlay, re-anchor, calibration, AI, settings…) is written "
+        "to the log file. Use 'Copy log file path' to find the file. Persisted."));
+    connect(m_actVerboseLog, &QAction::toggled, this, &MainWindow::verboseLoggingToggled);
+
+    auto* actDumpState = devMenu->addAction(tr("Dump full state to log"));
+    actDumpState->setToolTip(tr(
+        "Write a snapshot of the entire current configuration and runtime state "
+        "(camera, tracking, overlay, scale, AI, alignment…) to the log."));
+    connect(actDumpState, &QAction::triggered, this, &MainWindow::dumpStateRequested);
+
+    auto* actCopyLogPath = devMenu->addAction(tr("Copy log file path"));
+    actCopyLogPath->setToolTip(tr("Copy the path of the active log file to the clipboard."));
+    connect(actCopyLogPath, &QAction::triggered, this, [this]() {
+        const QString p = QString::fromStdString(ibom::utils::Logger::logFilePath());
+        QApplication::clipboard()->setText(p);
+        updateStatusMessage(tr("Log file path copied: %1").arg(p));
+    });
+
+    devMenu->addSeparator();
+    auto* actCompReanchor = devMenu->addAction(tr("Component re-anchor now"));
+    actCompReanchor->setToolTip(tr(
+        "Re-anchor the overlay by matching AI component detections to the iBOM "
+        "layout (requires a detector model in models/ and a current alignment). "
+        "Works when the board fills the frame, unlike geometric Auto-Align."));
+    connect(actCompReanchor, &QAction::triggered, this, &MainWindow::componentReanchorRequested);
+
+    devMenu->addSeparator();
     auto* actScript = devMenu->addAction(tr("How to run scripts/measure_fov.py…"));
     connect(actScript, &QAction::triggered, this, [this]() {
         emit fovMeasureRequested();  // opens the same dialog (shows script instructions)
@@ -429,6 +478,7 @@ void MainWindow::createDockWidgets()
     bomDock->setObjectName("BomDock");
     bomDock->setWidget(m_bomPanel);
     addDockWidget(Qt::RightDockWidgetArea, bomDock);
+    m_bomDock = bomDock;
 
     // Control panel (right, stacked under BOM)
     m_controlPanel = new ControlPanel(this);

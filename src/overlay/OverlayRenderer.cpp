@@ -1,251 +1,179 @@
 #include "OverlayRenderer.h"
 
-#include "gui/Theme.h"
-#include <QPen>
-#include <QBrush>
+#include "ibom/IBomData.h"
+
+#include <QPainter>
 #include <QFont>
-#include <opencv2/imgproc.hpp>
-#include <spdlog/spdlog.h>
+#include <QPen>
+#include <QPolygonF>
+#include <QString>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace ibom::overlay {
 
-OverlayRenderer::OverlayRenderer(QObject* parent)
-    : QObject(parent)
+QTransform OverlayRenderer::toQTransform(const cv::Mat& h3x3)
 {
+    if (h3x3.empty() || h3x3.rows != 3 || h3x3.cols != 3)
+        return {};
+    cv::Mat h;
+    h3x3.convertTo(h, CV_64F);
+    // cv maps column vectors (p' = H·p); QTransform maps row vectors
+    // (p' = p·T). T = Hᵀ, passed row-major to the 9-argument constructor.
+    return QTransform(
+        h.at<double>(0, 0), h.at<double>(1, 0), h.at<double>(2, 0),
+        h.at<double>(0, 1), h.at<double>(1, 1), h.at<double>(2, 1),
+        h.at<double>(0, 2), h.at<double>(1, 2), h.at<double>(2, 2));
 }
 
-OverlayRenderer::~OverlayRenderer() = default;
-
-void OverlayRenderer::setHomography(const Homography& homography)
+BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
 {
-    m_homography = homography;
-}
+    if (!in.project) return {};
+    const auto& bb = in.project->boardInfo.boardBBox;
+    double minX = bb.minX, minY = bb.minY, maxX = bb.maxX, maxY = bb.maxY;
+    if (maxX - minX <= 0.0 || maxY - minY <= 0.0) {
+        // Degenerate board bbox (iBOM without edge drawings): fall back to the
+        // union of component bboxes so the overlay still renders — the old
+        // full-frame renderer never depended on the board bbox at all.
+        minX = minY = std::numeric_limits<double>::max();
+        maxX = maxY = std::numeric_limits<double>::lowest();
+        for (const auto& c : in.project->components) {
+            minX = std::min(minX, c.bbox.minX);
+            minY = std::min(minY, c.bbox.minY);
+            maxX = std::max(maxX, c.bbox.maxX);
+            maxY = std::max(maxY, c.bbox.maxY);
+        }
+    }
+    const double bw = maxX - minX;
+    const double bh = maxY - minY;
+    if (bw <= 0.0 || bh <= 0.0) return {};
 
-void OverlayRenderer::setIBomData(const IBomProject& project)
-{
-    m_project = project;
-}
+    // Silkscreen can overhang the board edge slightly — pad the canvas.
+    constexpr double kMarginMm = 2.0;
+    // Buffer resolution (larger side). 2048 ≈ 2.4× the D405's 848 px frame
+    // width and ~1.9× a 1080p microscope frame — enough that the projective
+    // warp stays crisp at typical zooms. Bump it if the overlay looks soft at
+    // very high magnification (cost: ~4·W·H bytes of ARGB).
+    constexpr int kMaxDim = 2048;
 
-QImage OverlayRenderer::render(const cv::Mat& frame, const std::string& selectedRef)
-{
-    if (frame.empty()) return {};
+    const double totalW = bw + 2.0 * kMarginMm;
+    const double totalH = bh + 2.0 * kMarginMm;
+    const double s  = kMaxDim / std::max(totalW, totalH);  // buffer px per PCB mm
+    const double ox = minX - kMarginMm;                    // buffer (0,0) in PCB coords
+    const double oy = minY - kMarginMm;
+    const int bufW = std::max(1, static_cast<int>(std::lround(totalW * s)));
+    const int bufH = std::max(1, static_cast<int>(std::lround(totalH * s)));
 
-    // Convert frame to QImage
-    QImage image = matToQImage(frame);
-
-    QPainter painter(&image);
+    QImage img(bufW, bufH, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    QPainter painter(&img);
+    // This render is rare (selection/placed/toggle/color/project changes
+    // only), so shape antialiasing is affordable again — the per-frame cost
+    // is the warp in CameraView, not this tessellation.
     painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
 
-    // Draw board outline
-    if (m_homography.isValid()) {
-        drawBoardOutline(painter);
+    const auto mapX = [&](double x) { return (x - ox) * s; };
+    const auto mapY = [&](double y) { return (y - oy) * s; };
+
+    // Labels live in board space now, so they scale with zoom (AR-style)
+    // instead of keeping a fixed screen size: ~0.6 mm cap height reads when
+    // the board fills the frame and grows under magnification.
+    QFont normalLabelFont("Segoe UI");
+    normalLabelFont.setPixelSize(std::max(6, static_cast<int>(std::lround(0.6 * s))));
+    QFont selectedLabelFont("Segoe UI");
+    selectedLabelFont.setPixelSize(std::max(8, static_cast<int>(std::lround(0.9 * s))));
+    selectedLabelFont.setBold(true);
+
+    auto withAlpha = [](QColor c, int a) { c.setAlpha(a); return c; };
+
+    for (const auto& comp : in.project->components) {
+        if (comp.layer != Layer::Front) continue;
+
+        const bool isSelected = (comp.reference == in.selectedRef);
+        const bool isPlaced   = !isSelected && in.placedRefs.count(comp.reference) > 0;
+
+        QColor padColor, silkColor, labelColor;
+        qreal silkWidth = 1.0;
+        if (isSelected) {
+            padColor   = withAlpha(in.cSelected, 220);
+            silkColor  = withAlpha(in.cSelected, 240);
+            labelColor = withAlpha(in.cSelected, 255);
+            silkWidth  = in.selectedSilkW;
+        } else if (isPlaced) {
+            int a = static_cast<int>(180 * in.placedAlphaMul);
+            padColor   = withAlpha(in.cPlaced, a);
+            silkColor  = withAlpha(in.cPlaced, std::min(255, a + 30));
+            labelColor = withAlpha(in.cPlaced, std::min(255, a + 60));
+        } else {
+            padColor   = withAlpha(in.cNormal, 180);
+            silkColor  = withAlpha(in.cNormal, 180);
+            labelColor = in.labelNormal;
+        }
+
+        // ── Pads ── axis-aligned in PCB space (pad rotation was already
+        // ignored by the previous renderer — sizeX/sizeY only), so a plain
+        // rect/ellipse in buffer coords is the exact same geometry.
+        if (in.drawPads) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(padColor);
+            for (const auto& pad : comp.pads) {
+                const QRectF r(mapX(pad.position.x - pad.sizeX / 2.0),
+                               mapY(pad.position.y - pad.sizeY / 2.0),
+                               pad.sizeX * s, pad.sizeY * s);
+                if (pad.shape == Pad::Shape::Circle || pad.shape == Pad::Shape::Oval)
+                    painter.drawEllipse(r);
+                else
+                    painter.drawRect(r);
+            }
+        }
+
+        // ── Silkscreen / drawings ──
+        if (in.drawSilk) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(silkColor, silkWidth));
+            for (const auto& seg : comp.drawings) {
+                if (seg.type == DrawingSegment::Type::Line) {
+                    painter.drawLine(QPointF(mapX(seg.start.x), mapY(seg.start.y)),
+                                     QPointF(mapX(seg.end.x),   mapY(seg.end.y)));
+                } else if (seg.type == DrawingSegment::Type::Rect) {
+                    const QRectF r(QPointF(mapX(std::min(seg.start.x, seg.end.x)),
+                                           mapY(std::min(seg.start.y, seg.end.y))),
+                                   QPointF(mapX(std::max(seg.start.x, seg.end.x)),
+                                           mapY(std::max(seg.start.y, seg.end.y))));
+                    painter.drawRect(r);
+                } else if (seg.type == DrawingSegment::Type::Circle) {
+                    painter.drawEllipse(QPointF(mapX(seg.start.x), mapY(seg.start.y)),
+                                        seg.radius * s, seg.radius * s);
+                } else if (seg.type == DrawingSegment::Type::Polygon && !seg.points.empty()) {
+                    QPolygonF polyPts;
+                    polyPts.reserve(static_cast<int>(seg.points.size()));
+                    for (const auto& pt : seg.points)
+                        polyPts << QPointF(mapX(pt.x), mapY(pt.y));
+                    painter.drawPolygon(polyPts);
+                }
+            }
+        }
+
+        // ── Reference label ──
+        if (in.drawSilk || isSelected) {
+            const double cx = (comp.bbox.minX + comp.bbox.maxX) / 2.0;
+            const double cy = (comp.bbox.minY + comp.bbox.maxY) / 2.0;
+            painter.setPen(labelColor);
+            painter.setFont(isSelected ? selectedLabelFont : normalLabelFont);
+            painter.drawText(QPointF(mapX(cx), mapY(cy) - 0.15 * s),
+                             QString::fromStdString(comp.reference));
+        }
     }
-
-    // Draw each component
-    for (const auto& comp : m_project.components) {
-        if (comp.layer != m_activeLayer) continue;
-
-        bool isHighlighted = (comp.reference == selectedRef) ||
-            std::find(m_highlightedRefs.begin(), m_highlightedRefs.end(),
-                      comp.reference) != m_highlightedRefs.end();
-
-        // Set opacity based on highlight
-        painter.setOpacity(isHighlighted ? 1.0f : m_opacity);
-
-        if (m_showOutlines) drawComponentOutline(painter, comp);
-        if (m_showPads)     drawComponentPads(painter, comp);
-        if (m_showPin1)     drawPin1Marker(painter, comp);
-        if (m_showLabels || isHighlighted) drawComponentLabel(painter, comp);
-    }
-
     painter.end();
 
-    emit overlayUpdated();
-    return image;
-}
-
-void OverlayRenderer::drawComponentOutline(QPainter& painter, const Component& comp)
-{
-    QColor color = stateColor(comp.reference);
-    QPen pen(color, 2);
-    painter.setPen(pen);
-
-    QColor fillColor = color;
-    fillColor.setAlphaF(0.15f);
-    painter.setBrush(QBrush(fillColor));
-
-    if (m_homography.isValid()) {
-        // Transform bounding box corners through homography
-        auto corners = m_homography.transformRect(
-            static_cast<float>(comp.bbox.minX),
-            static_cast<float>(comp.bbox.minY),
-            static_cast<float>(comp.bbox.width()),
-            static_cast<float>(comp.bbox.height())
-        );
-
-        QPolygonF polygon;
-        for (const auto& pt : corners) {
-            polygon << QPointF(pt.x, pt.y);
-        }
-        painter.drawPolygon(polygon);
-    } else {
-        // Fallback: draw in PCB coordinates directly
-        painter.drawRect(QRectF(
-            comp.bbox.minX, comp.bbox.minY,
-            comp.bbox.width(), comp.bbox.height()
-        ));
-    }
-}
-
-void OverlayRenderer::drawComponentLabel(QPainter& painter, const Component& comp)
-{
-    QFont font("Monospace", 8);
-    font.setBold(true);
-    painter.setFont(font);
-
-    QColor color = stateColor(comp.reference);
-    painter.setPen(color);
-
-    cv::Point2f imgPos;
-    if (m_homography.isValid()) {
-        imgPos = m_homography.pcbToImage(
-            cv::Point2f(static_cast<float>(comp.position.x),
-                        static_cast<float>(comp.position.y)));
-    } else {
-        imgPos = cv::Point2f(static_cast<float>(comp.position.x),
-                              static_cast<float>(comp.position.y));
-    }
-
-    QString label = QString::fromStdString(comp.reference);
-    if (!comp.value.empty()) {
-        label += " (" + QString::fromStdString(comp.value) + ")";
-    }
-
-    // Draw text with background for readability
-    QFontMetrics fm(font);
-    QRect textRect = fm.boundingRect(label);
-    QPointF textPos(imgPos.x - textRect.width() / 2.0, imgPos.y - 5.0);
-
-    // Background
-    painter.setOpacity(0.8);
-    painter.fillRect(QRectF(textPos.x() - 2, textPos.y() - textRect.height(),
-                             textRect.width() + 4, textRect.height() + 4),
-                     QColor(0, 0, 0, 180));
-
-    // Text
-    painter.setOpacity(1.0);
-    painter.drawText(textPos, label);
-}
-
-void OverlayRenderer::drawComponentPads(QPainter& painter, const Component& comp)
-{
-    for (const auto& pad : comp.pads) {
-        cv::Point2f imgPos;
-        if (m_homography.isValid()) {
-            imgPos = m_homography.pcbToImage(
-                cv::Point2f(static_cast<float>(pad.position.x),
-                            static_cast<float>(pad.position.y)));
-        } else {
-            imgPos = cv::Point2f(static_cast<float>(pad.position.x),
-                                  static_cast<float>(pad.position.y));
-        }
-
-        QColor padColor = pad.isPin1 ? ibom::gui::theme::padPin1Color() : ibom::gui::theme::padRegularColor();
-        painter.setPen(QPen(padColor, 1));
-        painter.setBrush(QBrush(padColor));
-
-        float padRadius = 3.0f;
-        painter.drawEllipse(QPointF(imgPos.x, imgPos.y), padRadius, padRadius);
-    }
-}
-
-void OverlayRenderer::drawPin1Marker(QPainter& painter, const Component& comp)
-{
-    for (const auto& pad : comp.pads) {
-        if (!pad.isPin1) continue;
-
-        cv::Point2f imgPos;
-        if (m_homography.isValid()) {
-            imgPos = m_homography.pcbToImage(
-                cv::Point2f(static_cast<float>(pad.position.x),
-                            static_cast<float>(pad.position.y)));
-        } else {
-            imgPos = cv::Point2f(static_cast<float>(pad.position.x),
-                                  static_cast<float>(pad.position.y));
-        }
-
-        // Draw a distinct pin 1 marker (red filled circle)
-        QColor pin1Fill = ibom::gui::theme::padPin1Color();
-        pin1Fill.setAlpha(150);
-        painter.setPen(QPen(ibom::gui::theme::padPin1Color(), 2));
-        painter.setBrush(QBrush(pin1Fill));
-        painter.drawEllipse(QPointF(imgPos.x, imgPos.y), 5.0, 5.0);
-        break;
-    }
-}
-
-void OverlayRenderer::drawBoardOutline(QPainter& painter)
-{
-    if (m_project.boardOutline.empty()) return;
-
-    QPen pen(ibom::gui::theme::boardOutlineColor(), 2);
-    painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
-
-    for (const auto& seg : m_project.boardOutline) {
-        if (seg.type == DrawingSegment::Type::Line) {
-            auto p1 = m_homography.pcbToImage(
-                cv::Point2f(static_cast<float>(seg.start.x),
-                            static_cast<float>(seg.start.y)));
-            auto p2 = m_homography.pcbToImage(
-                cv::Point2f(static_cast<float>(seg.end.x),
-                            static_cast<float>(seg.end.y)));
-            painter.drawLine(QPointF(p1.x, p1.y), QPointF(p2.x, p2.y));
-        }
-        // TODO: Handle arcs, circles
-    }
-}
-
-QColor OverlayRenderer::stateColor(const std::string& ref) const
-{
-    auto it = m_componentStates.find(ref);
-    if (it == m_componentStates.end()) return ibom::gui::theme::defaultComponentColor();
-
-    const auto& state = it->second;
-    if (state == "placed")             return ibom::gui::theme::placedColor();
-    if (state == "missing")            return ibom::gui::theme::missingColor();
-    if (state == "wrong_orientation")  return ibom::gui::theme::defectColor();
-    if (state == "inspected")          return ibom::gui::theme::inspectedColor();
-
-    return ibom::gui::theme::defaultComponentColor();
-}
-
-void OverlayRenderer::setHighlightedRefs(const std::vector<std::string>& refs)
-{
-    m_highlightedRefs = refs;
-}
-
-void OverlayRenderer::setComponentState(const std::string& ref, const std::string& state)
-{
-    m_componentStates[ref] = state;
-}
-
-QImage OverlayRenderer::matToQImage(const cv::Mat& mat)
-{
-    if (mat.empty()) return {};
-
-    cv::Mat rgb;
-    if (mat.channels() == 3) {
-        cv::cvtColor(mat, rgb, cv::COLOR_BGR2RGB);
-    } else if (mat.channels() == 1) {
-        cv::cvtColor(mat, rgb, cv::COLOR_GRAY2RGB);
-    } else {
-        rgb = mat;
-    }
-
-    return QImage(rgb.data, rgb.cols, rgb.rows,
-                  static_cast<int>(rgb.step), QImage::Format_RGB888).copy();
+    BoardOverlay out;
+    out.image = img;
+    // p_buf = (p − o)·s — row-vector convention: translate first, then scale.
+    out.pcbToBuffer = QTransform::fromTranslate(-ox, -oy)
+                      * QTransform::fromScale(s, s);
+    return out;
 }
 
 } // namespace ibom::overlay

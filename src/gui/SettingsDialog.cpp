@@ -253,6 +253,59 @@ void SettingsDialog::createTrackingTab(QTabWidget* tabs)
                                         "Smaller = faster but less robust."));
     form->addRow(tr("Downscale:"), m_trackingDownscale);
 
+    m_trackingModel = new QComboBox;
+    m_trackingModel->addItem(tr("Auto (similarity / homography)"), 0);
+    m_trackingModel->addItem(tr("Similarity (4 DOF — steadiest, flat board)"), 1);
+    m_trackingModel->addItem(tr("Affine (6 DOF)"), 2);
+    m_trackingModel->addItem(tr("Homography (8 DOF — full perspective)"), 3);
+    m_trackingModel->setToolTip(
+        tr("Motion model fitted for the overlay. A flat board seen ~perpendicular "
+           "only needs a similarity; the full homography then lets noise leak into "
+           "spurious perspective (edge wobble). Auto keeps the simpler model when it "
+           "fits comparably well."));
+    form->addRow(tr("Motion model:"), m_trackingModel);
+
+    m_oneEuroMinCutoff = new QDoubleSpinBox;
+    m_oneEuroMinCutoff->setRange(0.1, 10.0);
+    m_oneEuroMinCutoff->setSingleStep(0.1);
+    m_oneEuroMinCutoff->setDecimals(2);
+    m_oneEuroMinCutoff->setSuffix(" Hz");
+    m_oneEuroMinCutoff->setToolTip(
+        tr("1€ filter baseline cutoff. Lower = steadier overlay at rest, but more "
+           "lag on motion."));
+    form->addRow(tr("Smoothing min cutoff:"), m_oneEuroMinCutoff);
+
+    m_oneEuroBeta = new QDoubleSpinBox;
+    m_oneEuroBeta->setRange(0.0, 1.0);
+    m_oneEuroBeta->setSingleStep(0.01);
+    m_oneEuroBeta->setDecimals(3);
+    m_oneEuroBeta->setToolTip(
+        tr("1€ filter speed coupling. Higher = less lag during motion (but a bit "
+           "more jitter)."));
+    form->addRow(tr("Smoothing beta:"), m_oneEuroBeta);
+
+    m_trackingClahe = new QCheckBox(tr("CLAHE pre-equalization (anti-glare)"));
+    m_trackingClahe->setToolTip(
+        tr("Locally equalize contrast before ORB → steadier keypoints under glare "
+           "and uneven lighting (helps the D405). Small extra cost per frame."));
+    form->addRow(QString(), m_trackingClahe);
+
+    m_trackingOpticalFlow = new QCheckBox(tr("Optical-flow assisted tracking"));
+    m_trackingOpticalFlow->setToolTip(
+        tr("Between periodic ORB re-detections, sub-pixel-track the landmarks "
+           "frame to frame with Lucas-Kanade. Smoother and cheaper than running "
+           "ORB on every frame; ORB still refreshes periodically and on loss."));
+    form->addRow(QString(), m_trackingOpticalFlow);
+
+    m_trackingGpuMode = new QComboBox;
+    m_trackingGpuMode->addItem(tr("Off (CPU)"), 0);
+    m_trackingGpuMode->addItem(tr("Auto (GPU if available)"), 1);
+    m_trackingGpuMode->addItem(tr("Force GPU"), 2);
+    m_trackingGpuMode->setToolTip(
+        tr("Run ORB feature detection on the Jetson GPU (cv::cuda::ORB) when "
+           "OpenCV was built with CUDA. Falls back to CPU automatically."));
+    form->addRow(tr("GPU acceleration:"), m_trackingGpuMode);
+
     m_microscopeIncremental = new QCheckBox(
         tr("Incremental frame→frame tracking (microscope)"));
     m_microscopeIncremental->setToolTip(
@@ -271,6 +324,24 @@ void SettingsDialog::createTrackingTab(QTabWidget* tabs)
         tr("Accumulated drift past which incremental tracking flags 'drifting' "
            "and invites a re-anchor."));
     form->addRow(tr("Re-anchor drift:"), m_reanchorDrift);
+
+    m_autoReanchorEnabled = new QCheckBox(
+        tr("Auto re-anchor on PCB outline (corrects drift)"));
+    m_autoReanchorEnabled->setToolTip(
+        tr("During live tracking, periodically re-locate the PCB outline "
+           "(BoardLocator) and re-anchor the overlay to cancel accumulated drift. "
+           "Only acts when the located pose disagrees enough with the current one, "
+           "so a healthy track is left undisturbed. Needs the board edges visible "
+           "(wide field / D405) — not the microscope zoomed-in case."));
+    form->addRow(QString(), m_autoReanchorEnabled);
+
+    m_autoReanchorInterval = new QDoubleSpinBox;
+    m_autoReanchorInterval->setRange(0.5, 30.0);
+    m_autoReanchorInterval->setSingleStep(0.5);
+    m_autoReanchorInterval->setSuffix(" s");
+    m_autoReanchorInterval->setToolTip(
+        tr("Seconds between automatic re-anchor attempts."));
+    form->addRow(tr("Auto re-anchor interval:"), m_autoReanchorInterval);
 
     tabs->addTab(page, tr("Tracking"));
 }
@@ -457,8 +528,22 @@ void SettingsDialog::loadFromConfig()
     m_matchRatio->setValue(m_config.matchDistanceRatio());
     m_ransacThreshold->setValue(m_config.ransacThreshold());
     m_trackingDownscale->setValue(static_cast<double>(m_config.trackingDownscale()));
+    {
+        int mi = m_trackingModel->findData(m_config.trackingModel());
+        m_trackingModel->setCurrentIndex(mi >= 0 ? mi : 0);
+    }
+    m_oneEuroMinCutoff->setValue(m_config.oneEuroMinCutoff());
+    m_oneEuroBeta->setValue(m_config.oneEuroBeta());
+    m_trackingClahe->setChecked(m_config.trackingClahe());
+    m_trackingOpticalFlow->setChecked(m_config.trackingOpticalFlow());
+    {
+        int gi = m_trackingGpuMode->findData(m_config.trackingGpuMode());
+        m_trackingGpuMode->setCurrentIndex(gi >= 0 ? gi : 1);
+    }
     m_microscopeIncremental->setChecked(m_config.microscopeIncremental());
     m_reanchorDrift->setValue(m_config.microscopeReanchorDriftPx());
+    m_autoReanchorEnabled->setChecked(m_config.reanchorEnabled());
+    m_autoReanchorInterval->setValue(m_config.reanchorIntervalS());
 
     // AI
     m_modelsPath->setText(QString::fromStdString(m_config.modelsPath()));
@@ -542,8 +627,16 @@ void SettingsDialog::accept()
     m_config.setMatchDistanceRatio(m_matchRatio->value());
     m_config.setRansacThreshold(m_ransacThreshold->value());
     m_config.setTrackingDownscale(static_cast<float>(m_trackingDownscale->value()));
+    m_config.setTrackingModel(m_trackingModel->currentData().toInt());
+    m_config.setOneEuroMinCutoff(m_oneEuroMinCutoff->value());
+    m_config.setOneEuroBeta(m_oneEuroBeta->value());
+    m_config.setTrackingClahe(m_trackingClahe->isChecked());
+    m_config.setTrackingOpticalFlow(m_trackingOpticalFlow->isChecked());
+    m_config.setTrackingGpuMode(m_trackingGpuMode->currentData().toInt());
     m_config.setMicroscopeIncremental(m_microscopeIncremental->isChecked());
     m_config.setMicroscopeReanchorDriftPx(m_reanchorDrift->value());
+    m_config.setReanchorEnabled(m_autoReanchorEnabled->isChecked());
+    m_config.setReanchorIntervalS(m_autoReanchorInterval->value());
 
     // AI
     m_config.setModelsPath(m_modelsPath->text().toStdString());
@@ -576,6 +669,21 @@ void SettingsDialog::updateCameraResolutionUI()
         && m_cameraBackend->currentData().toInt() == 1;
     if (m_v4l2ResWidget) m_v4l2ResWidget->setVisible(!isRS);
     if (m_rsResWidget)   m_rsResWidget->setVisible(isRS);
+
+    // Incremental frame→frame tracking is a microscope (V4L2) feature — the
+    // tracking worker only applies it on the V4L2 backend, so grey it (and its
+    // drift threshold) out on RealSense to avoid implying it does anything.
+    if (m_microscopeIncremental) {
+        m_microscopeIncremental->setEnabled(!isRS);
+        m_microscopeIncremental->setToolTip(
+            isRS ? tr("Microscope-only (V4L2). Ignored on the RealSense backend.")
+                 : tr("At high magnification the field of view is narrow, so matching "
+                      "every frame against one fixed reference fails as the microscope "
+                      "pans away. Incremental mode matches each frame against the "
+                      "previous one and composes the motion. Drift accumulates; "
+                      "re-anchor (A) to reset. Only applied on the V4L2 microscope backend."));
+    }
+    if (m_reanchorDrift) m_reanchorDrift->setEnabled(!isRS);
 }
 
 void SettingsDialog::enumerateCameras()

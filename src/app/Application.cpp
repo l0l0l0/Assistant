@@ -7,6 +7,8 @@
 #include "gui/StatsPanel.h"
 #include "gui/BomPanel.h"
 #include "gui/InspectionWizard.h"
+#include "gui/AlignmentWizard.h"
+#include "gui/MultiAlignDialog.h"
 #include "gui/InspectionPanel.h"
 #include "camera/ICameraSource.h"
 #include "camera/CameraCapture.h"
@@ -24,6 +26,9 @@
 #include "overlay/Homography.h"
 #include "overlay/HeatmapRenderer.h"
 #include "overlay/TrackingWorker.h"
+#include "overlay/BoardLocator.h"
+#include "overlay/ComponentReanchor.h"
+#include "overlay/BlobComponentDetector.h"
 #include "features/PickAndPlace.h"
 #include "features/Measurement.h"
 #include "features/SnapshotHistory.h"
@@ -51,15 +56,20 @@
 #include <QStandardPaths>
 #include <QPushButton>
 #include <QPainter>
+#include <QColor>
 #include <QMediaDevices>
 #include <QCameraDevice>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QDateTime>
 #include <QFile>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -143,9 +153,19 @@ bool Application::initialize()
     // Wire signals between subsystems
     connectSignals();
 
+    // Apply persisted verbose-logging setting (Dev menu) at startup and reflect
+    // it in the menu checkmark.
+    if (m_config->verboseLogging()) {
+        utils::Logger::setLevel(spdlog::level::trace);
+        spdlog::info("Verbose debug logging restored from config — log file: {}",
+                     utils::Logger::logFilePath());
+    }
+    m_mainWindow->setVerboseLoggingChecked(m_config->verboseLogging());
+
     // Reflect persisted AI settings in the control panel (before initializeAI
     // so the spinner already shows the threshold the detector will use).
     m_mainWindow->controlPanel()->setConfidenceThreshold(m_config->detectionConfidence());
+    m_mainWindow->controlPanel()->setHybridMode(m_config->hybridDriftCorrection());
 
     // AI pipeline — off the GUI thread: first launch with TensorRT compiles
     // the engine (minutes); the app is fully usable without it meanwhile.
@@ -363,9 +383,8 @@ void Application::createSubsystems()
     spdlog::info("Creating IBomParser...");
     m_ibomParser = std::make_unique<IBomParser>();
 
-    // Overlay renderer + homography
-    spdlog::info("Creating OverlayRenderer...");
-    m_overlayRenderer = std::make_unique<overlay::OverlayRenderer>();
+    // Homography (the overlay renderer is a stateless free function,
+    // overlay::OverlayRenderer::renderBoardSpace — no instance to create).
     m_homography = std::make_unique<overlay::Homography>();
 
     // Heatmap renderer
@@ -387,10 +406,20 @@ void Application::createSubsystems()
         Q_ARG(double, m_config->ransacThreshold()),
         Q_ARG(int,    m_config->trackingIntervalMs()),
         Q_ARG(float,  m_config->trackingDownscale()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setStabilization", Qt::QueuedConnection,
+        Q_ARG(int,    m_config->trackingModel()),
+        Q_ARG(double, m_config->oneEuroMinCutoff()),
+        Q_ARG(double, m_config->oneEuroBeta()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setAdvanced", Qt::QueuedConnection,
+        Q_ARG(bool, m_config->trackingClahe()),
+        Q_ARG(bool, m_config->trackingOpticalFlow()),
+        Q_ARG(int,  m_config->trackingGpuMode()));
     QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
         Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                       && m_config->microscopeIncremental()),
         Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+    QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
+        Q_ARG(bool, m_config->hybridDriftCorrection()));
 
     // Dataset capture worker on its own thread — JPEG writes + label
     // projection must never block the GUI (same pattern as tracking).
@@ -424,6 +453,33 @@ void Application::createSubsystems()
         QMetaObject::invokeMethod(m_datasetCreator, "setClassRulesPath", Qt::QueuedConnection,
             Q_ARG(QString, QString::fromStdString(rulesPath.string())));
     }
+
+    // Periodic re-anchor timer (plan B): during live tracking, correct
+    // accumulated drift. Prefer the component path — it matches detections
+    // (trained model OR model-free blobs) to iBOM positions and works when the
+    // board fills the frame. Fall back to the geometric outline only when
+    // component re-anchor can't run (no iBOM board bbox etc.). The timeout
+    // re-checks all conditions; updateReanchorTimer() starts/stops it.
+    m_reanchorTimer = new QTimer(this);
+    m_reanchorTimer->setObjectName("ReanchorTimer");
+    connect(m_reanchorTimer, &QTimer::timeout, this, [this]() {
+        if (!m_config->reanchorEnabled() || !m_liveMode || !m_ibomProject || m_autoAligning)
+            return;
+        // Periodic drift correction needs a STABLE absolute pose. A trained
+        // detector gives that; the model-free blob detector does NOT — its
+        // per-fit reproj is fine (~3px) but the pose wanders ~30px frame to
+        // frame (different blob subset each time), so re-applying it every few
+        // seconds yanks the overlay and resets the tracking reference instead
+        // of correcting drift (field log 2026-07-02). So: component re-anchor
+        // periodically only with a model; the geometric outline otherwise
+        // (harmless no-op when the board fills the frame). Blobs stay for
+        // one-shot Auto-Align and loss recovery, where a coarse pose is a win.
+        if (componentDetector())
+            componentReanchor(/*silent=*/true);
+        else
+            autoAlignBoard(/*silent=*/true, /*isRetry=*/false, /*geometricOnly=*/true);
+    });
+    updateReanchorTimer();
 
     // Inspection workflow features
     spdlog::info("Creating inspection workflow features...");
@@ -610,8 +666,6 @@ void Application::switchProfile(int profileIndex)
     // m_liveMode forced false above, the normal homographyUpdated handler
     // won't run for this switch, so OverlayRenderer / StatsPanel scale /
     // BoardMinimap would otherwise keep showing the outgoing profile's values.
-    if (m_homography && m_homography->isValid() && m_overlayRenderer)
-        m_overlayRenderer->setHomography(*m_homography);
     if (auto* sp = m_mainWindow->statsPanel())
         sp->setScale(m_currentPixelsPerMm);
     if (m_mainWindow->boardMinimap())
@@ -627,6 +681,9 @@ void Application::switchProfile(int profileIndex)
             Qt::QueuedConnection,
             Q_ARG(bool,   incremental),
             Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+        QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection",
+            Qt::QueuedConnection,
+            Q_ARG(bool, m_config->hybridDriftCorrection()));
     }
 
     emit cameraProfileChanged(profileIndex);
@@ -668,6 +725,853 @@ void Application::startComponentAnchor()
             .arg(QString::fromStdString(m_anchorRef)));
     spdlog::info("Anchor armed on {} at PCB ({:.2f}, {:.2f})",
                  m_anchorRef, m_anchorPcb.x, m_anchorPcb.y);
+}
+
+void Application::reportAlignmentResult(const QString& summary)
+{
+    m_mainWindow->updateStatusMessage(summary);
+    if (m_alignWizard && m_alignWizard->isVisible())
+        m_alignWizard->reportResult(summary);
+
+    // Persist the homography so it can be offered back on the next launch if
+    // the same iBOM is reloaded (see loadIBomFile()). Best-effort: there is no
+    // way to know whether the camera/board actually moved since, so this is
+    // just "what we had last time", not a correctness guarantee.
+    if (m_homography && m_homography->isValid() && m_config) {
+        Config::SavedAlignment sa;
+        sa.valid         = true;
+        sa.ibomFilePath  = m_config->ibomFilePath();
+        sa.pixelsPerMm   = m_currentPixelsPerMm;
+        sa.timestamp     = QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toStdString();
+        const cv::Mat& m = m_homography->matrix();
+        if (m.rows == 3 && m.cols == 3) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    sa.matrix[r * 3 + c] = m.at<double>(r, c);
+            m_config->setSavedAlignment(sa);
+            m_config->save();
+        }
+    }
+}
+
+cv::Point2f Application::refineClickPoint(cv::Point2f rawPoint, int searchRadiusPx) const
+{
+    if (!m_lastColorFrame || m_lastColorFrame->empty())
+        return rawPoint;
+
+    const cv::Mat& frame = *m_lastColorFrame;
+    if (rawPoint.x < 0 || rawPoint.y < 0 ||
+        rawPoint.x >= frame.cols || rawPoint.y >= frame.rows)
+        return rawPoint;
+
+    cv::Mat gray;
+    if (frame.channels() == 1) gray = frame;
+    else cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+
+    std::vector<cv::Point2f> pts = {rawPoint};
+    const int winRadius = std::max(3, searchRadiusPx / 2);
+    cv::cornerSubPix(gray, pts, cv::Size(winRadius, winRadius), cv::Size(-1, -1),
+                      cv::TermCriteria(cv::TermCriteria::EPS | cv::TermCriteria::COUNT, 20, 0.01));
+
+    cv::Point2f refined = pts[0];
+    const float dist = cv::norm(refined - rawPoint);
+    if (!std::isfinite(refined.x) || !std::isfinite(refined.y) || dist > searchRadiusPx) {
+        spdlog::debug("refineClickPoint: rejecting subpix result (dist={:.1f}px > {}px radius)",
+                      dist, searchRadiusPx);
+        return rawPoint;
+    }
+    spdlog::debug("refineClickPoint: ({:.1f},{:.1f}) -> ({:.1f},{:.1f}) [{:.2f}px]",
+                  rawPoint.x, rawPoint.y, refined.x, refined.y, dist);
+    return refined;
+}
+
+void Application::setMultiAlignUIState(bool collecting)
+{
+    m_mainWindow->controlPanel()->setAlignMultiActive(collecting);
+    if (m_alignWizard) m_alignWizard->setMultiAlignCollecting(collecting);
+    // Leaving collection (finish or cross-cancel) clears any pending click
+    // targets drawn on the PCB Map and closes the multi-align panel.
+    if (!collecting) {
+        m_mainWindow->boardMinimap()->setClickTargets({});
+        if (m_multiAlignDialog) m_multiAlignDialog->hide();
+    }
+}
+
+void Application::showMultiAlignDialog()
+{
+    if (!m_multiAlignDialog) {
+        m_multiAlignDialog = new gui::MultiAlignDialog(m_mainWindow.get());
+
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::methodChanged,
+                this, [this](int method) {
+            m_alignMultiMethod = method;
+            // Re-arm the currently selected component with the new method so the
+            // change takes effect immediately (and updates the PCB Map targets).
+            if (m_alignMulti && !m_selectedRef.empty())
+                beginMarkComponent(m_selectedRef);
+        });
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::finishRequested,
+                this, [this]() { applyMultiAlignment(); });
+        connect(m_multiAlignDialog, &gui::MultiAlignDialog::cancelRequested,
+                this, [this]() {
+            if (!m_alignMulti) return;
+            m_alignMulti = false;
+            m_alignMultiAwaitClick = false;
+            m_alignMultiHaveCorner1 = false;
+            setMultiAlignUIState(false);   // clears PCB Map targets + button text
+            if (m_multiAlignDialog) m_multiAlignDialog->hide();
+            m_mainWindow->updateStatusMessage(tr("Multi-align cancelled"));
+        });
+    }
+    m_multiAlignDialog->setMethod(m_alignMultiMethod);
+    m_multiAlignDialog->setSelectedComponent(QString());
+    m_multiAlignDialog->setStatus(tr("Pick a component to begin."));
+    m_multiAlignDialog->setMarkedCount(0);
+    m_multiAlignDialog->show();
+    m_multiAlignDialog->raise();
+    m_multiAlignDialog->activateWindow();
+}
+
+const Component* Application::componentAtPcb(cv::Point2f pcbPt) const
+{
+    if (!m_ibomProject) return nullptr;
+
+    // Prefer a component whose bbox actually contains the click — this makes
+    // "click the part on the PCB Map to select it" reliable even on a dense
+    // board, where the nearest *center* can belong to a bigger neighbour. When
+    // several overlap the point, take the smallest (most specific) one. Only
+    // when the click lands on bare board do we fall back to nearest-center.
+    const Component* hit = nullptr;
+    double hitArea = std::numeric_limits<double>::max();
+    const Component* nearest = nullptr;
+    double bestDist = std::numeric_limits<double>::max();
+
+    for (const auto& c : m_ibomProject->components) {
+        if (c.layer != ibom::Layer::Front) continue;  // matches the rendered overlay
+        const auto& bb = c.bbox;
+        if (pcbPt.x >= bb.minX && pcbPt.x <= bb.maxX &&
+            pcbPt.y >= bb.minY && pcbPt.y <= bb.maxY) {
+            const double area = (bb.maxX - bb.minX) * (bb.maxY - bb.minY);
+            if (area < hitArea) { hitArea = area; hit = &c; }
+        }
+        const double d = std::hypot(c.position.x - pcbPt.x, c.position.y - pcbPt.y);
+        if (d < bestDist) { bestDist = d; nearest = &c; }
+    }
+    return hit ? hit : nearest;
+}
+
+void Application::beginMarkComponent(const std::string& ref)
+{
+    if (!m_ibomProject) return;
+    const Component* comp = nullptr;
+    for (const auto& c : m_ibomProject->components)
+        if (c.reference == ref) { comp = &c; break; }
+    if (!comp) return;
+
+    // Reflect the selection everywhere (overlay emphasis, minimap, BOM row).
+    m_selectedRef = ref;
+    m_mainWindow->boardMinimap()->setSelectedRef(ref);
+    if (auto* bom = m_mainWindow->bomPanel()) bom->highlightComponent(ref);
+
+    const QString qref = QString::fromStdString(ref);
+    if (m_multiAlignDialog) {
+        m_multiAlignDialog->setSelectedComponent(qref);
+        m_multiAlignDialog->setMethod(m_alignMultiMethod);
+    }
+    // Push a message to both the status bar and (if open) the multi-align panel.
+    auto setStatus = [this](const QString& s) {
+        m_mainWindow->updateStatusMessage(s);
+        if (m_multiAlignDialog) m_multiAlignDialog->setStatus(s);
+    };
+
+    switch (m_alignMultiMethod) {
+    case 1: {  // Pin 1 — single click, anchored to the iBOM pin-1 pad.
+        const Pad* pin1 = nullptr;
+        for (const auto& p : comp->pads) if (p.isPin1) { pin1 = &p; break; }
+        if (!pin1) {
+            // Don't arm — let the user pick another component without cancelling.
+            m_alignMultiAwaitClick = false;
+            m_mainWindow->boardMinimap()->setClickTargets({});
+            setStatus(
+                tr("%1 has no pin-1 pad in the iBOM — pick another component, or "
+                   "switch to the 'opposite pads' / 'body corners' method.")
+                .arg(qref));
+            return;
+        }
+        m_alignMultiPcb = cv::Point2f(static_cast<float>(pin1->position.x),
+                                      static_cast<float>(pin1->position.y));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        // Pin 1 is already drawn as the prominent RED marker on the PCB Map
+        // (the selected component's pin-1 pad). The user asked to rely on that
+        // red pin rather than a separate green target ring for the pin method,
+        // so don't add a green click target here.
+        m_mainWindow->boardMinimap()->setClickTargets({});
+        setStatus(
+            tr("Click PIN 1 of %1 in the image (the RED pin on the PCB Map). "
+               "Or pick another component to switch.").arg(qref));
+        break;
+    }
+    case 2: {  // Two farthest-apart pads → midpoint of the two (precise anchor).
+        if (comp->pads.size() < 2) {
+            m_alignMultiAwaitClick = false;
+            m_mainWindow->boardMinimap()->setClickTargets({});
+            setStatus(
+                tr("%1 has fewer than 2 pads — pick another component, or use the "
+                   "'body corners' / 'pin 1' method.").arg(qref));
+            return;
+        }
+        // Find the pair of pads with the largest separation (footprint corners).
+        double best = -1.0; const Pad* pa = nullptr; const Pad* pb = nullptr;
+        for (size_t i = 0; i < comp->pads.size(); ++i)
+            for (size_t j = i + 1; j < comp->pads.size(); ++j) {
+                const double d = std::hypot(comp->pads[i].position.x - comp->pads[j].position.x,
+                                            comp->pads[i].position.y - comp->pads[j].position.y);
+                if (d > best) { best = d; pa = &comp->pads[i]; pb = &comp->pads[j]; }
+            }
+        if (!pa || !pb) { m_alignMultiAwaitClick = false; return; }
+        m_alignMultiPcb = cv::Point2f(
+            static_cast<float>((pa->position.x + pb->position.x) * 0.5),
+            static_cast<float>((pa->position.y + pb->position.y) * 0.5));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        // Same red graphic as the pin-1 marker (user request) — these are pads.
+        m_mainWindow->boardMinimap()->setClickTargets({
+            cv::Point2f(static_cast<float>(pa->position.x), static_cast<float>(pa->position.y)),
+            cv::Point2f(static_cast<float>(pb->position.x), static_cast<float>(pb->position.y))},
+            QColor(255, 70, 70));
+        setStatus(
+            tr("Click the two RED target pads of %1 in the image (opposite "
+               "corners of the footprint), in any order. Or pick another "
+               "component to switch.").arg(qref));
+        break;
+    }
+    default: {  // 0: two body corners → midpoint, anchored to bbox center.
+        m_alignMultiPcb = cv::Point2f(static_cast<float>(comp->bbox.center().x),
+                                      static_cast<float>(comp->bbox.center().y));
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiAwaitClick  = true;
+        m_alignMultiRef = ref;
+        // Mark the two diagonal corners of the body as click targets.
+        m_mainWindow->boardMinimap()->setClickTargets({
+            cv::Point2f(static_cast<float>(comp->bbox.minX), static_cast<float>(comp->bbox.minY)),
+            cv::Point2f(static_cast<float>(comp->bbox.maxX), static_cast<float>(comp->bbox.maxY))});
+        setStatus(
+            tr("Click the two green target corners of %1's body in the image "
+               "(order doesn't matter). Or pick another component to switch.").arg(qref));
+        break;
+    }
+    }
+}
+
+void Application::applyMultiAlignment()
+{
+    // Stop collecting regardless of outcome.
+    m_alignMulti = false;
+    m_alignMultiAwaitClick = false;
+    m_alignMultiHaveCorner1 = false;
+    setMultiAlignUIState(false);  // also clears the PCB Map click targets
+
+    const auto& pcb = m_alignMultiPcbPts;
+    const auto& img = m_alignMultiImgPts;
+    const int n = static_cast<int>(pcb.size());
+    if (!m_ibomProject || n < 2) {
+        m_mainWindow->updateStatusMessage(
+            tr("Multi-align cancelled — need at least 2 components (got %1)").arg(n));
+        return;
+    }
+
+    // Fit PCB→image transform: ≥4 → homography (perspective), 3 → affine,
+    // 2 → similarity (uniform scale + rotation + translation).
+    cv::Mat H;  // 3x3, CV_64F
+    if (n >= 4) {
+        H = cv::findHomography(pcb, img, cv::RANSAC, 5.0);
+    } else if (n == 3) {
+        cv::Mat A = cv::estimateAffine2D(pcb, img);  // 2x3
+        if (!A.empty()) {
+            H = cv::Mat::eye(3, 3, CV_64F);
+            A.copyTo(H(cv::Rect(0, 0, 3, 2)));
+        }
+    } else {  // n == 2 — similarity
+        const double dxp = pcb[1].x - pcb[0].x, dyp = pcb[1].y - pcb[0].y;
+        const double dxi = img[1].x - img[0].x, dyi = img[1].y - img[0].y;
+        const double dp = std::hypot(dxp, dyp), di = std::hypot(dxi, dyi);
+        if (dp >= 0.1 && di >= 1.0) {
+            const double s = di / dp;
+            const double rot = std::atan2(dyi, dxi) - std::atan2(dyp, dxp);
+            const double c = std::cos(rot) * s, sn = std::sin(rot) * s;
+            const double tx = img[0].x - (c * pcb[0].x - sn * pcb[0].y);
+            const double ty = img[0].y - (sn * pcb[0].x + c * pcb[0].y);
+            H = (cv::Mat_<double>(3, 3) << c, -sn, tx, sn, c, ty, 0, 0, 1);
+        }
+    }
+    if (H.empty() || H.rows != 3 || H.cols != 3) {
+        m_mainWindow->updateStatusMessage(
+            tr("Multi-align failed — could not fit a transform (try components farther apart)"));
+        spdlog::error("Multi-align: transform fit failed (n={})", n);
+        return;
+    }
+
+    // Project the board bbox corners through H to feed the standard path.
+    auto& bb = m_ibomProject->boardInfo.boardBBox;
+    std::vector<cv::Point2f> pcbCorners = {
+        {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+        {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+        {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+        {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+    };
+    std::vector<cv::Point2f> imgCorners;
+    cv::perspectiveTransform(pcbCorners, imgCorners, H);
+
+    ++m_alignmentEpoch;
+    if (!m_homography->compute(pcbCorners, imgCorners)) {
+        m_mainWindow->updateStatusMessage(tr("Multi-align failed — homography compute error"));
+        spdlog::error("Multi-align: Homography::compute failed");
+        return;
+    }
+    if (m_liveMode) m_baseHomography = m_homography->matrix().clone();
+
+    // Scale px/mm from the projected top edge (same as the 4-corner path).
+    const double topEdgePx = cv::norm(imgCorners[1] - imgCorners[0]);
+    const double boardWMm = bb.width();
+    if (boardWMm > 0.0 && topEdgePx > 0.0) {
+        m_basePixelsPerMm = topEdgePx / boardWMm;
+        m_currentPixelsPerMm = m_basePixelsPerMm;
+        if (auto* sp = m_mainWindow->statsPanel())
+            sp->setScale(m_currentPixelsPerMm);
+    } else {
+        updateDynamicScale();
+    }
+    if (m_trackingWorker)
+        QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
+    autoStartLiveTracking();
+
+    const char* model = (n >= 4) ? "homography" : (n == 3) ? "affine" : "similarity";
+    reportAlignmentResult(
+        tr("Multi-align set from %1 components (%2) — scale: %3 px/mm")
+        .arg(n).arg(model).arg(m_currentPixelsPerMm, 0, 'f', 1));
+    spdlog::info("Multi-align OK: {} components, {} model, scale={:.2f} px/mm",
+                 n, model, m_currentPixelsPerMm);
+}
+
+void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
+{
+    if (m_autoAligning) return;  // already running, ignore re-clicks
+    if (!m_lastColorFrame || m_lastColorFrame->empty()) {
+        if (!silent)
+            m_mainWindow->updateStatusMessage(tr("Auto-Align: no camera frame available yet"));
+        return;
+    }
+
+    // Fresh interactive attempt: arm the auto-retry budget (a single
+    // badly-timed frame — blur, glare, a hand in view — shouldn't fail the
+    // whole click; the completion handler retries on fresh frames).
+    if (!silent && !isRetry)
+        m_autoAlignRetriesLeft = 2;
+
+    // Cancel any other interactive picking mode.
+    m_alignOnComponents = false;
+    m_alignCompStep = 0;
+    m_pickingHomographyPoints = false;
+    m_anchorMode = false;
+
+    m_autoAligning = true;
+    if (!silent)
+        m_mainWindow->updateStatusMessage(tr("Auto-Align: locating board outline..."));
+
+    const cv::Mat colorCopy = m_lastColorFrame->clone();
+    const cv::Mat depthCopy = (m_lastDepthFrame && !m_lastDepthFrame->empty())
+        ? m_lastDepthFrame->clone() : cv::Mat();
+    const std::shared_ptr<const IBomProject> project = m_ibomProject;
+
+    // Prefer a fresh pixels-per-mm estimate from depth pinhole geometry
+    // (fx / distance) over the currently cached scale, which may come from a
+    // checkerboard calibration done at a different working distance or with
+    // a different camera entirely — that mismatch is exactly what makes
+    // BoardLocator::validateSize() reject a correctly-found board outline.
+    double expectedPixelsPerMm = 0.0;
+#ifdef IBOM_HAVE_REALSENSE
+    if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get())) {
+        const double fx = rs->colorFx();
+        if (fx > 0.0 && m_lastDepthDistanceMm > 0.0)
+            expectedPixelsPerMm = fx / m_lastDepthDistanceMm;
+    }
+#endif
+    if (expectedPixelsPerMm <= 0.0) {
+        expectedPixelsPerMm = m_currentPixelsPerMm > 0.0
+            ? m_currentPixelsPerMm : m_basePixelsPerMm;
+    }
+    const uint64_t dispatchEpoch = ++m_alignmentEpoch;
+
+    auto* watcher = new QFutureWatcher<overlay::BoardLocateResult>(this);
+    connect(watcher, &QFutureWatcher<overlay::BoardLocateResult>::finished, this,
+            [this, watcher, project, dispatchEpoch, silent]() {
+        const overlay::BoardLocateResult result = watcher->result();
+        watcher->deleteLater();
+        m_autoAligning = false;
+
+        if (dispatchEpoch != m_alignmentEpoch) {
+            // Another alignment action (manual or a second Auto-Align click)
+            // already landed while this detection was running — applying this
+            // now-stale result would clobber the newer one.
+            spdlog::info("Auto-Align: discarding stale result (newer alignment already applied)");
+            return;
+        }
+
+        if (!result.found) {
+            if (silent) {
+                m_reanchorFailStreak = std::min(m_reanchorFailStreak + 1, 20);
+                spdlog::debug("Periodic re-anchor: board not found ({}), streak {}",
+                              result.message, m_reanchorFailStreak);
+            } else if (m_autoAlignRetriesLeft > 0) {
+                // One frame is a lottery ticket (blur/glare/hand); retry on a
+                // fresh frame before reporting failure to the user.
+                const int attempt = 3 - m_autoAlignRetriesLeft;
+                --m_autoAlignRetriesLeft;
+                m_mainWindow->updateStatusMessage(
+                    tr("Auto-Align: board not found — retrying on a fresh frame (%1/3)…")
+                        .arg(attempt + 1));
+                spdlog::info("Auto-Align: not found ({}), retry {} of 2 in 300 ms",
+                             result.message, attempt);
+                QTimer::singleShot(300, this, [this]() {
+                    autoAlignBoard(/*silent=*/false, /*isRetry=*/true);
+                });
+            } else {
+                m_mainWindow->updateStatusMessage(
+                    tr("Auto-Align failed after 3 attempts: %1")
+                        .arg(QString::fromStdString(result.message)));
+                spdlog::warn("Auto-Align failed (3 attempts): {}", result.message);
+            }
+            return;
+        }
+
+        // Periodic (silent) re-anchor: only act on a confident detection, and
+        // only when it disagrees enough with the current pose to be worth a
+        // re-anchor — otherwise leave healthy live tracking undisturbed (a
+        // re-anchor resets the tracking reference and would otherwise stutter).
+        if (silent) {
+            // BoardLocator found the board here → geometric re-anchor works;
+            // clear any back-off streak.
+            m_reanchorFailStreak = 0;
+            if (result.score < m_config->reanchorMinScore()) {
+                spdlog::debug("Periodic re-anchor: score {:.2f} < {:.2f}, skipping",
+                              result.score, m_config->reanchorMinScore());
+                return;
+            }
+            const auto& sb = project->boardInfo.boardBBox;
+            const std::vector<cv::Point2f> curPcb = {
+                {static_cast<float>(sb.minX), static_cast<float>(sb.minY)},
+                {static_cast<float>(sb.maxX), static_cast<float>(sb.minY)},
+                {static_cast<float>(sb.maxX), static_cast<float>(sb.maxY)},
+                {static_cast<float>(sb.minX), static_cast<float>(sb.maxY)}
+            };
+            double maxShift = 1e9;  // no current pose → always (re)anchor
+            if (m_homography && m_homography->isValid() && result.imageCorners.size() == 4) {
+                maxShift = 0.0;
+                for (size_t i = 0; i < 4; ++i) {
+                    const auto cur = m_homography->pcbToImage(curPcb[i]);
+                    maxShift = std::max(maxShift,
+                        cv::norm(cv::Point2f(cur.x - result.imageCorners[i].x,
+                                             cur.y - result.imageCorners[i].y)));
+                }
+            }
+            constexpr double kReanchorMinShiftPx = 12.0;
+            if (maxShift < kReanchorMinShiftPx) {
+                spdlog::debug("Periodic re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
+                              kReanchorMinShiftPx, maxShift);
+                return;
+            }
+            spdlog::info("Periodic re-anchor: correcting drift (shift {:.1f}px, score {:.2f})",
+                         maxShift, result.score);
+        }
+
+        // Use the project captured at dispatch time, not the live m_ibomProject,
+        // in case the user loaded a different iBOM while detection was running.
+        const auto& bb = project->boardInfo.boardBBox;
+        const std::vector<cv::Point2f> pcbCorners = {
+            {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+            {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+        };
+
+        if (!m_homography->compute(pcbCorners, result.imageCorners)) {
+            m_mainWindow->updateStatusMessage(tr("Auto-Align: homography computation failed"));
+            return;
+        }
+
+        m_baseHomography = m_homography->matrix().clone();
+        if (m_mainWindow->boardMinimap())
+            m_mainWindow->boardMinimap()->update();
+
+        // Compute scale directly from the new homography (mirrors the manual
+        // 4-corner handler's fallback) rather than via updateDynamicScale(),
+        // so the displayed px/mm always reflects this alignment regardless of
+        // Config::scaleMethod().
+        const double pcbW = bb.width();
+        const auto cornerTL = m_homography->pcbToImage({static_cast<float>(bb.minX), static_cast<float>(bb.minY)});
+        const auto cornerTR = m_homography->pcbToImage({static_cast<float>(bb.maxX), static_cast<float>(bb.minY)});
+        const double pixW = cv::norm(cv::Point2f(cornerTL.x - cornerTR.x, cornerTL.y - cornerTR.y));
+        if (pcbW > 0.0) {
+            m_basePixelsPerMm = pixW / pcbW;
+            m_currentPixelsPerMm = m_basePixelsPerMm;
+            if (auto* sp = m_mainWindow->statsPanel())
+                sp->setScale(m_currentPixelsPerMm);
+        }
+
+        if (m_trackingWorker)
+            QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
+        autoStartLiveTracking();
+
+        if (silent) {
+            // Periodic re-anchor: applied silently (already score- and
+            // drift-gated above). No popups, no status spam.
+            spdlog::info("Periodic re-anchor applied via {} (score {:.2f})",
+                         result.method, result.score);
+            return;
+        }
+
+        // The edge-agreement score is only weakly discriminative on a busy PCB
+        // against a cluttered/reflective background: a spatially-offset quad can
+        // still overlap ~1/3 of the real edges. Below this level the placement
+        // is untrustworthy (often visibly shifted), so flag it rather than
+        // reporting a clean "success", and point the user at the reliable
+        // manual path instead of leaving them to wonder why it looks wrong.
+        constexpr double kAutoAlignTrustScore = 0.45;
+        if (result.score < kAutoAlignTrustScore) {
+            reportAlignmentResult(
+                tr("Auto-Align: LOW confidence (score %1 via %2) — the overlay is "
+                   "likely misplaced. Use 'Reset Alignment' then 'Align: Multi-Comp' "
+                   "for this board.")
+                    .arg(result.score, 0, 'f', 2)
+                    .arg(QString::fromStdString(result.method)));
+            spdlog::warn("Auto-Align low confidence: via {} score {:.2f} (< {:.2f})",
+                         result.method, result.score, kAutoAlignTrustScore);
+            QMessageBox::warning(m_mainWindow.get(), tr("Auto-Align — Low Confidence"),
+                tr("Auto-Align placed the overlay but with low confidence "
+                   "(edge-agreement score %1).\n\n"
+                   "On a glossy board over a cluttered background the automatic "
+                   "outline detection is unreliable. If the overlay doesn't line "
+                   "up, click 'Reset Alignment' and use 'Align: Multi-Comp' — mark "
+                   "a few components (the PCB Map shows exactly where to click) for "
+                   "a precise, repeatable result that's then saved for next time.")
+                    .arg(result.score, 0, 'f', 2));
+            return;
+        }
+
+        reportAlignmentResult(
+            tr("Auto-Align: aligned via %1 (score %2)")
+                .arg(QString::fromStdString(result.method))
+                .arg(result.score, 0, 'f', 2));
+        spdlog::info("Auto-Align succeeded via {} (score {:.2f})", result.method, result.score);
+    });
+
+    ai::ComponentDetector* detector = componentDetector();
+    watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project,
+                                          expectedPixelsPerMm, detector, geometricOnly]() {
+        // Detection-first (docs/AUTO_ALIGN_V2_PLAN.md): register the detected-
+        // component constellation against the iBOM layout — needs no visible
+        // board outline, so it works exactly where the geometric path
+        // structurally fails (board filling the frame, cluttered/glossy
+        // background). Detections come from the trained model when loaded,
+        // else from the model-free blob detector (classic CV) — so component-
+        // based alignment works even with an empty models/. BoardLocator stays
+        // as the last resort. geometricOnly skips this entirely (periodic
+        // drift correction without a model — blobs too jittery for that).
+        std::vector<ai::Detection> detections;
+        const char* detSrc = "model";
+        if (geometricOnly) {
+            // fall straight through to BoardLocator below
+        } else if (detector) {
+            detections = detector->detect(colorCopy);
+        } else {
+            detections = overlay::detectComponentBlobs(colorCopy, expectedPixelsPerMm);
+            detSrc = "blobs";
+        }
+        if (!detections.empty()) {
+            const auto boot = overlay::ComponentReanchor::bootstrap(
+                detections, *project, ibom::Layer::Front, expectedPixelsPerMm);
+            if (boot.found) {
+                overlay::BoardLocateResult blr;
+                blr.found  = true;
+                blr.method = std::string("components(") + detSrc + ")";
+                // Map inliers onto the shared [0,1] score consumed by the
+                // trust (0.45) and reanchor (0.5) gates: 8 inliers → 0.67,
+                // saturates at 18+. Component consensus is far more specific
+                // than edge agreement, hence the generous floor.
+                blr.score   = std::min(1.0, 0.4 + boot.inliers / 30.0);
+                blr.message = boot.message;
+                const auto& bb = project->boardInfo.boardBBox;
+                const std::vector<cv::Point2f> pcb = {
+                    {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+                    {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+                    {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+                    {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+                };
+                cv::perspectiveTransform(pcb, blr.imageCorners, boot.homography);
+                return blr;
+            }
+            spdlog::info("Auto-Align: component bootstrap ({}) didn't lock ({}), "
+                         "falling back to board outline", detSrc, boot.message);
+        }
+        return overlay::BoardLocator::locate(colorCopy, depthCopy, *project,
+                                             expectedPixelsPerMm, ibom::Layer::Front);
+    }));
+}
+
+void Application::autoStartLiveTracking()
+{
+    if (m_liveMode) return;  // already tracking — alignment paths rebase it themselves
+    if (!m_homography || !m_homography->isValid()) return;
+    if (auto* cp = m_mainWindow ? m_mainWindow->controlPanel() : nullptr) {
+        spdlog::info("Alignment applied — enabling live tracking automatically");
+        cp->setLiveMode(true);
+    }
+}
+
+void Application::attemptLostRecovery()
+{
+    using S = overlay::TrackingWorker::State;
+    if (!m_liveMode || !m_ibomProject ||
+        m_lastTrackingState != static_cast<int>(S::Lost)) {
+        m_lostRecoveryArmed    = false;  // recovered (or live mode ended) — chain stops
+        m_lostRecoveryAttempts = 0;
+        return;
+    }
+
+    if (!m_autoAligning) {
+        ++m_lostRecoveryAttempts;
+        // componentReanchor() registers a component constellation against the
+        // iBOM — from the trained model when loaded, else the model-free blob
+        // detector (classic CV). Either way it needs no visible board outline,
+        // so it can recover on the board-fills-the-frame / coplanar view where
+        // BoardLocator structurally can't (ERREUR #41/#54). It internally
+        // bootstraps (no current pose required).
+        const bool viaModel = componentDetector() != nullptr;
+        spdlog::info("Tracking LOST — auto re-anchor attempt #{} via {} component detection",
+                     m_lostRecoveryAttempts, viaModel ? "AI-model" : "blob");
+        componentReanchor(/*silent=*/true);
+
+        // If it keeps failing (hard scene: bare/sparse board, blobs can't lock),
+        // tell the user once and slow down so the log/CPU aren't hammered.
+        if (m_lostRecoveryAttempts == 6) {
+            m_mainWindow->updateStatusMessage(tr(
+                "Tracking still lost — component re-anchor can't lock on this view. "
+                "Align manually (4-corner / Multi-Comp)%1.")
+                .arg(viaModel ? QString() : tr(", or load an AI model for better detection")));
+            spdlog::warn("Tracking LOST — component re-anchor still failing after 6 tries; "
+                         "backing off to 15 s. Manual alignment recommended.");
+        }
+    }
+
+    // State-change signals only fire on transitions; a persistent loss needs
+    // polling. Cadence backs off after several failures so nothing is hammered.
+    const int delayMs = (m_lostRecoveryAttempts < 6) ? 3000 : 15000;
+    QTimer::singleShot(delayMs, this, &Application::attemptLostRecovery);
+}
+
+void Application::componentReanchor(bool silent)
+{
+    if (m_autoAligning) return;  // shares the alignment guard with autoAlignBoard
+    // No detector requirement anymore: without a trained model we detect
+    // component blobs with classic CV (BlobComponentDetector) and bootstrap
+    // on those. A model is better, but not mandatory.
+    auto* detector = componentDetector();
+    if (!m_lastColorFrame || m_lastColorFrame->empty()) {
+        if (!silent)
+            m_mainWindow->updateStatusMessage(tr("Component re-anchor: no camera frame yet"));
+        return;
+    }
+    // NOTE: no valid-pose requirement anymore. With a pose, the prior-based
+    // estimate() corrects it; without one (or with a stale one after the board
+    // was moved/picked up), bootstrap() registers the detection constellation
+    // against the layout globally. The detector alone is enough to align.
+    if (!m_ibomProject) {
+        if (!silent)
+            m_mainWindow->updateStatusMessage(tr("Component re-anchor: load an iBOM first"));
+        return;
+    }
+
+    m_autoAligning = true;
+    if (!silent)
+        m_mainWindow->updateStatusMessage(tr("Component re-anchor: detecting components..."));
+
+    const cv::Mat colorCopy = m_lastColorFrame->clone();
+    const std::shared_ptr<const IBomProject> project = m_ibomProject;
+    // Snapshot the current pose so the worker thread reads a stable matrix even
+    // if live tracking updates m_homography meanwhile. May be invalid (empty
+    // matrix) — the worker then goes straight to bootstrap().
+    overlay::Homography priorPose;
+    if (m_homography && m_homography->isValid())
+        priorPose.setMatrix(m_homography->matrix().clone());
+    // Physical scale prior for bootstrap: D405 pinhole (fx / distance) when
+    // available, else the current px/mm estimate; 0 = unknown (still works,
+    // just a wider hypothesis space). Mirrors autoAlignBoard().
+    double scalePrior = 0.0;
+#ifdef IBOM_HAVE_REALSENSE
+    if (auto* rs = dynamic_cast<camera::RealSenseCapture*>(m_camera.get())) {
+        const double fx = rs->colorFx();
+        if (fx > 0.0 && m_lastDepthDistanceMm > 0.0)
+            scalePrior = fx / m_lastDepthDistanceMm;
+    }
+#endif
+    if (scalePrior <= 0.0)
+        scalePrior = m_currentPixelsPerMm > 0.0 ? m_currentPixelsPerMm : m_basePixelsPerMm;
+    const uint64_t dispatchEpoch = ++m_alignmentEpoch;
+
+    auto* watcher = new QFutureWatcher<overlay::ComponentReanchorResult>(this);
+    connect(watcher, &QFutureWatcher<overlay::ComponentReanchorResult>::finished, this,
+            [this, watcher, project, dispatchEpoch, silent]() {
+        const overlay::ComponentReanchorResult result = watcher->result();
+        watcher->deleteLater();
+        m_autoAligning = false;
+
+        if (dispatchEpoch != m_alignmentEpoch) {
+            spdlog::info("Component re-anchor: discarding stale result");
+            return;
+        }
+        if (!result.found) {
+            if (silent) {
+                m_reanchorFailStreak = std::min(m_reanchorFailStreak + 1, 20);
+                spdlog::debug("Component re-anchor: {} (streak {})",
+                              result.message, m_reanchorFailStreak);
+            } else {
+                m_mainWindow->updateStatusMessage(
+                    tr("Component re-anchor failed: %1")
+                        .arg(QString::fromStdString(result.message)));
+                spdlog::warn("Component re-anchor failed: {}", result.message);
+            }
+            return;
+        }
+        m_reanchorFailStreak = 0;
+
+        // Drift gate (silent only): skip if the new pose barely moves the board
+        // corners, to leave healthy tracking undisturbed (a re-anchor resets the
+        // tracking reference and would otherwise stutter).
+        const auto& bb = project->boardInfo.boardBBox;
+        const std::vector<cv::Point2f> pcbCorners = {
+            {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+            {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+            {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+        };
+        std::vector<cv::Point2f> newImg;
+        cv::perspectiveTransform(pcbCorners, newImg, result.homography);
+        if (silent && m_homography && m_homography->isValid()) {
+            double maxShift = 0.0;
+            for (size_t i = 0; i < 4; ++i) {
+                const auto cur = m_homography->pcbToImage(pcbCorners[i]);
+                maxShift = std::max(maxShift,
+                    cv::norm(cv::Point2f(cur.x - newImg[i].x, cur.y - newImg[i].y)));
+            }
+            constexpr double kReanchorMinShiftPx = 12.0;
+            if (maxShift < kReanchorMinShiftPx) {
+                spdlog::debug("Component re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
+                              kReanchorMinShiftPx, maxShift);
+                return;
+            }
+            spdlog::info("Component re-anchor: correcting drift (shift {:.1f}px, {})",
+                         maxShift, result.message);
+        }
+
+        m_homography->setMatrix(result.homography);
+        m_baseHomography = m_homography->matrix().clone();
+        if (m_mainWindow->boardMinimap())
+            m_mainWindow->boardMinimap()->update();
+
+        // Refresh px/mm from the new pose (mirrors autoAlignBoard()).
+        const double pcbW = bb.width();
+        const double pixW = cv::norm(newImg[0] - newImg[1]);
+        if (pcbW > 0.0) {
+            m_basePixelsPerMm = pixW / pcbW;
+            m_currentPixelsPerMm = m_basePixelsPerMm;
+            if (auto* sp = m_mainWindow->statsPanel())
+                sp->setScale(m_currentPixelsPerMm);
+        }
+
+        if (m_trackingWorker)
+            QMetaObject::invokeMethod(m_trackingWorker, "resetReference", Qt::QueuedConnection);
+        autoStartLiveTracking();
+
+        if (silent) {
+            spdlog::info("Component re-anchor applied ({})", result.message);
+            return;
+        }
+        reportAlignmentResult(
+            tr("Component re-anchor: %1").arg(QString::fromStdString(result.message)));
+        spdlog::info("Component re-anchor succeeded ({})", result.message);
+    });
+
+    watcher->setFuture(QtConcurrent::run([detector, colorCopy, project, priorPose,
+                                          scalePrior]() {
+        // Detections from the trained model when loaded, else model-free blobs
+        // (classic CV) — component-based re-anchor works with an empty models/.
+        const std::vector<ai::Detection> detections =
+            detector ? detector->detect(colorCopy)
+                     : overlay::detectComponentBlobs(colorCopy, scalePrior);
+        // Prior-based correction first (cheap, precise when the pose is only
+        // drifting); global bootstrap when there is no usable prior — no pose
+        // yet, or a pose so stale (board moved/picked up) that nothing falls
+        // inside the matching radius anymore.
+        auto res = overlay::ComponentReanchor::estimate(
+            detections, *project, priorPose, ibom::Layer::Front);
+        if (!res.found)
+            res = overlay::ComponentReanchor::bootstrap(
+                detections, *project, ibom::Layer::Front, scalePrior);
+        return res;
+    }));
+}
+
+void Application::updateReanchorTimer()
+{
+    if (!m_reanchorTimer) return;
+    const int ms = std::max(500, static_cast<int>(m_config->reanchorIntervalS() * 1000.0));
+    m_reanchorTimer->setInterval(ms);
+    if (m_config->reanchorEnabled()) {
+        if (!m_reanchorTimer->isActive()) m_reanchorTimer->start();
+    } else {
+        m_reanchorTimer->stop();
+    }
+}
+
+void Application::logFullState()
+{
+    const Config& c = *m_config;
+    spdlog::info("================= FULL STATE DUMP =================");
+    spdlog::info("[camera]   backend={} activeBackend={} index={} {}x{}@{}fps hwDecode={} capturing={} depthDistMm={:.1f}",
+                 static_cast<int>(c.cameraBackend()), static_cast<int>(m_activeBackend),
+                 c.cameraIndex(), c.cameraWidth(), c.cameraHeight(), c.cameraFps(),
+                 c.cameraHwDecode(), (m_camera && m_camera->isCapturing()), m_lastDepthDistanceMm);
+    spdlog::info("[scale]    method={} opticalMult={:.3f} basePxPerMm={:.3f} curPxPerMm={:.3f}",
+                 static_cast<int>(c.scaleMethod()), c.opticalMultiplier(),
+                 m_basePixelsPerMm, m_currentPixelsPerMm);
+    spdlog::info("[calib]    isCalibrated={} rms={:.3f}",
+                 (m_calibration && m_calibration->isCalibrated()),
+                 (m_calibration ? m_calibration->rmsError() : -1.0));
+    spdlog::info("[track]    live={} interval={}ms orbKp={} minMatch={} lowe={:.2f} ransac={:.1f} downscale={:.2f} model={}",
+                 m_liveMode, c.trackingIntervalMs(), c.orbKeypoints(), c.minMatchCount(),
+                 c.matchDistanceRatio(), c.ransacThreshold(), c.trackingDownscale(), c.trackingModel());
+    spdlog::info("[track]    oneEuroMinCutoff={:.2f} oneEuroBeta={:.3f} clahe={} opticalFlow={} gpuMode={} incremental={} reanchorDriftPx={:.1f} hybrid={}",
+                 c.oneEuroMinCutoff(), c.oneEuroBeta(), c.trackingClahe(), c.trackingOpticalFlow(),
+                 c.trackingGpuMode(), c.microscopeIncremental(), c.microscopeReanchorDriftPx(),
+                 c.hybridDriftCorrection());
+    spdlog::info("[reanchor] enabled={} interval={:.1f}s minScore={:.2f} failStreak={}",
+                 c.reanchorEnabled(), c.reanchorIntervalS(), c.reanchorMinScore(), m_reanchorFailStreak);
+    spdlog::info("[overlay]  pads={} silk={} fab={} opacity={:.2f} placedOpacity={:.2f} selOutlineW={:.1f} colors[sel={} placed={} normal={}]",
+                 c.showPads(), c.showSilkscreen(), c.showFabrication(), c.overlayOpacity(),
+                 c.placedOpacity(), c.selectedOutlineWidth(), c.selectedColorHex(),
+                 c.placedColorHex(), c.normalColorHex());
+    spdlog::info("[ai]       enabled={} model='{}' confidence={:.2f} ready={}",
+                 c.aiEnabled(), c.detectorModel(), c.detectionConfidence(), m_aiReady.load());
+    spdlog::info("[state]    ibomLoaded={} components={} homographyValid={} selectedRef='{}' placed={} depthView={} cloudView={}",
+                 static_cast<bool>(m_ibomProject),
+                 (m_ibomProject ? m_ibomProject->components.size() : 0u),
+                 (m_homography && m_homography->isValid()), m_selectedRef, m_placedRefs.size(),
+                 m_depthViewMode, m_pointCloudMode);
+    spdlog::info("[log]      verbose={} file={}", c.verboseLogging(), utils::Logger::logFilePath());
+    spdlog::info("==================================================");
 }
 
 void Application::refreshCameraDeviceList()
@@ -841,13 +1745,22 @@ void Application::connectSignals()
     // ── Tracking worker → homography update on GUI thread ───────
     if (m_trackingWorker) {
         connect(m_trackingWorker, &overlay::TrackingWorker::homographyUpdated,
-                this, [this](cv::Mat combined, int /*inliers*/, double /*reprojErr*/) {
+                this, [this](cv::Mat combined, int inliers, double reprojErr) {
             if (!m_liveMode || combined.empty() || !m_homography) return;
             m_homography->setMatrix(combined);
-            if (m_overlayRenderer)
-                m_overlayRenderer->setHomography(*m_homography);
-            updateDynamicScale();
+            // Scale readout at ~5 Hz is plenty — with optical flow this signal
+            // fires at camera rate, and the IBomPads method walks board data
+            // (ERREUR #52). Event-driven call sites (alignment, re-anchor)
+            // still call updateDynamicScale() directly, unthrottled.
+            const qint64 scaleNowMs = QDateTime::currentMSecsSinceEpoch();
+            if (scaleNowMs - m_lastScaleUpdateMs >= 200) {
+                m_lastScaleUpdateMs = scaleNowMs;
+                updateDynamicScale();
+            }
             m_mainWindow->boardMinimap()->update();
+            // Tracking-quality stream (visible only with verbose logging on).
+            spdlog::debug("[track] homography applied: inliers={} reprojErr={:.2f}px scale={:.3f}px/mm",
+                          inliers, reprojErr, m_currentPixelsPerMm);
         }, Qt::QueuedConnection);
 
         connect(m_trackingWorker, &overlay::TrackingWorker::trackingError,
@@ -858,6 +1771,7 @@ void Application::connectSignals()
         // ── Incremental tracking state → re-anchor badge (§4) ───────
         connect(m_trackingWorker, &overlay::TrackingWorker::trackingStateChanged,
                 this, [this](int state) {
+            m_lastTrackingState = state;  // read by the loss-recovery poll
             if (!m_liveMode) return;
             using S = overlay::TrackingWorker::State;
             switch (static_cast<S>(state)) {
@@ -870,7 +1784,15 @@ void Application::connectSignals()
                     break;
                 case S::Lost:
                     m_mainWindow->updateStatusMessage(
-                        tr("Tracking: LOST — re-anchor (A) or click the PCB map"));
+                        tr("Tracking: LOST — re-anchoring automatically…"));
+                    // Give the worker a moment to re-acquire on its own (mask
+                    // fallback + jump-recovery usually do), then re-locate the
+                    // board outright. One chain only, however often Lost fires.
+                    if (!m_lostRecoveryArmed && m_ibomProject) {
+                        m_lostRecoveryArmed    = true;
+                        m_lostRecoveryAttempts = 0;
+                        QTimer::singleShot(800, this, &Application::attemptLostRecovery);
+                    }
                     break;
             }
         }, Qt::QueuedConnection);
@@ -944,9 +1866,13 @@ void Application::wireCameraSignals()
     // switch to V4L2). The connection itself dies with the old camera object.
     const CameraBackend backend = m_activeBackend;
     connect(m_camera.get(), &camera::ICameraSource::frameReady, this,
-            [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef) mutable {
+            [this, backend, intrinsicsShown = false, minimapSized = false](ibom::camera::FrameRef frameRef, qint64 captureNs) mutable {
         if (!frameRef || frameRef->empty()) return;
         const cv::Mat& frame = *frameRef;
+
+        // Cached for on-demand use by Auto-Align (autoAlignBoard()). Zero-copy:
+        // frameRef is an immutable shared view, so holding it is cheap.
+        m_lastColorFrame = frameRef;
 
         // The minimap's FOV rectangle is sized from m_config's nominal
         // resolution at startup, but the actual camera (e.g. RealSense
@@ -980,9 +1906,13 @@ void Application::wireCameraSignals()
 
         // ── Live tracking: hand the raw frame off to the worker thread ──
         // The worker throttles, downscales and runs ORB without blocking us.
-        if (m_liveMode && m_trackingWorker && m_homography && m_homography->isValid()) {
+        // tryReserveFrameSlot() is the backpressure valve (F6): at most 2
+        // frames in flight — when the worker falls behind, frames are skipped
+        // here instead of piling up latency in its event queue.
+        if (m_liveMode && m_trackingWorker && m_homography && m_homography->isValid()
+            && m_trackingWorker->tryReserveFrameSlot()) {
             QMetaObject::invokeMethod(m_trackingWorker, "processFrame", Qt::QueuedConnection,
-                Q_ARG(ibom::camera::FrameRef, frameRef));
+                Q_ARG(ibom::camera::FrameRef, frameRef), Q_ARG(qint64, captureNs));
         }
 
         // ── Dataset capture: same raw frame, own thread, throttles itself ──
@@ -1046,156 +1976,94 @@ void Application::wireCameraSignals()
         if (m_remoteView && m_remoteView->isRunning() && m_remoteView->clientCount() > 0)
             m_remoteView->pushFrame(display);
 
-        // Render iBOM overlay if data is loaded and homography is set
+        // ── iBOM overlay: board-space buffer + per-frame warp transform ─────
+        // The overlay is rendered ONCE in board (PCB) space — it only changes
+        // on selection/placed/toggle/color/project changes — and CameraView
+        // re-projects that buffer through the current homography (projective
+        // QTransform) on every paint. Pose updates therefore cost 9 doubles
+        // per frame instead of a full vector re-render: no more 25 fps cap,
+        // shape antialiasing is back on, and the overlay is always locked to
+        // the freshest pose at paint time (LIVE_TRACKING_ANALYSE F11).
         if (m_ibomProject && m_homography && m_homography->isValid()) {
-            // Create a transparent overlay the same size as the frame
-            QImage overlay(rgb.cols, rgb.rows, QImage::Format_ARGB32_Premultiplied);
-            overlay.fill(Qt::transparent);
-            QPainter painter(&overlay);
-            painter.setRenderHint(QPainter::Antialiasing, true);
-
-            // Draw component pads, silkscreen outlines, and labels
             const bool drawPads = m_config->showPads();
             const bool drawSilk = m_config->showSilkscreen();
-            [[maybe_unused]] const bool drawFab = m_config->showFabrication();
 
-            // Resolve per-state base colors from Config (user-customizable via Settings)
-            QColor cSelected = QColor(QString::fromStdString(m_config->selectedColorHex()));
-            QColor cPlaced   = QColor(QString::fromStdString(m_config->placedColorHex()));
-            QColor cNormal   = QColor(QString::fromStdString(m_config->normalColorHex()));
-            if (!cSelected.isValid()) cSelected = QColor(0, 229, 255);
-            if (!cPlaced.isValid())   cPlaced   = QColor(72, 200, 72);
-            if (!cNormal.isValid())   cNormal   = QColor(170, 170, 68);
+            std::size_t placedHash = m_placedRefs.size();
+            for (const auto& r : m_placedRefs)
+                placedHash ^= std::hash<std::string>{}(r) + 0x9e3779b97f4a7c15ULL
+                              + (placedHash << 6) + (placedHash >> 2);
 
+            const std::string colorKey =
+                m_config->selectedColorHex() + '|' + m_config->placedColorHex() + '|'
+                + m_config->normalColorHex();
             const float placedAlphaMul = std::clamp(m_config->placedOpacity(), 0.05f, 1.0f);
             const float selectedSilkW  = std::max(1.0f, m_config->selectedOutlineWidth());
 
-            auto withAlpha = [](QColor c, int a) { c.setAlpha(a); return c; };
+            const bool needsRender =
+                !m_overlayValid
+                || drawPads != m_ovSigPads || drawSilk != m_ovSigSilk
+                || m_selectedRef != m_ovSigSelected
+                || placedHash != m_ovSigPlacedHash
+                || colorKey != m_ovSigColorKey
+                || placedAlphaMul != m_ovSigPlacedOpacity
+                || selectedSilkW != m_ovSigSelectedSilkW
+                || m_ibomProject.get() != m_ovSigProject;
 
-            for (const auto& comp : m_ibomProject->components) {
-                if (comp.layer != Layer::Front) continue;
+            if (needsRender) {
+                overlay::OverlayInputs in;
+                in.project     = m_ibomProject;
+                in.selectedRef = m_selectedRef;
+                in.placedRefs  = m_placedRefs;
+                QColor cSel = QColor(QString::fromStdString(m_config->selectedColorHex()));
+                QColor cPl  = QColor(QString::fromStdString(m_config->placedColorHex()));
+                QColor cNo  = QColor(QString::fromStdString(m_config->normalColorHex()));
+                in.cSelected   = cSel.isValid() ? cSel : QColor(0, 229, 255);
+                in.cPlaced     = cPl.isValid()  ? cPl  : QColor(72, 200, 72);
+                in.cNormal     = cNo.isValid()  ? cNo  : QColor(170, 170, 68);
+                in.labelNormal = ibom::gui::theme::labelNormalColor();
+                in.placedAlphaMul = placedAlphaMul;
+                in.selectedSilkW  = selectedSilkW;
+                in.drawPads = drawPads;
+                in.drawSilk = drawSilk;
 
-                const bool isSelected = (comp.reference == m_selectedRef);
-                const bool isPlaced   = !isSelected && m_placedRefs.count(comp.reference) > 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                overlay::BoardOverlay bo = overlay::OverlayRenderer::renderBoardSpace(in);
+                const double renderMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                m_boardBufferToPcb = bo.pcbToBuffer.inverted();
+                m_mainWindow->cameraView()->setBoardOverlayImage(bo.image);
+                spdlog::debug("[overlay] board buffer re-rendered {}x{} in {:.1f}ms (pads={} silk={} sel='{}' placed={} comps={})",
+                              bo.image.width(), bo.image.height(), renderMs, drawPads, drawSilk,
+                              m_selectedRef, m_placedRefs.size(), m_ibomProject->components.size());
 
-                // Per-state pad/silk/label colors and stroke widths
-                QColor padColor, silkColor, labelColor;
-                qreal silkWidth = 1.0;
-                if (isSelected) {
-                    padColor   = withAlpha(cSelected, 220);
-                    silkColor  = withAlpha(cSelected, 240);
-                    labelColor = withAlpha(cSelected, 255);
-                    silkWidth  = selectedSilkW;
-                } else if (isPlaced) {
-                    int a = static_cast<int>(180 * placedAlphaMul);
-                    padColor   = withAlpha(cPlaced, a);
-                    silkColor  = withAlpha(cPlaced, std::min(255, a + 30));
-                    labelColor = withAlpha(cPlaced, std::min(255, a + 60));
-                } else {
-                    padColor   = withAlpha(cNormal, 180);
-                    silkColor  = withAlpha(cNormal, 180);
-                    labelColor = ibom::gui::theme::labelNormalColor();
-                }
-
-                // ── Draw pads ──
-                if (drawPads) {
-                for (const auto& pad : comp.pads) {
-                    cv::Point2f padCenter(
-                        static_cast<float>(pad.position.x),
-                        static_cast<float>(pad.position.y));
-                    [[maybe_unused]] cv::Point2f imgPad = m_homography->pcbToImage(padCenter);
-
-                    // Transform pad size: map a rect at pad position
-                    auto padCorners = m_homography->transformRect(
-                        static_cast<float>(pad.position.x - pad.sizeX / 2.0),
-                        static_cast<float>(pad.position.y - pad.sizeY / 2.0),
-                        static_cast<float>(pad.sizeX),
-                        static_cast<float>(pad.sizeY));
-
-                    if (padCorners.size() == 4) {
-                        QPolygonF padPoly;
-                        for (auto& c : padCorners)
-                            padPoly << QPointF(c.x, c.y);
-
-                        painter.setPen(Qt::NoPen);
-                        painter.setBrush(padColor);
-
-                        if (pad.shape == Pad::Shape::Circle || pad.shape == Pad::Shape::Oval) {
-                            painter.drawEllipse(padPoly.boundingRect());
-                        } else {
-                            painter.drawPolygon(padPoly);
-                        }
-                    }
-                }
-                } // drawPads
-
-                // ── Draw silkscreen / drawings ──
-                if (drawSilk) {
-                painter.setBrush(Qt::NoBrush);
-                for (const auto& seg : comp.drawings) {
-                    if (seg.type == DrawingSegment::Type::Line) {
-                        cv::Point2f s = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
-                        cv::Point2f e = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.end.x), static_cast<float>(seg.end.y)));
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawLine(QPointF(s.x, s.y), QPointF(e.x, e.y));
-
-                    } else if (seg.type == DrawingSegment::Type::Rect) {
-                        auto rc = m_homography->transformRect(
-                            static_cast<float>(std::min(seg.start.x, seg.end.x)),
-                            static_cast<float>(std::min(seg.start.y, seg.end.y)),
-                            static_cast<float>(std::abs(seg.end.x - seg.start.x)),
-                            static_cast<float>(std::abs(seg.end.y - seg.start.y)));
-                        if (rc.size() == 4) {
-                            QPolygonF rp;
-                            for (auto& c : rc) rp << QPointF(c.x, c.y);
-                            painter.setPen(QPen(silkColor, silkWidth));
-                            painter.drawPolygon(rp);
-                        }
-
-                    } else if (seg.type == DrawingSegment::Type::Circle) {
-                        cv::Point2f c = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x), static_cast<float>(seg.start.y)));
-                        // Approximate radius in image space
-                        cv::Point2f edge = m_homography->pcbToImage(
-                            cv::Point2f(static_cast<float>(seg.start.x + seg.radius),
-                                        static_cast<float>(seg.start.y)));
-                        float r = std::hypot(edge.x - c.x, edge.y - c.y);
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawEllipse(QPointF(c.x, c.y), static_cast<qreal>(r), static_cast<qreal>(r));
-
-                    } else if (seg.type == DrawingSegment::Type::Polygon && !seg.points.empty()) {
-                        QPolygonF polyPts;
-                        for (const auto& pt : seg.points) {
-                            cv::Point2f ip = m_homography->pcbToImage(
-                                cv::Point2f(static_cast<float>(pt.x), static_cast<float>(pt.y)));
-                            polyPts << QPointF(ip.x, ip.y);
-                        }
-                        painter.setPen(QPen(silkColor, silkWidth));
-                        painter.drawPolygon(polyPts);
-                    }
-                }
-                } // drawSilk
-
-                // ── Draw reference label ──
-                if (drawSilk || isSelected) {
-                cv::Point2f bboxCenter(
-                    static_cast<float>((comp.bbox.minX + comp.bbox.maxX) / 2.0),
-                    static_cast<float>((comp.bbox.minY + comp.bbox.maxY) / 2.0));
-                cv::Point2f imgPt = m_homography->pcbToImage(bboxCenter);
-                painter.setPen(labelColor);
-                painter.setFont(QFont("Segoe UI", isSelected ? 9 : 7,
-                                       isSelected ? QFont::Bold : QFont::Normal));
-                painter.drawText(QPointF(imgPt.x, imgPt.y - 3),
-                                 QString::fromStdString(comp.reference));
-                } // drawSilk || isSelected
+                // Remember the inputs this buffer was rendered from.
+                m_overlayValid       = true;
+                m_ovSigPads          = drawPads;
+                m_ovSigSilk          = drawSilk;
+                m_ovSigSelected      = m_selectedRef;
+                m_ovSigPlacedHash    = placedHash;
+                m_ovSigColorKey      = colorKey;
+                m_ovSigPlacedOpacity = placedAlphaMul;
+                m_ovSigSelectedSilkW = selectedSilkW;
+                m_ovSigProject       = m_ibomProject.get();
             }
-            painter.end();
-            m_mainWindow->cameraView()->setOverlayImage(overlay);
+
+            // Per-frame: compose buffer→PCB with the freshest PCB→image pose.
+            m_mainWindow->cameraView()->setBoardOverlayTransform(
+                m_boardBufferToPcb
+                * overlay::OverlayRenderer::toQTransform(m_homography->matrix()));
+        } else if (m_overlayValid) {
+            // No valid homography (e.g. after Reset Alignment): clear the board
+            // overlay once, or the last buffer would stay frozen on screen and
+            // Reset would appear to "do nothing" (ERREUR #46).
+            m_mainWindow->cameraView()->setBoardOverlayImage(QImage());
+            m_overlayValid = false;  // force a fresh render once valid again
         }
 
-        // Draw alignment point picking visual feedback
+        // Alignment-picking visual feedback — sole owner of the full-frame
+        // overlay channel now that the iBOM overlay lives in the board-space
+        // channel (it is no longer suppressed while a valid overlay exists:
+        // during a re-alignment both are visible, which is what you want).
         if (m_pickingHomographyPoints && !m_homographyImagePoints.empty()) {
             QImage pickOverlay(rgb.cols, rgb.rows, QImage::Format_ARGB32_Premultiplied);
             pickOverlay.fill(Qt::transparent);
@@ -1217,10 +2085,13 @@ void Application::wireCameraSignals()
                 }
             }
             pickPainter.end();
-            // Merge with existing overlay or set directly
-            if (!m_ibomProject || !m_homography || !m_homography->isValid()) {
-                m_mainWindow->cameraView()->setOverlayImage(pickOverlay);
-            }
+            m_mainWindow->cameraView()->setOverlayImage(pickOverlay);
+            m_pickOverlayShown = true;
+        } else if (m_pickOverlayShown) {
+            // Picking ended (or no points yet): release the channel once so
+            // stale feedback doesn't linger on screen.
+            m_mainWindow->cameraView()->setOverlayImage(QImage());
+            m_pickOverlayShown = false;
         }
 
         // Calibration image collection — capture one image per K press
@@ -1239,6 +2110,9 @@ void Application::wireCameraSignals()
             // capture thread (colorizedDepthReady), not here — better histogram
             // equalization than a fixed-range colormap.
 
+            // Cached for on-demand use by Auto-Align (autoAlignBoard()).
+            m_lastDepthFrame = depth;
+
             // Throttle to ~3 Hz — distance/scale change slowly on a fixed rig.
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             if (nowMs - m_lastDepthMs < 300) return;
@@ -1246,9 +2120,20 @@ void Application::wireCameraSignals()
 
             // Depth fill rate over the whole frame (valid = non-zero).
             const cv::Mat& d = *depth;
-            if (auto* sp = m_mainWindow->statsPanel()) {
-                const double area = static_cast<double>(d.rows) * d.cols;
-                sp->setFillRate(area > 0 ? cv::countNonZero(d) / area : -1.0);
+            const double area = static_cast<double>(d.rows) * d.cols;
+            const double fillRatio = area > 0 ? cv::countNonZero(d) / area : -1.0;
+            if (auto* sp = m_mainWindow->statsPanel()) sp->setFillRate(fillRatio);
+
+            // Below this, specular reflections/glare on the board (or pointing
+            // at empty space) have likely corrupted too much of the frame to
+            // trust a median distance from it — mirrors BoardLocator's
+            // kMinDepthFillRatio gate. Bail out instead of showing a
+            // precise-looking but wrong "Distance" (e.g. 104mm when the real
+            // distance is ~70mm) and feeding a bogus px/mm scale downstream.
+            constexpr double kMinDepthFillRatio = 0.20;
+            if (fillRatio < kMinDepthFillRatio) {
+                if (auto* sp = m_mainWindow->statsPanel()) sp->setDistance(0.0);
+                return;
             }
 
             // Median depth over a central ROI (20%), ignoring 0 = invalid.
@@ -1269,6 +2154,7 @@ void Application::wireCameraSignals()
             const double distMm = vals[vals.size() / 2];
 
             if (auto* sp = m_mainWindow->statsPanel()) sp->setDistance(distMm);
+            m_lastDepthDistanceMm = distMm;
 
             // Auto px/mm from pinhole geometry: pixelsPerMm = fx / distance_mm.
             if (m_config->scaleMethod() == ScaleMethod::Depth) {
@@ -1367,12 +2253,10 @@ void Application::connectControlSignals()
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showPadsChanged,
             this, [this](bool show) {
         m_config->setShowPads(show);
-        if (m_overlayRenderer) m_overlayRenderer->setShowPads(show);
     });
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showSilkscreenChanged,
             this, [this](bool show) {
         m_config->setShowSilkscreen(show);
-        if (m_overlayRenderer) m_overlayRenderer->setShowLabels(show);
     });
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showFabricationChanged,
             this, [this](bool show) {
@@ -1476,9 +2360,16 @@ void Application::connectControlSignals()
     connect(m_mainWindow->bomPanel(), &gui::BomPanel::componentSelected,
             this, [this](const std::string& ref) {
         m_selectedRef = ref;
-        if (m_overlayRenderer)
-            m_overlayRenderer->setHighlightedRefs({ref});
         m_mainWindow->boardMinimap()->setSelectedRef(ref);
+
+        // Handle multi-component alignment selection. The marking method is
+        // chosen once when multi-align starts, so selecting (or re-selecting) a
+        // component here just arms it — no blocking popup, and switching to a
+        // different component before clicking is allowed.
+        if (m_alignMulti) {
+            beginMarkComponent(ref);
+            return;
+        }
 
         // Handle 2-component alignment selection
         if (m_alignOnComponents) {
@@ -1610,14 +2501,27 @@ void Application::connectControlSignals()
                 Q_ARG(double, m_config->ransacThreshold()),
                 Q_ARG(int,    m_config->trackingIntervalMs()),
                 Q_ARG(float,  m_config->trackingDownscale()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setStabilization", Qt::QueuedConnection,
+                Q_ARG(int,    m_config->trackingModel()),
+                Q_ARG(double, m_config->oneEuroMinCutoff()),
+                Q_ARG(double, m_config->oneEuroBeta()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setAdvanced", Qt::QueuedConnection,
+                Q_ARG(bool, m_config->trackingClahe()),
+                Q_ARG(bool, m_config->trackingOpticalFlow()),
+                Q_ARG(int,  m_config->trackingGpuMode()));
             QMetaObject::invokeMethod(m_trackingWorker, "setIncrementalMode", Qt::QueuedConnection,
                 Q_ARG(bool,   (m_config->cameraBackend() == CameraBackend::V4L2)
                               && m_config->microscopeIncremental()),
                 Q_ARG(double, m_config->microscopeReanchorDriftPx()));
+            QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection", Qt::QueuedConnection,
+                Q_ARG(bool, m_config->hybridDriftCorrection()));
         }
+        // Apply re-anchor enable/interval changes from the dialog.
+        updateReanchorTimer();
         spdlog::info("Settings applied (camera={}, ORB={}, interval={}ms, RANSAC={:.1f}, downscale={:.2f})",
                      newIdx, m_config->orbKeypoints(), m_config->trackingIntervalMs(),
                      m_config->ransacThreshold(), m_config->trackingDownscale());
+        if (m_config->verboseLogging()) logFullState();  // full audit trail when debugging
         // Sync ControlPanel combo to new camera index
         auto* cp = m_mainWindow->controlPanel();
         if (cp && newIdx >= 0)
@@ -1683,11 +2587,37 @@ void Application::connectControlSignals()
         connect(wizard, &gui::InspectionWizard::componentNavigated,
                 this, [this](const std::string& ref) {
             m_selectedRef = ref;
-            if (m_overlayRenderer)
-                m_overlayRenderer->setHighlightedRefs({ref});
             spdlog::info("Navigate to component: {}", ref);
         });
     }
+
+    // ── Alignment Assistant (guided wizard) ─────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::alignmentWizardRequested,
+            this, [this]() {
+        if (!m_alignWizard) {
+            m_alignWizard = new gui::AlignmentWizard(m_mainWindow.get());
+            // The wizard only orchestrates: forward its "start" to the existing
+            // alignment code paths via the same ControlPanel signals the manual
+            // buttons use (signal→signal). The interactive clicking is unchanged.
+            connect(m_alignWizard, &gui::AlignmentWizard::startRequested,
+                    this, [this](int method) {
+                auto* cp = m_mainWindow->controlPanel();
+                switch (method) {
+                case gui::AlignmentWizard::FourCorners:    emit cp->alignHomographyRequested();   break;
+                case gui::AlignmentWizard::TwoComponents:  emit cp->alignOnComponentsRequested(); break;
+                case gui::AlignmentWizard::MultiComponent: emit cp->alignMultiRequested();        break;
+                case gui::AlignmentWizard::AutoAlign:      emit cp->autoAlignRequested();         break;
+                default: break;
+                }
+            });
+        }
+        m_alignWizard->setBackendIsRealSense(
+            m_config->cameraBackend() == CameraBackend::RealSense);
+        m_alignWizard->restart();
+        m_alignWizard->show();
+        m_alignWizard->raise();
+        m_alignWizard->activateWindow();
+    });
 
     // ── Manual Homography — point picking ───────────────────────
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::alignHomographyRequested,
@@ -1703,6 +2633,8 @@ void Application::connectControlSignals()
             return;
         }
         m_alignOnComponents = false;  // cancel any 2-comp align in progress
+        m_alignMulti = false;         // cancel any multi-comp align in progress
+        setMultiAlignUIState(false);
         m_pickingHomographyPoints = true;
         m_homographyImagePoints.clear();
         m_mainWindow->updateStatusMessage(
@@ -1724,6 +2656,9 @@ void Application::connectControlSignals()
             return;
         }
         m_pickingHomographyPoints = false;  // cancel any 4-corner align
+        m_alignMulti = false;               // cancel any multi-comp align
+        setMultiAlignUIState(false);
+        m_mainWindow->showBomPanel();
         m_alignOnComponents = true;
         m_alignCompStep = 0;
         m_mainWindow->updateStatusMessage(
@@ -1731,8 +2666,143 @@ void Application::connectControlSignals()
         spdlog::info("2-component alignment started");
     });
 
+    // ── Multi-Component Alignment (≥2 landmarks; non-rectangular boards) ──
+    // Click once to start collecting; click again to finish & compute. Each
+    // component is marked either by its 2 opposite corners (midpoint) or pin 1.
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::alignMultiRequested,
+            this, [this]() {
+        if (m_alignMulti) {
+            // Second click = finish & compute.
+            applyMultiAlignment();
+            return;
+        }
+        if (!m_ibomProject) {
+            QMessageBox::information(m_mainWindow.get(), tr("Alignment"),
+                tr("Load an iBOM file first."));
+            return;
+        }
+        if (!m_camera->isCapturing()) {
+            QMessageBox::information(m_mainWindow.get(), tr("Alignment"),
+                tr("Start the camera first."));
+            return;
+        }
+        m_pickingHomographyPoints = false;
+        m_alignOnComponents = false;
+        m_alignMulti = true;
+        m_alignMultiAwaitClick = false;
+        m_alignMultiHaveCorner1 = false;
+        m_alignMultiMethod = gui::MultiAlignDialog::OppositePads;  // default
+        m_alignMultiPcbPts.clear();
+        m_alignMultiImgPts.clear();
+        m_alignMultiRefs.clear();
+        m_selectedRef.clear();
+        setMultiAlignUIState(true);
+        m_mainWindow->showBomPanel();
+        showMultiAlignDialog();  // persistent, non-modal: method choice + progress
+        m_mainWindow->updateStatusMessage(
+            tr("Multi-align: pick a component in the BOM panel or the PCB Map, "
+               "choose how to mark it, then click the green target(s) in the image."));
+        spdlog::info("Multi-component alignment started (method {})", m_alignMultiMethod);
+    });
+
+    // ── Reset Alignment ──────────────────────────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::resetAlignmentRequested,
+            this, [this]() {
+        // Cancel any in-progress alignment flow first.
+        m_pickingHomographyPoints = false;
+        m_alignOnComponents = false;
+        m_alignCompStep = 0;
+        m_alignMulti = false;
+        m_alignMultiAwaitClick = false;
+        m_alignMultiHaveCorner1 = false;
+        m_anchorMode = false;
+        setMultiAlignUIState(false);  // also clears the PCB Map click targets
+
+        m_homography->reset();
+        ++m_alignmentEpoch;
+        m_currentPixelsPerMm = 0.0;
+        if (auto* sp = m_mainWindow->statsPanel()) sp->setScale(0.0);
+
+        // Forget the saved profile too, so it isn't offered back on next reload.
+        m_config->clearSavedAlignment();
+        m_config->save();
+
+        m_mainWindow->updateStatusMessage(
+            tr("Alignment reset — the overlay is unaligned. Use one of the "
+               "Align buttons (or the Alignment Assistant) to set it up again."));
+        spdlog::info("Alignment reset by user");
+    });
+
+    // ── Auto-Align (board outline detection) ────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::autoAlignRequested,
+            this, [this]() {
+        if (!m_ibomProject) {
+            QMessageBox::information(m_mainWindow.get(), tr("Auto-Align"),
+                tr("Load an iBOM file first."));
+            return;
+        }
+        if (!m_camera->isCapturing()) {
+            QMessageBox::information(m_mainWindow.get(), tr("Auto-Align"),
+                tr("Start the camera first."));
+            return;
+        }
+        autoAlignBoard();
+    });
+
     connect(m_mainWindow->cameraView(), &gui::CameraView::clicked,
             this, [this](QPointF imagePos) {
+        // ── Multi-component alignment click handling ──
+        if (m_alignMulti && m_alignMultiAwaitClick) {
+            cv::Point2f imgPt(static_cast<float>(imagePos.x()),
+                              static_cast<float>(imagePos.y()));
+            // Snap the raw click onto the nearest strong local feature
+            // (cv::cornerSubPix) — hand clicks are limited by mouse/screen
+            // resolution, this recovers sub-pixel precision when there's a
+            // real corner/edge nearby (silkscreen edge, pad corner, etc.).
+            imgPt = refineClickPoint(imgPt);
+            if (m_alignMultiMethod != 1) {  // 2 clicks → midpoint (body corners or opposite pads)
+                if (!m_alignMultiHaveCorner1) {
+                    m_alignMultiCorner1 = imgPt;
+                    m_alignMultiHaveCorner1 = true;
+                    m_mainWindow->updateStatusMessage(
+                        m_alignMultiMethod == 2
+                            ? tr("Click the OPPOSITE pad of %1")
+                                  .arg(QString::fromStdString(m_alignMultiRef))
+                            : tr("Click the OPPOSITE corner of %1's body")
+                                  .arg(QString::fromStdString(m_alignMultiRef)));
+                    return;
+                }
+                cv::Point2f mid((m_alignMultiCorner1.x + imgPt.x) * 0.5f,
+                                (m_alignMultiCorner1.y + imgPt.y) * 0.5f);
+                m_alignMultiPcbPts.push_back(m_alignMultiPcb);
+                m_alignMultiImgPts.push_back(mid);
+                m_alignMultiRefs.push_back(m_alignMultiRef);
+            } else {  // pin 1: single click
+                m_alignMultiPcbPts.push_back(m_alignMultiPcb);
+                m_alignMultiImgPts.push_back(imgPt);
+                m_alignMultiRefs.push_back(m_alignMultiRef);
+            }
+            m_alignMultiAwaitClick = false;
+            m_alignMultiHaveCorner1 = false;
+            m_selectedRef.clear();  // so a method change doesn't re-arm a finished one
+            m_mainWindow->boardMinimap()->setClickTargets({});  // done with this component
+            const int n = static_cast<int>(m_alignMultiImgPts.size());
+            const QString msg =
+                tr("Marked %1 component(s). Pick another (BOM panel or PCB Map), "
+                   "or press 'Finish && Align'%2.")
+                .arg(n)
+                .arg(n >= 4 ? tr(" — ≥4: perspective corrected")
+                   : n >= 2 ? tr(" — ≥2 OK, 4 is better") : QString());
+            m_mainWindow->updateStatusMessage(msg);
+            if (m_multiAlignDialog) {
+                m_multiAlignDialog->setMarkedCount(n);
+                m_multiAlignDialog->setSelectedComponent(QString());
+                m_multiAlignDialog->setStatus(msg);
+            }
+            spdlog::info("Multi-align: marked {} ({} total)", m_alignMultiRef, n);
+            return;
+        }
+
         // ── Microscope 1-point anchor click handling ──
         if (m_anchorMode) {
             m_anchorMode = false;
@@ -1769,8 +2839,8 @@ void Application::connectControlSignals()
                     static_cast<float>(sinR * p.x + cosR * p.y + ty)});
             }
 
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbCorners, imgCorners)) {
-                m_overlayRenderer->setHomography(*m_homography);
                 m_mainWindow->boardMinimap()->update();
                 m_basePixelsPerMm = scale;
                 m_currentPixelsPerMm = scale;
@@ -1785,6 +2855,7 @@ void Application::connectControlSignals()
                         .arg(scale, 0, 'f', 1));
                 spdlog::info("Anchored on {}: scale={:.2f} px/mm rot={:.1f}°",
                              m_anchorRef, scale, m_config->microscopeAnchorRotationDeg());
+                autoStartLiveTracking();
             } else {
                 m_mainWindow->updateStatusMessage(tr("Anchor failed"));
                 spdlog::error("Anchor: homography compute failed");
@@ -1858,8 +2929,8 @@ void Application::connectControlSignals()
                     imgCorners.push_back({ix, iy});
                 }
 
+                ++m_alignmentEpoch;
                 if (m_homography->compute(pcbCorners, imgCorners)) {
-                    m_overlayRenderer->setHomography(*m_homography);
                     m_basePixelsPerMm = scale;
                     m_currentPixelsPerMm = scale;
                     if (auto* sp = m_mainWindow->statsPanel())
@@ -1870,11 +2941,12 @@ void Application::connectControlSignals()
 
                     spdlog::info("2-comp alignment OK: scale={:.2f} px/unit, rot={:.1f}°",
                                  scale, rot * 180.0 / CV_PI);
-                    m_mainWindow->updateStatusMessage(
+                    reportAlignmentResult(
                         tr("Alignment set from %1 + %2 — scale: %3 px/mm")
                         .arg(QString::fromStdString(m_alignRef1))
                         .arg(QString::fromStdString(m_alignRef2))
                         .arg(scale, 0, 'f', 1));
+                    autoStartLiveTracking();
                 } else {
                     spdlog::error("2-comp alignment: homography compute failed");
                     m_mainWindow->updateStatusMessage(tr("Alignment failed"));
@@ -1913,12 +2985,12 @@ void Application::connectControlSignals()
                 {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}   // BL
             };
 
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbPts, m_homographyImagePoints)) {
-                m_overlayRenderer->setHomography(*m_homography);
                 spdlog::info("Manual homography computed successfully (error={:.3f}px)",
                              m_homography->reprojectionError());
-                m_mainWindow->updateStatusMessage(
-                    tr("Alignment set — reprojection error: %1 px")
+                reportAlignmentResult(
+                    tr("4-corner alignment set — reprojection error: %1 px")
                     .arg(m_homography->reprojectionError(), 0, 'f', 3));
                 // Capture baseline scale for dynamic zoom tracking
                 if (m_calibration && m_calibration->pixelsPerMm() > 0) {
@@ -1941,6 +3013,7 @@ void Application::connectControlSignals()
                 if (m_trackingWorker)
                     QMetaObject::invokeMethod(m_trackingWorker, "resetReference",
                                               Qt::QueuedConnection);
+                autoStartLiveTracking();
             } else {
                 spdlog::error("Manual homography computation failed");
                 m_mainWindow->updateStatusMessage(tr("Alignment failed — try again"));
@@ -1961,6 +3034,11 @@ void Application::connectControlSignals()
                 QMessageBox::information(m_mainWindow.get(), tr("Live Mode"),
                     tr("Set alignment points or load an iBOM file first."));
                 m_liveMode = false;
+                // Keep the checkbox truthful (it stayed checked while
+                // m_liveMode was silently reset). Re-enters this handler with
+                // enabled=false — the disable path below is a benign no-op.
+                if (auto* cp = m_mainWindow->controlPanel())
+                    cp->setLiveMode(false);
                 return;
             }
             m_baseHomography = m_homography->matrix().clone();
@@ -1976,7 +3054,6 @@ void Application::connectControlSignals()
             // Restore base homography
             if (!m_baseHomography.empty()) {
                 m_homography->setMatrix(m_baseHomography);
-                m_overlayRenderer->setHomography(*m_homography);
             }
             if (m_trackingWorker)
                 QMetaObject::invokeMethod(m_trackingWorker, "resetReference",
@@ -1984,6 +3061,17 @@ void Application::connectControlSignals()
             spdlog::info("Live tracking mode disabled");
             m_mainWindow->updateStatusMessage(tr("Live tracking mode OFF"));
         }
+    });
+
+    // ── Hybrid drift correction (beta) ──────────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::hybridModeChanged,
+            this, [this](bool enabled) {
+        m_config->setHybridDriftCorrection(enabled);
+        m_config->save();
+        if (m_trackingWorker)
+            QMetaObject::invokeMethod(m_trackingWorker, "setHybridCorrection",
+                Qt::QueuedConnection, Q_ARG(bool, enabled));
+        spdlog::info("Hybrid drift correction {}", enabled ? "enabled" : "disabled");
     });
 
     // ── Inspection workflow wiring ──────────────────────────────
@@ -2002,8 +3090,6 @@ void Application::connectControlSignals()
     connect(m_pickAndPlace.get(), &features::PickAndPlace::currentStepChanged,
             this, [this, inspPanel, bomPanel](const features::PickAndPlace::PlacementStep& step) {
         m_selectedRef = step.reference;
-        if (m_overlayRenderer)
-            m_overlayRenderer->setHighlightedRefs({step.reference});
         if (bomPanel)
             bomPanel->highlightComponent(step.reference);
         inspPanel->onStepChanged(
@@ -2138,12 +3224,39 @@ void Application::connectControlSignals()
             this, [this]() { startComponentAnchor(); });
 
     // ── BoardMinimap ────────────────────────────────────────────────
-    // anchorRequested(pcbPoint): treat as a 1-point anchor at that PCB position,
-    // centering the FOV on the clicked point.  Reuses the same similarity-transform
-    // logic that startComponentAnchor() / the CameraView click handler use.
+    // anchorRequested(pcbPoint): on the microscope backend (narrow FOV), treat
+    // it as a 1-point anchor at that PCB position, centering the FOV on the
+    // clicked point — reuses the similarity-transform logic that
+    // startComponentAnchor() / the CameraView click handler use. On
+    // RealSense (wide FOV, the whole board is already visible) re-centering
+    // the FOV makes no sense — instead, highlight the nearest component, the
+    // same effect as clicking it in the BOM panel.
     connect(m_mainWindow->boardMinimap(), &gui::BoardMinimap::anchorRequested,
             this, [this](cv::Point2f pcbPt) {
         if (!m_ibomProject) return;
+
+        // During Multi-Comp alignment a minimap click picks the nearest
+        // component as the next landmark — same as selecting it in the BOM
+        // panel, but without leaving the camera view. Switching is free
+        // (beginMarkComponent re-arms), so a wrong pick needs no cancel.
+        if (m_alignMulti) {
+            const Component* pick = componentAtPcb(pcbPt);
+            if (pick) beginMarkComponent(pick->reference);
+            return;
+        }
+
+        if (m_config->cameraBackend() == CameraBackend::RealSense) {
+            const Component* nearest = componentAtPcb(pcbPt);
+            if (!nearest) return;
+            m_selectedRef = nearest->reference;
+            m_mainWindow->boardMinimap()->setSelectedRef(m_selectedRef);
+            if (auto* bomPanel = m_mainWindow->bomPanel())
+                bomPanel->highlightComponent(m_selectedRef);
+            m_mainWindow->updateStatusMessage(
+                tr("Selected %1").arg(QString::fromStdString(m_selectedRef)));
+            return;
+        }
+
         double scale = (m_currentPixelsPerMm > 0.0) ? m_currentPixelsPerMm
                        : m_config->microscopeAnchorPixelsPerMm();
         double rot  = m_config->microscopeAnchorRotationDeg() * CV_PI / 180.0;
@@ -2175,12 +3288,13 @@ void Application::connectControlSignals()
                 static_cast<float>(sinR * pc.x + cosR * pc.y + ty)
             });
         }
+        ++m_alignmentEpoch;
         if (m_homography->compute(pcbCorners, imgCorners)) {
-            m_overlayRenderer->setHomography(*m_homography);
             if (m_liveMode) m_baseHomography = m_homography->matrix().clone();
             updateDynamicScale();
             m_mainWindow->updateStatusMessage(tr("Minimap anchor applied"));
             spdlog::info("Minimap anchor: PCB ({:.2f}, {:.2f}) → image center", pcbPt.x, pcbPt.y);
+            autoStartLiveTracking();
         }
     });
 
@@ -2281,6 +3395,28 @@ void Application::connectControlSignals()
         m_calibMonitor->activateWindow();
     });
 
+    // ── Dev: verbose logging toggle + on-demand full state dump ──────
+    connect(m_mainWindow.get(), &gui::MainWindow::verboseLoggingToggled, this, [this](bool on) {
+        utils::Logger::setLevel(on ? spdlog::level::trace : spdlog::level::info);
+        m_config->setVerboseLogging(on);
+        m_config->save();
+        spdlog::info("Verbose debug logging {} — log file: {}",
+                     on ? "ENABLED" : "disabled", utils::Logger::logFilePath());
+        m_mainWindow->updateStatusMessage(
+            on ? tr("Verbose debug logging ON — %1")
+                     .arg(QString::fromStdString(utils::Logger::logFilePath()))
+               : tr("Verbose debug logging off"));
+        if (on) logFullState();
+    });
+    connect(m_mainWindow.get(), &gui::MainWindow::dumpStateRequested, this, [this]() {
+        logFullState();
+        m_mainWindow->updateStatusMessage(tr("Full state dumped to the log file"));
+    });
+
+    connect(m_mainWindow.get(), &gui::MainWindow::componentReanchorRequested, this, [this]() {
+        componentReanchor(/*silent=*/false);
+    });
+
     spdlog::info("Signal/slot connections established, FPS timer started.");
 }
 
@@ -2305,8 +3441,6 @@ void Application::loadIBomFile(const QString& path)
     spdlog::info("iBOM loaded: {} components, {} BOM groups",
                  m_ibomProject->components.size(), m_ibomProject->bomGroups.size());
 
-    // Feed to overlay renderer
-    m_overlayRenderer->setIBomData(*m_ibomProject);
 
     // Feed to BOM panel
     m_mainWindow->bomPanel()->loadBomData(m_ibomProject->bomGroups, m_ibomProject->components);
@@ -2347,6 +3481,35 @@ void Application::loadIBomFile(const QString& path)
                      m_placedRefs.size());
     }
 
+    // Restore a previously saved alignment for this exact iBOM file, if any —
+    // best-effort: we have no way to know whether the camera/board moved
+    // since, so this is offered as a starting point, not a guarantee. Only
+    // applies if the live tracking/alignment flow hasn't already set one.
+    if (!m_homography->isValid()) {
+        const auto& sa = m_config->savedAlignment();
+        if (sa.valid && sa.ibomFilePath == path.toStdString()) {
+            cv::Mat m(3, 3, CV_64F);
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    m.at<double>(r, c) = sa.matrix[r * 3 + c];
+            m_homography->setMatrix(m);
+            if (m_homography->isValid()) {
+                ++m_alignmentEpoch;
+                if (sa.pixelsPerMm > 0.0) {
+                    m_currentPixelsPerMm = sa.pixelsPerMm;
+                    m_basePixelsPerMm    = sa.pixelsPerMm;
+                    if (auto* sp = m_mainWindow->statsPanel()) sp->setScale(m_currentPixelsPerMm);
+                }
+                m_mainWindow->updateStatusMessage(
+                    tr("Restored previous alignment for this board (saved %1) — "
+                       "re-align if the camera or board has moved.")
+                        .arg(QString::fromStdString(sa.timestamp)));
+                spdlog::info("Restored saved alignment for '{}' (saved {})",
+                             path.toStdString(), sa.timestamp);
+            }
+        }
+    }
+
     // Auto-compute a basic homography based on board bounding box
     if (!m_homography->isValid()) {
         auto& bb = m_ibomProject->boardInfo.boardBBox;
@@ -2370,8 +3533,8 @@ void Application::loadIBomFile(const QString& path)
                 {ox, oy}, {ox + bw * scale, oy},
                 {ox + bw * scale, oy + bh * scale}, {ox, oy + bh * scale}
             };
+            ++m_alignmentEpoch;
             if (m_homography->compute(pcbPts, imgPts)) {
-                m_overlayRenderer->setHomography(*m_homography);
                 spdlog::info("Auto-homography computed: board {:.1f}x{:.1f} → scale {:.2f}", bw, bh, scale);
             }
         }
@@ -2723,40 +3886,59 @@ void Application::updateDynamicScale()
         newPpmm = pixW / pcbW;
 
     } else if (method == ScaleMethod::IBomPads) {
-        // Find two pads that are far apart and use their known real distance
-        // vs their projected pixel distance
-        const auto& comps = m_ibomProject->components;
-        if (comps.size() < 2) return;
+        // Reference pad pair for the scale: two far-apart pads whose known mm
+        // distance is compared to their projected pixel distance. Recomputed
+        // only when the loaded project changes — the old per-call scan reset
+        // its best-distance accumulator per component (so "padB" was only the
+        // farthest pad of the LAST component) and rescanned every pad on every
+        // homography emission (ERREUR #52).
+        if (m_ibomProject.get() != m_scaleRefProject) {
+            m_scaleRefProject = m_ibomProject.get();
+            m_scaleRefDistMm  = 0.0;
 
-        // Pick first pad of first and last component as reference points
-        const Pad* padA = nullptr;
-        const Pad* padB = nullptr;
-        for (const auto& c : comps) {
-            if (!c.pads.empty()) {
-                if (!padA) { padA = &c.pads[0]; continue; }
-                // Pick the pad farthest from padA
-                double bestDist = 0;
+            // Far-apart pair in one O(n) pass: extremes along the two board
+            // diagonals (x+y and x−y); keep the farther of the two candidate
+            // pairs. Not the exact diameter, but ≥ diagonal/√2 — ample for a
+            // stable scale baseline.
+            const Pad* minSumP = nullptr; const Pad* maxSumP = nullptr;
+            const Pad* minDifP = nullptr; const Pad* maxDifP = nullptr;
+            double minSum = 0, maxSum = 0, minDif = 0, maxDif = 0;
+            for (const auto& c : m_ibomProject->components) {
                 for (const auto& p : c.pads) {
-                    double dx = p.position.x - padA->position.x;
-                    double dy = p.position.y - padA->position.y;
-                    double d = dx*dx + dy*dy;
-                    if (d > bestDist) { bestDist = d; padB = &p; }
+                    const double s = p.position.x + p.position.y;
+                    const double d = p.position.x - p.position.y;
+                    if (!minSumP || s < minSum) { minSum = s; minSumP = &p; }
+                    if (!maxSumP || s > maxSum) { maxSum = s; maxSumP = &p; }
+                    if (!minDifP || d < minDif) { minDif = d; minDifP = &p; }
+                    if (!maxDifP || d > maxDif) { maxDif = d; maxDifP = &p; }
                 }
             }
+            const auto padDist = [](const Pad* a, const Pad* b) {
+                return (a && b) ? std::hypot(a->position.x - b->position.x,
+                                             a->position.y - b->position.y)
+                                : 0.0;
+            };
+            const double dSum = padDist(minSumP, maxSumP);
+            const double dDif = padDist(minDifP, maxDifP);
+            const Pad* a = (dSum >= dDif) ? minSumP : minDifP;
+            const Pad* b = (dSum >= dDif) ? maxSumP : maxDifP;
+            const double distMm = std::max(dSum, dDif);
+            if (a && b && distMm >= 1.0) {  // < 1 mm apart: unreliable baseline
+                // Positions copied by value — the project pointer above is an
+                // identity tag only, never dereferenced later.
+                m_scaleRefA      = cv::Point2f(static_cast<float>(a->position.x),
+                                               static_cast<float>(a->position.y));
+                m_scaleRefB      = cv::Point2f(static_cast<float>(b->position.x),
+                                               static_cast<float>(b->position.y));
+                m_scaleRefDistMm = distMm;
+            }
         }
-        if (!padA || !padB) return;
+        if (m_scaleRefDistMm < 1.0) return;  // no usable pad pair in this project
 
-        double realDist = std::sqrt(
-            std::pow(padA->position.x - padB->position.x, 2) +
-            std::pow(padA->position.y - padB->position.y, 2));
-        if (realDist < 1.0) return; // too close, unreliable
-
-        auto imgA = m_homography->pcbToImage(
-            {static_cast<float>(padA->position.x), static_cast<float>(padA->position.y)});
-        auto imgB = m_homography->pcbToImage(
-            {static_cast<float>(padB->position.x), static_cast<float>(padB->position.y)});
-        double pixDist = cv::norm(cv::Point2f(imgA.x - imgB.x, imgA.y - imgB.y));
-        newPpmm = pixDist / realDist;
+        const auto imgA = m_homography->pcbToImage(m_scaleRefA);
+        const auto imgB = m_homography->pcbToImage(m_scaleRefB);
+        const double pixDist = cv::norm(cv::Point2f(imgA.x - imgB.x, imgA.y - imgB.y));
+        newPpmm = pixDist / m_scaleRefDistMm;
     }
 
     if (newPpmm > 0) {

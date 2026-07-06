@@ -81,8 +81,16 @@ private:
     QDoubleSpinBox* m_matchRatio        = nullptr;
     QDoubleSpinBox* m_ransacThreshold   = nullptr;
     QDoubleSpinBox* m_trackingDownscale = nullptr;
+    QComboBox*      m_trackingModel     = nullptr;
+    QDoubleSpinBox* m_oneEuroMinCutoff  = nullptr;
+    QDoubleSpinBox* m_oneEuroBeta       = nullptr;
+    QCheckBox*      m_trackingClahe     = nullptr;
+    QCheckBox*      m_trackingOpticalFlow = nullptr;
+    QComboBox*      m_trackingGpuMode   = nullptr;
     QCheckBox*      m_microscopeIncremental = nullptr;
     QDoubleSpinBox* m_reanchorDrift     = nullptr;
+    QCheckBox*      m_autoReanchorEnabled  = nullptr;  // BoardLocator periodic re-anchor
+    QDoubleSpinBox* m_autoReanchorInterval = nullptr;
 
     // AI
     QLineEdit*      m_modelsPath     = nullptr;
