@@ -465,10 +465,19 @@ void Application::createSubsystems()
     connect(m_reanchorTimer, &QTimer::timeout, this, [this]() {
         if (!m_config->reanchorEnabled() || !m_liveMode || !m_ibomProject || m_autoAligning)
             return;
-        // Component re-anchor now works without a trained model (blob
-        // detector), so it's always the primary drift-correction path — it
-        // doesn't need the board outline visible.
-        componentReanchor(/*silent=*/true);
+        // Periodic drift correction needs a STABLE absolute pose. A trained
+        // detector gives that; the model-free blob detector does NOT — its
+        // per-fit reproj is fine (~3px) but the pose wanders ~30px frame to
+        // frame (different blob subset each time), so re-applying it every few
+        // seconds yanks the overlay and resets the tracking reference instead
+        // of correcting drift (field log 2026-07-02). So: component re-anchor
+        // periodically only with a model; the geometric outline otherwise
+        // (harmless no-op when the board fills the frame). Blobs stay for
+        // one-shot Auto-Align and loss recovery, where a coarse pose is a win.
+        if (componentDetector())
+            componentReanchor(/*silent=*/true);
+        else
+            autoAlignBoard(/*silent=*/true, /*isRetry=*/false, /*geometricOnly=*/true);
     });
     updateReanchorTimer();
 
@@ -1047,7 +1056,7 @@ void Application::applyMultiAlignment()
                  n, model, m_currentPixelsPerMm);
 }
 
-void Application::autoAlignBoard(bool silent, bool isRetry)
+void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
 {
     if (m_autoAligning) return;  // already running, ignore re-clicks
     if (!m_lastColorFrame || m_lastColorFrame->empty()) {
@@ -1261,7 +1270,7 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
 
     ai::ComponentDetector* detector = componentDetector();
     watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project,
-                                          expectedPixelsPerMm, detector]() {
+                                          expectedPixelsPerMm, detector, geometricOnly]() {
         // Detection-first (docs/AUTO_ALIGN_V2_PLAN.md): register the detected-
         // component constellation against the iBOM layout — needs no visible
         // board outline, so it works exactly where the geometric path
@@ -1269,10 +1278,13 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
         // background). Detections come from the trained model when loaded,
         // else from the model-free blob detector (classic CV) — so component-
         // based alignment works even with an empty models/. BoardLocator stays
-        // as the last resort.
+        // as the last resort. geometricOnly skips this entirely (periodic
+        // drift correction without a model — blobs too jittery for that).
         std::vector<ai::Detection> detections;
         const char* detSrc = "model";
-        if (detector) {
+        if (geometricOnly) {
+            // fall straight through to BoardLocator below
+        } else if (detector) {
             detections = detector->detect(colorCopy);
         } else {
             detections = overlay::detectComponentBlobs(colorCopy, expectedPixelsPerMm);

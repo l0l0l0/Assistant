@@ -149,7 +149,15 @@ private:
     ///                fresh frames (~300 ms apart) before reporting failure, so
     ///                one badly-timed frame (blur, glare, hand) doesn't fail
     ///                the whole click.
-    void autoAlignBoard(bool silent = false, bool isRetry = false);
+    /// @param geometricOnly Skip the component-detection (model/blob) bootstrap
+    ///                and use only the geometric BoardLocator. Used by the
+    ///                PERIODIC drift-correction timer without a trained model:
+    ///                the blob pose is one-shot-accurate but too jittery
+    ///                (~30 px frame to frame) for continuous correction, so
+    ///                periodic re-anchor must not use it (ERREUR #54 / field
+    ///                log). One-shot Auto-Align and loss recovery keep blobs.
+    void autoAlignBoard(bool silent = false, bool isRetry = false,
+                        bool geometricOnly = false);
 
     /// Flip the ControlPanel's Live Tracking checkbox on after a successful
     /// alignment (any path: 4-corner, 2-comp, multi-comp, anchor, Auto-Align,
