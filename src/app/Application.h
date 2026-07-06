@@ -271,6 +271,10 @@ private:
     // (Lost can be signalled repeatedly — only one poll chain must run).
     int  m_lastTrackingState  = -1;
     bool m_lostRecoveryArmed  = false;
+    // Consecutive loss-recovery ticks (attemptLostRecovery): drives the
+    // back-off from 3 s → 15 s once geometric re-anchor proves hopeless on a
+    // detector-less, board-fills-the-frame scene.
+    int  m_lostRecoveryAttempts = 0;
 
     // Focus assist — last time the sharpness metric was computed (throttle).
     qint64 m_lastSharpnessMs = 0;

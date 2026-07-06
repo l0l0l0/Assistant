@@ -1325,19 +1325,49 @@ void Application::attemptLostRecovery()
     using S = overlay::TrackingWorker::State;
     if (!m_liveMode || !m_ibomProject ||
         m_lastTrackingState != static_cast<int>(S::Lost)) {
-        m_lostRecoveryArmed = false;  // recovered (or live mode ended) — chain stops
+        m_lostRecoveryArmed    = false;  // recovered (or live mode ended) — chain stops
+        m_lostRecoveryAttempts = 0;
         return;
     }
+
+    const bool viaDetector = componentDetector() != nullptr;
     if (!m_autoAligning) {
-        const bool viaDetector = componentDetector() != nullptr;
-        spdlog::info("Tracking LOST — automatic re-anchor attempt via {}",
-                     viaDetector ? "component detector" : "board outline");
-        if (viaDetector) componentReanchor(/*silent=*/true);
-        else             autoAlignBoard(/*silent=*/true);
+        ++m_lostRecoveryAttempts;
+        if (viaDetector) {
+            // A detector can bootstrap a pose from the components alone —
+            // works even on the board-fills-the-frame / coplanar view. Worth
+            // retrying at full cadence.
+            spdlog::info("Tracking LOST — auto re-anchor attempt #{} via component detector",
+                         m_lostRecoveryAttempts);
+            componentReanchor(/*silent=*/true);
+        } else if (m_lostRecoveryAttempts <= 3) {
+            spdlog::info("Tracking LOST — auto re-anchor attempt #{} via board outline",
+                         m_lostRecoveryAttempts);
+            autoAlignBoard(/*silent=*/true);
+        } else {
+            // Geometric BoardLocator can't find an outline when the board
+            // fills the frame over a coplanar surface (ERREUR #41/#54), and
+            // there's no detector to fall back on. Stop spamming a hopeless
+            // attempt every 3 s: tell the user once what to do, then keep
+            // trying only occasionally (the view might change / board lifted).
+            if (m_lostRecoveryAttempts == 4) {
+                m_mainWindow->updateStatusMessage(tr(
+                    "Tracking lost — auto re-anchor can't recover on this view. "
+                    "Align manually (4-corner / Multi-Comp), lift the board off the "
+                    "surface, or load an AI model for component-based re-anchor."));
+                spdlog::warn("Tracking LOST — geometric re-anchor exhausted after 3 tries "
+                             "(no AI detector loaded); backing off to 15 s. Manual "
+                             "alignment or a component_detector model is needed.");
+            }
+            autoAlignBoard(/*silent=*/true);  // keep trying, spaced out below
+        }
     }
+
     // State-change signals only fire on transitions; a persistent loss needs
-    // polling until tracking recovers or live mode ends.
-    QTimer::singleShot(3000, this, &Application::attemptLostRecovery);
+    // polling. Cadence backs off once geometric recovery has proven hopeless
+    // on this scene, so the log/CPU aren't hammered forever.
+    const int delayMs = (viaDetector || m_lostRecoveryAttempts <= 3) ? 3000 : 15000;
+    QTimer::singleShot(delayMs, this, &Application::attemptLostRecovery);
 }
 
 void Application::componentReanchor(bool silent)
@@ -1756,7 +1786,8 @@ void Application::connectSignals()
                     // fallback + jump-recovery usually do), then re-locate the
                     // board outright. One chain only, however often Lost fires.
                     if (!m_lostRecoveryArmed && m_ibomProject) {
-                        m_lostRecoveryArmed = true;
+                        m_lostRecoveryArmed    = true;
+                        m_lostRecoveryAttempts = 0;
                         QTimer::singleShot(800, this, &Application::attemptLostRecovery);
                     }
                     break;
