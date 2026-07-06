@@ -268,6 +268,18 @@ private:
     int     m_reanchorFailStreak = 0;   // consecutive BoardLocator misses → back off
     int     m_reanchorTickCount  = 0;   // for skipping ticks while backing off
 
+    // Two-tick confirmation of periodic silent corrections (remède C,
+    // docs/BLOB_REANCHOR_JITTER_ANALYSE.md §3): a drift correction is applied
+    // only when two consecutive silent estimates agree with each other at the
+    // board corners, so a single aberrant estimate (hand in view, glare) can
+    // never yank a healthy overlay by itself — it merely arms this pending
+    // pose, which the next sane estimate fails to confirm. Bypassed while
+    // tracking is Lost: recovery wants the first plausible pose, there is no
+    // healthy tracking to protect. Corners of the held pose + when it was
+    // held (stale pendings expire after a few re-anchor intervals).
+    std::vector<cv::Point2f> m_pendingReanchorCorners;
+    qint64                   m_pendingReanchorMs = 0;
+
     // Interactive Auto-Align retry budget (see autoAlignBoard's isRetry doc).
     int  m_autoAlignRetriesLeft = 0;
     // Loss-recovery poll state (see attemptLostRecovery): last state reported

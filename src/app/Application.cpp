@@ -473,7 +473,9 @@ void Application::createSubsystems()
         // (docs/BLOB_REANCHOR_JITTER_ANALYSE.md): tick-to-tick corner jitter
         // sits under the 12 px drift gate, so the periodic tick skips instead
         // of yanking the overlay — the component path is safe again with or
-        // without a trained model.
+        // without a trained model. Belt on top: a correction only applies
+        // after two consecutive concordant estimates (m_pendingReanchorCorners),
+        // so one aberrant tick can't move anything either.
         componentReanchor(/*silent=*/true);
     });
     updateReanchorTimer();
@@ -1468,14 +1470,52 @@ void Application::componentReanchor(bool silent)
             }
             constexpr double kReanchorMinShiftPx = 12.0;
             if (maxShift < kReanchorMinShiftPx) {
+                // Whatever disagreement a previous tick held onto resolved
+                // itself — the pose is fine again, drop the pending.
+                m_pendingReanchorCorners.clear();
                 spdlog::debug("Component re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
                               kReanchorMinShiftPx, maxShift);
                 return;
+            }
+
+            // Two-tick confirmation (remède C, see m_pendingReanchorCorners):
+            // hold this pose and only apply once a second consecutive estimate
+            // lands on the same place — a lone aberrant estimate (hand, glare)
+            // then never yanks a healthy overlay; it costs one extra tick of
+            // latency on a real sustained drift. Skipped while tracking is
+            // Lost: recovery wants the first plausible pose immediately.
+            const bool trackingLost = m_lastTrackingState ==
+                static_cast<int>(overlay::TrackingWorker::State::Lost);
+            if (!trackingLost) {
+                constexpr double kReanchorConfirmTolPx = 8.0;
+                const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                const qint64 maxAgeMs = 3 * std::max<qint64>(500,
+                    static_cast<qint64>(m_config->reanchorIntervalS() * 1000.0));
+                bool confirmed = false;
+                if (m_pendingReanchorCorners.size() == 4 &&
+                    nowMs - m_pendingReanchorMs <= maxAgeMs) {
+                    double agree = 0.0;
+                    for (size_t i = 0; i < 4; ++i)
+                        agree = std::max(agree, static_cast<double>(
+                            cv::norm(newImg[i] - m_pendingReanchorCorners[i])));
+                    confirmed = agree <= kReanchorConfirmTolPx;
+                }
+                if (!confirmed) {
+                    m_pendingReanchorCorners = newImg;
+                    m_pendingReanchorMs = nowMs;
+                    spdlog::info("Component re-anchor: HELD (shift {:.1f}px, {}) — "
+                                 "waiting for a second concordant estimate",
+                                 maxShift, result.message);
+                    return;
+                }
             }
             spdlog::info("Component re-anchor: correcting drift (shift {:.1f}px, {})",
                          maxShift, result.message);
         }
 
+        // Applying a pose (silent confirmed, interactive, or Lost recovery)
+        // supersedes any held confirmation candidate.
+        m_pendingReanchorCorners.clear();
         m_homography->setMatrix(result.homography);
         m_baseHomography = m_homography->matrix().clone();
         if (m_mainWindow->boardMinimap())

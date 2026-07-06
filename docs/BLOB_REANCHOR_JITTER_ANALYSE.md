@@ -43,7 +43,9 @@ La déterminisation du RNG de `bootstrap()` (seed fixe, suite 118) n'y peut rien
 
 ## 3. Remèdes possibles, classés
 
-> **Mise à jour 2026-07-06 (suite 126)** : **A et B sont implémentés**, et le re-anchor périodique par composants est **ré-activé sans modèle** (le contournement de la suite 123 — périodique → géométrique seul — est retiré, `geometricOnly` supprimé). Validé hors Jetson : les 5 cas de test (dont un **nouveau test de répétabilité** qui rejoue 6 frames bruitées et exige que les poses verrouillées consécutives restent sous le gate de 12 px aux coins) passent avec OpenCV 4.6 système. Sur la scène synthétique, similarité = 0,03-0,06 px de jitter aux coins vs 0,19-0,23 px en 8-DOF (~4×, conforme à la simulation ; la scène synthétique est trop propre pour reproduire l'amplitude terrain de 13-63 px — la validation finale reste le protocole §4 sur le Jetson). C et D restent disponibles si le terrain montre des ticks aberrants résiduels.
+> **Mise à jour 2026-07-06 (suite 126)** : **A et B sont implémentés**, et le re-anchor périodique par composants est **ré-activé sans modèle** (le contournement de la suite 123 — périodique → géométrique seul — est retiré, `geometricOnly` supprimé). Validé hors Jetson : les 5 cas de test (dont un **nouveau test de répétabilité** qui rejoue 6 frames bruitées et exige que les poses verrouillées consécutives restent sous le gate de 12 px aux coins) passent avec OpenCV 4.6 système. Sur la scène synthétique, similarité = 0,03-0,06 px de jitter aux coins vs 0,19-0,23 px en 8-DOF (~4×, conforme à la simulation ; la scène synthétique est trop propre pour reproduire l'amplitude terrain de 13-63 px — la validation finale reste le protocole §4 sur le Jetson).
+>
+> **Mise à jour 2026-07-06 (suite 127)** : **C est implémenté aussi** (confirmation à 2 ticks concordants, tolérance 8 px aux coins, pending expirant après 3× l'intervalle de re-anchor, bypass quand le tracking est Lost — la récupération veut la première pose plausible). D reste disponible si besoin.
 
 ### A. Fit similarité pour les poses blob ← **✅ implémenté (suite 126)**
 `ComponentReanchor::Params` gagne un flag (ex. `fitSimilarity`) ; `estimate()` utilise alors `cv::estimateAffinePartial2D` (RANSAC/MAGSAC, même seuil) plongé en 3×3 au lieu de `findHomography`. Activé quand la source = blobs (le chemin modèle peut garder le 8-DOF, ou suivre `trackingModel` comme le worker — dont le mode Auto choisit *déjà* la similarité sur carte plane, exactement pour cette raison).
@@ -54,7 +56,7 @@ La déterminisation du RNG de `bootstrap()` (seed fixe, suite 118) n'y peut rien
 ### B. Centroïde de région MSER au lieu du centre de bbox ← **✅ implémenté (suite 126)**
 `cv::MSER::detectRegions` renvoie déjà les pixels des régions ; le centroïde de masse est bien plus stable que le centre d'une bbox (pilotée par les pixels extrêmes : ombre, reflet, silk accolé). S'attaque à la cause n°2. ~15 lignes dans `BlobComponentDetector.cpp` (attention : le dédup par proximité doit alors fusionner les centroïdes, p.ex. garder la région la plus grande).
 
-### C. Confirmation à 2 ticks pour le périodique (ceinture)
+### C. Confirmation à 2 ticks pour le périodique (ceinture) ← **✅ implémenté (suite 127)**
 Même pattern que le jump gate du `TrackingWorker` : n'appliquer une correction silencieuse que si **2 poses blob consécutives concordent entre elles** (coins à < ~8 px) *et* s'écartent toutes deux de la pose courante. Transforme un estimateur bruité en détecteur de dérive fiable — utile même après A/B, contre les ticks aberrants (main dans le champ, reflet).
 
 ### D. Ne pas `resetReference` sur petite correction
