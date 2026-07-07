@@ -1,0 +1,149 @@
+# =============================================================================
+#  Docker Compose — MicroscopeIBOM sur Jetson AGX Orin 32GB
+#  JetPack 7.2 / L4T r39.2 / Ubuntu 24.04 / CUDA 13.2 (SBSA)
+# =============================================================================
+#
+#  Usage :
+#    Build base puis dev :
+#      docker compose -f docker/compose.yml build base
+#      docker compose -f docker/compose.yml build dev
+#
+#    Lancer dev (interactif) :
+#      docker compose -f docker/compose.yml up -d dev
+#      docker compose -f docker/compose.yml exec dev bash
+#
+#    Lancer runtime :
+#      docker compose -f docker/compose.yml up runtime
+#
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  #  BASE — image avec stack complet (Qt6, OpenCV CUDA, TensorRT, librealsense)
+  #  Ne se lance pas, sert de FROM pour dev et runtime
+  # ===========================================================================
+  base:
+    build:
+      context: ..
+      dockerfile: docker/base.Dockerfile
+      # network: host obligatoire sur JP6.2 (kernel Tegra n'a pas iptable_raw,
+      # bridge networking de Docker 29.x casse). Voir JETSON_ERREURS.md #3.
+      network: host
+      args:
+        # l4t-jetpack retire sur JP7 -> base conteneur TensorRT SBSA officiel
+        # (CUDA 13.2.1 + cuDNN + TRT 10.16.1). Ne pas passer a 26.06 (CUDA 13.3).
+        BASE_IMAGE: nvcr.io/nvidia/tensorrt:26.05-py3
+        OPENCV_VERSION: 4.13.0
+        REALSENSE_VERSION: v2.55.1
+        ONNXRUNTIME_VERSION: v1.23.0
+        CUDA_ARCH_BIN: "8.7"
+    image: microscope-ibom:base
+    profiles: ["build-only"]   # ne demarre pas avec "compose up"
+
+  # ===========================================================================
+  #  DEV — environnement de developpement avec X11 + GPU + cameras
+  # ===========================================================================
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/dev.Dockerfile
+      # Voir commentaire sur le service "base" — meme contrainte JP6.2.
+      network: host
+    image: microscope-ibom:dev
+    container_name: microscope-ibom-dev
+    runtime: nvidia
+    network_mode: host
+    # /dev/dri (moteur d'affichage Tegra) est TOUJOURS present sur un Jetson
+    # demarre : le mapper par defaut ne bloque pas le demarrage et restaure
+    # l'acceleration GPU display + EGL (decodage HW GStreamer nvvidconv) pour le
+    # workflow "docker compose up" nu, sans override local. NE PAS le re-declarer
+    # dans compose.local.yml (les listes devices sont CONCATENEES → doublon #14).
+    # Les /dev/video* restent opt-in : un device absent mappe en dur empeche le
+    # demarrage du container quand la camera n'est pas branchee (#6/#15). Les
+    # scripts run_local_gui.sh / run_dev_shell.sh generent un override dynamique
+    # avec les /dev/video* reellement presents.
+    devices:
+      - /dev/dri:/dev/dri             # GPU display (Tegra) + EGL pour HW decode
+    #   - /dev/video0:/dev/video0     # camera microscope USB (opt-in / dynamique)
+    #   - /dev/video1:/dev/video1     # RealSense RGB (si presente)
+    #   - /dev/video2:/dev/video2     # RealSense depth (si presente)
+    #   - /dev/bus/usb:/dev/bus/usb   # hot-plug USB (ajoute dynamiquement si RealSense)
+    #   - /dev/input:/dev/input       # clavier/souris/ecran tactile (compose.local.yml)
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - XAUTHORITY=/tmp/.docker.xauth
+      - QT_QPA_PLATFORM=xcb
+      - QT_X11_NO_MITSHM=1
+      # Persistance unifiee : config.json, calibration.yml, snapshots et le cache
+      # TensorRT atterrissent tous sous ce dossier (monte depuis le repo, donc
+      # survivent a un recreate du container). Voir src/utils/Paths.h.
+      - IBOM_DATA_DIR=/opt/microscope-ibom/data
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      - ..:/opt/microscope-ibom:rw          # source code en volume (live edit)
+      - dev-cache:/root/.cache              # cache build
+      - dev-ccache:/root/.ccache            # cache ccache
+    group_add:
+      - video
+      - plugdev
+      - dialout
+    stdin_open: true
+    tty: true
+    working_dir: /opt/microscope-ibom
+    command: /bin/bash
+
+  # ===========================================================================
+  #  RUNTIME — image production minimale
+  # ===========================================================================
+  runtime:
+    build:
+      context: ..
+      dockerfile: docker/runtime.Dockerfile
+      # Voir commentaire sur le service "base" — meme contrainte JP6.2.
+      network: host
+    image: microscope-ibom:runtime
+    container_name: microscope-ibom-runtime
+    runtime: nvidia
+    network_mode: host
+    # /dev/dri (toujours present) par defaut — voir note du service dev. Les
+    # /dev/video*, /dev/bus/usb et /dev/input dependent du materiel branche :
+    # decommenter ce qui est present ou utiliser un override compose.
+    # NE PAS re-declarer /dev/dri dans compose.local.yml (doublon #14).
+    devices:
+      - /dev/dri:/dev/dri             # GPU display (Tegra) + EGL pour HW decode
+    #   - /dev/video0:/dev/video0
+    #   - /dev/bus/usb:/dev/bus/usb
+    #   - /dev/input:/dev/input
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - XAUTHORITY=/tmp/.docker.xauth
+      - QT_QPA_PLATFORM=xcb
+      - QT_X11_NO_MITSHM=1
+      # NB: sous xcb, le serveur X gere deja le tactile. On NE charge PAS le
+      # plugin evdevtouch (doublons d'evenements + /dev/input/touch0 n'existe pas
+      # en general). Il ne servirait qu'en QT_QPA_PLATFORM=eglfs (kiosque sans X).
+      # Persistance unifiee — voir service dev / src/utils/Paths.h.
+      - IBOM_DATA_DIR=/opt/microscope-ibom/data
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      - ../data:/opt/microscope-ibom/data:rw   # config + calibration + snapshots + cache TRT
+      - ../logs:/opt/microscope-ibom/logs:rw
+      - ../models:/opt/microscope-ibom/models:ro
+    group_add:
+      - video
+      - plugdev
+    # on-failure (pas unless-stopped) : si X n'est pas pret ou la camera manque,
+    # l'app sort en erreur — on retente 3 fois puis on s'arrete au lieu de
+    # boucler indefiniment sans backoff visible.
+    restart: on-failure:3
+
+volumes:
+  dev-cache:
+  dev-ccache:

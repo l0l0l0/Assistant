@@ -1,0 +1,350 @@
+# =============================================================================
+#  microscope-ibom:base
+#  Image de base avec Qt6 + OpenCV CUDA + TensorRT (de JetPack) + librealsense
+#  Cible: Jetson AGX Orin 32GB sur JetPack 7.2 (L4T r39.2, CUDA 13.2, SBSA)
+# =============================================================================
+#
+#  Build:
+#    docker compose -f docker/compose.yml build base
+#    OU
+#    docker build -f docker/base.Dockerfile -t microscope-ibom:base .
+#
+#  Premier build: ~90-120 min (compilation OpenCV CUDA from source)
+#  Builds suivants: <5 min (cache Docker)
+#
+# =============================================================================
+
+# JP7.2 : plus de conteneur l4t-jetpack (confirme par NVIDIA sur le forum).
+# Base = conteneur TensorRT SBSA officiel = CUDA 13.2.1 + cuDNN + TensorRT 10.16.1
+# (Ubuntu 24.04, arm64/SBSA). NE PAS prendre 26.06 (passe a CUDA 13.3.0, desaligne
+# du driver R595 de JP7.2). tensorrt:26.05-py3 <=> JP7.2 (CUDA 13.2.1).
+ARG BASE_IMAGE=nvcr.io/nvidia/tensorrt:26.05-py3
+ARG OPENCV_VERSION=4.13.0          # 4.13 compile avec CUDA 13 (la 4.12 casse)
+ARG REALSENSE_VERSION=v2.55.1      # bumper si le build casse sur noyau 6.8
+ARG ONNXRUNTIME_VERSION=v1.23.0    # 1re version avec support CUDA 13 + TensorRT EP
+ARG CUDA_ARCH_BIN=8.7             # Orin = Ampere sm_87, inchange
+
+# =============================================================================
+#  STAGE 1 : OpenCV with CUDA (build from source)
+# =============================================================================
+FROM ${BASE_IMAGE} AS opencv-builder
+
+ARG OPENCV_VERSION
+ARG CUDA_ARCH_BIN
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git pkg-config wget unzip \
+    libgtk-3-dev \
+    libavcodec-dev libavformat-dev libswscale-dev \
+    libv4l-dev libxvidcore-dev libx264-dev \
+    libjpeg-dev libpng-dev libtiff-dev \
+    gfortran openexr \
+    libatlas-base-dev \
+    python3-dev python3-numpy python3-pip \
+    libtbb-dev libtbbmalloc2 \
+    libdc1394-dev \
+    libeigen3-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN git clone --depth 1 --branch ${OPENCV_VERSION} https://github.com/opencv/opencv.git && \
+    git clone --depth 1 --branch ${OPENCV_VERSION} https://github.com/opencv/opencv_contrib.git
+
+WORKDIR /tmp/opencv/build
+RUN cmake -G Ninja \
+    -D CMAKE_BUILD_TYPE=Release \
+    -D CMAKE_INSTALL_PREFIX=/usr/local \
+    -D OPENCV_EXTRA_MODULES_PATH=/tmp/opencv_contrib/modules \
+    -D WITH_CUDA=ON \
+    -D WITH_CUDNN=ON \
+    -D OPENCV_DNN_CUDA=ON \
+    -D ENABLE_FAST_MATH=ON \
+    -D CUDA_FAST_MATH=ON \
+    -D WITH_CUBLAS=ON \
+    -D WITH_NVCUVID=ON \
+    -D CUDA_ARCH_BIN=${CUDA_ARCH_BIN} \
+    -D CUDA_ARCH_PTX="" \
+    -D WITH_GSTREAMER=ON \
+    -D WITH_V4L=ON \
+    -D WITH_LIBV4L=ON \
+    -D WITH_OPENGL=ON \
+    -D WITH_TBB=ON \
+    -D WITH_EIGEN=ON \
+    -D BUILD_opencv_python2=OFF \
+    -D BUILD_opencv_python3=ON \
+    -D OPENCV_GENERATE_PKGCONFIG=ON \
+    -D BUILD_TESTS=OFF \
+    -D BUILD_PERF_TESTS=OFF \
+    -D BUILD_EXAMPLES=OFF \
+    -D BUILD_DOCS=OFF \
+    -D OPENCV_ENABLE_NONFREE=ON \
+    .. && \
+    ninja -j$(nproc) && \
+    DESTDIR=/opencv-install ninja install
+
+
+# =============================================================================
+#  STAGE 2 : librealsense2 (build from source — paquet Intel non dispo ARM64)
+# =============================================================================
+FROM ${BASE_IMAGE} AS realsense-builder
+
+ARG REALSENSE_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git pkg-config \
+    libssl-dev libusb-1.0-0-dev libudev-dev \
+    libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN git clone --depth 1 --branch ${REALSENSE_VERSION} https://github.com/IntelRealSense/librealsense.git
+
+WORKDIR /tmp/librealsense/build
+RUN cmake -G Ninja \
+    -D CMAKE_BUILD_TYPE=Release \
+    -D CMAKE_INSTALL_PREFIX=/usr/local \
+    -D BUILD_EXAMPLES=OFF \
+    -D BUILD_GRAPHICAL_EXAMPLES=OFF \
+    -D BUILD_PYTHON_BINDINGS=OFF \
+    -D BUILD_WITH_CUDA=ON \
+    -D FORCE_RSUSB_BACKEND=ON \
+    .. && \
+    ninja -j$(nproc) && \
+    DESTDIR=/realsense-install ninja install
+
+
+# =============================================================================
+#  STAGE 3 : ONNX Runtime avec CUDA + TensorRT EP (build from source ARM64)
+#  Pas de paquet apt libonnxruntime-dev sur Jammy ARM64, pas de wheel CMake
+#  installable depuis pip. Build from source = seule voie propre pour avoir
+#  un onnxruntimeConfig.cmake compatible avec find_package(onnxruntime CONFIG).
+#  Long (~1-2h sur Jetson AGX Orin 32GB).
+# =============================================================================
+FROM ${BASE_IMAGE} AS onnxruntime-builder
+
+ARG ONNXRUNTIME_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDACXX=/usr/local/cuda/bin/nvcc
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ninja-build git pkg-config wget ca-certificates \
+    python3 python3-dev python3-pip python3-numpy python3-setuptools python3-wheel python3-packaging \
+    libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ONNX Runtime v1.19.2 exige CMake >= 3.26 (Jammy ne fournit que 3.22.1).
+# MAIS on doit aussi rester < 4.x : CMake 4.0 a supprime le support des
+# cmake_minimum_required(VERSION <3.5), et certains deps tires en
+# FetchContent par ORT (google_nsync notamment) ont des headers <3.5 et
+# plantent avec CMake 4.x. La fenetre safe est [3.26, 4) = la serie 3.31.x.
+RUN pip3 install --no-cache-dir "cmake>=3.28,<4" psutil \
+    && cmake --version
+
+WORKDIR /tmp
+# Clone en 2 etapes pour eviter "HTTP/2 stream was not closed cleanly: CANCEL"
+# observe quand on tire ~3-4 GB en un coup via git clone --recursive sur ARM64 :
+#   1. postBuffer 512MB pour les gros packs
+#   2. low-speed timeouts desactives (GitHub peut throttle pendant 30s+ sur un sous-fichier)
+#   3. clone principal seul (rapide, ~30 MB pour ORT v1.19.2 --depth 1)
+#   4. submodules en parallele (--jobs 4) et shallow (--depth 1) avec 3 tentatives
+RUN git config --global http.postBuffer 524288000 \
+ && git config --global http.lowSpeedLimit 0 \
+ && git config --global http.lowSpeedTime 999999 \
+ && git clone --depth 1 --branch ${ONNXRUNTIME_VERSION} \
+        https://github.com/microsoft/onnxruntime.git \
+ && cd onnxruntime \
+ && for i in 1 2 3; do \
+        git submodule update --init --recursive --depth 1 --jobs 4 && break ; \
+        echo "[onnx-clone] submodules attempt $i/3 failed, retry in 10s..." ; \
+        sleep 10 ; \
+    done \
+ && git submodule status
+
+WORKDIR /tmp/onnxruntime
+
+# Workaround upstream bug (microsoft/onnxruntime#26707) : GitLab regenere les
+# zip archives dynamiquement, donc le SHA1 hardcode pour Eigen devient
+# invalide cote serveur. Touche v1.17.1, v1.19.2, v1.20.1, v1.21.0, v1.22.0
+# (bumper ne resout pas). Le hash est dans cmake/deps.txt (format
+# "eigen;URL;SHA1") — PAS dans cmake/external/eigen.cmake comme on pourrait
+# le penser. On remplace par le hash que GitLab sert actuellement.
+# A re-patcher si GitLab change (rare). ## CHECK: verifier le hash eigen
+# de cmake/deps.txt pour ORT v1.23.0 (peut differer de la serie 1.19-1.22).
+RUN sed -i 's|be8be39fdbc6e60e94fa7870b280707069b5b81a|32b145f525a8308d7ab1c09388b2e288312d8eba|g' \
+        cmake/deps.txt \
+ && echo "=== eigen line apres patch ===" \
+ && grep "^eigen;" cmake/deps.txt
+
+RUN ./build.sh \
+        --config Release \
+        --update --build --parallel \
+        --build_shared_lib \
+        --skip_tests \
+        --skip_submodule_sync \
+        --allow_running_as_root \
+        --use_cuda --cuda_home /usr/local/cuda \
+        --cudnn_home /usr \   ## CHECK: cuDNN du conteneur tensorrt (headers /usr/include, libs /usr/lib/aarch64-linux-gnu)
+        --use_tensorrt --tensorrt_home /usr \
+        --cuda_version 13.2 \
+        --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=87 \
+        --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF \
+    && cd build/Linux/Release \
+    && DESTDIR=/onnxruntime-install cmake --install . --prefix /usr/local
+
+
+# =============================================================================
+#  STAGE 4 : Image finale
+# =============================================================================
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe/Paris
+
+# -----------------------------------------------------------------------------
+#  Outils système + dépendances runtime
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential ninja-build cmake git \
+    pkg-config \
+    curl wget unzip \
+    libgtk-3-0 \
+    ## CHECK noms de paquets sur Ubuntu 24.04 (noble): sonames FFmpeg 58->60,
+    ## libtiff 5->6, transition t64 (libssl3->libssl3t64, libpng16-16 ->
+    ## libpng16-16t64 ?). Verifier avec: apt-cache search <lib>
+    libavcodec60 libavformat60 libswscale7 \
+    libjpeg-turbo8 libpng16-16t64 libtiff6 \
+    libtbb12 libtbbmalloc2 \
+    libdc1394-25 \
+    libeigen3-dev \
+    libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+    gstreamer1.0-plugins-good gstreamer1.0-libav \
+    libv4l-0 v4l-utils \
+    libusb-1.0-0 \
+    libssl3t64 \
+    # OpenGL/EGL/GLX dev (requis par Qt6Gui/Qt6OpenGL — Qt6 echoue CMake sans)
+    libgl-dev libglx-dev libegl-dev libgles-dev libopengl-dev libglu1-mesa-dev \
+    libvulkan-dev \
+    udev \
+    locales \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN locale-gen en_US.UTF-8 fr_FR.UTF-8
+
+# -----------------------------------------------------------------------------
+#  Qt6 (Ubuntu 24.04 — Qt 6.4)
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qt6-base-dev \
+    qt6-multimedia-dev \
+    qt6-tools-dev \
+    qt6-tools-dev-tools \
+    qt6-l10n-tools \
+    qt6-shader-baker \
+    qt6-declarative-dev \
+    qt6-virtualkeyboard-plugin \
+    qml6-module-qtquick-virtualkeyboard \
+    libqt6opengl6-dev \
+    libqt6openglwidgets6 \
+    libqt6websockets6-dev \
+    libqt6concurrent6 \
+    libqt6printsupport6 \
+    libqt6multimediawidgets6 \
+    qml6-module-qtmultimedia \
+    qml6-module-qtquick \
+    qml6-module-qtquick-controls \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+#  Dépendances applicatives (alternative à vcpkg pour les paquets dispo en apt)
+#  ONNX Runtime est copie depuis le stage onnxruntime-builder (pas de paquet apt
+#  ARM64 dispo) — voir COPY plus bas.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libspdlog-dev libfmt-dev \
+    nlohmann-json3-dev \
+    libhpdf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+#  Catch2 v3 from source — le paquet apt jammy fournit la v2.13 qui n'a plus
+#  la meme API que la v3 utilisee dans les tests (tests/*.cpp incluent
+#  catch2/catch_test_macros.hpp qui est v3). Compile rapide ~3 min.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake build-essential git ninja-build \
+    && cd /tmp \
+    && git clone --depth 1 --branch v3.5.4 https://github.com/catchorg/Catch2.git \
+    && cd Catch2 && cmake -B build -G Ninja \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DBUILD_TESTING=OFF \
+       -DCATCH_INSTALL_DOCS=OFF \
+       -DCATCH_INSTALL_EXTRAS=ON \
+       -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build build -j$(nproc) \
+    && cmake --install build \
+    && cd / && rm -rf /tmp/Catch2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+#  ZXing-cpp — pas dans Ubuntu 22.04, build from source (rapide ~3 min)
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake build-essential git \
+    && cd /tmp \
+    && git clone --depth 1 --branch v2.2.1 https://github.com/zxing-cpp/zxing-cpp.git \
+    && cd zxing-cpp && cmake -B build -G Ninja \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DBUILD_SHARED_LIBS=ON \
+       -DBUILD_EXAMPLES=OFF \
+       -DBUILD_BLACKBOX_TESTS=OFF \
+    && cmake --build build -j$(nproc) \
+    && cmake --install build \
+    && cd / && rm -rf /tmp/zxing-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+#  Copie des artefacts compilés des stages précédents
+# -----------------------------------------------------------------------------
+COPY --from=opencv-builder       /opencv-install/usr/local/       /usr/local/
+COPY --from=realsense-builder    /realsense-install/usr/local/    /usr/local/
+COPY --from=onnxruntime-builder  /onnxruntime-install/usr/local/  /usr/local/
+
+# -----------------------------------------------------------------------------
+#  Règles udev RealSense (au cas où montées en read-only depuis l'hôte)
+# -----------------------------------------------------------------------------
+COPY --from=realsense-builder /tmp/librealsense/config/99-realsense-libusb.rules \
+    /etc/udev/rules.d/99-realsense-libusb.rules
+
+RUN ldconfig
+
+# -----------------------------------------------------------------------------
+#  Variables d'environnement runtime
+# -----------------------------------------------------------------------------
+ENV LANG=fr_FR.UTF-8
+ENV LC_ALL=fr_FR.UTF-8
+ENV QT_QPA_PLATFORM=xcb
+ENV QT_X11_NO_MITSHM=1
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV CMAKE_PREFIX_PATH=/usr/local:${CMAKE_PREFIX_PATH}
+
+WORKDIR /opt/microscope-ibom
+
+# -----------------------------------------------------------------------------
+#  Vérifications de santé (fail fast au build)
+# -----------------------------------------------------------------------------
+RUN echo "=== Verification stack ===" && \
+    /usr/local/cuda/bin/nvcc --version | head -4 && \
+    pkg-config --modversion opencv4 && \
+    pkg-config --modversion realsense2 && \
+    qmake6 -query QT_VERSION && \
+    ls /usr/local/include/onnxruntime/ 2>/dev/null | head -3 && \
+    ls /usr/local/lib/libonnxruntime* 2>/dev/null | head -3 && \
+    echo "=== Stack OK ==="
