@@ -183,7 +183,7 @@ Le blocage historique était « ONNX Runtime absent d'apt » (bandeau de `ci.yml
 | **P1** | ✅ **Fait (suite 132)** — Hot-path GUI : wrap zéro-copie `Format_BGR888` (cvtColor ET deep-copy supprimés ; l'undistort remap était déjà caché) | 3.1 | Fort (CPU Orin) | ½-1s | mesure Jetson à confirmer |
 | **P1** | ✅ **Fait (suite 131)** — Face arrière (Back) bout en bout (overlay miroité, alignements, re-anchor, dataset, UI ; convention : H = PCB brut → image, det < 0 en vue arrière) | 6.1 | Majeur produit | 1-2s | validation Jetson |
 | **P1** | Consolidation journal + bloc « à valider » | 10 | Fort (vélocité sessions) | ½s | rien |
-| **P2** | Extraction `AlignmentController` + tests des gates | 7.1/8.2 | Fort (testabilité) | 1s/contrôleur | CI P0 en place |
+| **P2** | 🟡 **Étape 1 faite (suite 133)** — gates du re-anchor silencieux extraits en `overlay::ReanchorGate` unit-testé (8 cas) ; l'extraction complète `AlignmentController` reste à faire | 7.1/8.2 | Fort (testabilité) | 1s/contrôleur | CI P0 en place |
 | **P2** | Reconnexion caméra à chaud | 2.2 | Moyen (confort atelier) | ½s | rien |
 | **P2** | RemoteView : overlay composité + token | 3.2 | Moyen | ½s | rien |
 | **P2** | Tests BoardLocator + fixtures parser | 8.2 | Moyen | 1s | CI P0 |

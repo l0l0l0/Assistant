@@ -234,6 +234,7 @@ void Application::setActiveLayer(ibom::Layer layer)
     m_anchorMode = false;
     setMultiAlignUIState(false);
     if (m_homography) m_homography->reset();
+    m_reanchorGate.reset();  // any held silent candidate belongs to the old side
     ++m_alignmentEpoch;
     m_currentPixelsPerMm = 0.0;
     if (auto* sp = m_mainWindow ? m_mainWindow->statsPanel() : nullptr)
@@ -534,8 +535,8 @@ void Application::createSubsystems()
         // sits under the 12 px drift gate, so the periodic tick skips instead
         // of yanking the overlay — the component path is safe again with or
         // without a trained model. Belt on top: a correction only applies
-        // after two consecutive concordant estimates (m_pendingReanchorCorners),
-        // so one aberrant tick can't move anything either.
+        // after two consecutive concordant estimates (ReanchorGate, unit-
+        // tested), so one aberrant tick can't move anything either.
         componentReanchor(/*silent=*/true);
     });
     updateReanchorTimer();
@@ -1533,60 +1534,41 @@ void Application::componentReanchor(bool silent)
         std::vector<cv::Point2f> newImg;
         cv::perspectiveTransform(pcbCorners, newImg, result.homography);
         if (silent && m_homography && m_homography->isValid()) {
-            double maxShift = 0.0;
-            for (size_t i = 0; i < 4; ++i) {
-                const auto cur = m_homography->pcbToImage(pcbCorners[i]);
-                maxShift = std::max(maxShift,
-                    cv::norm(cv::Point2f(cur.x - newImg[i].x, cur.y - newImg[i].y)));
-            }
-            constexpr double kReanchorMinShiftPx = 12.0;
-            if (maxShift < kReanchorMinShiftPx) {
-                // Whatever disagreement a previous tick held onto resolved
-                // itself — the pose is fine again, drop the pending.
-                m_pendingReanchorCorners.clear();
-                spdlog::debug("Component re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
-                              kReanchorMinShiftPx, maxShift);
-                return;
-            }
-
-            // Two-tick confirmation (remède C, see m_pendingReanchorCorners):
-            // hold this pose and only apply once a second consecutive estimate
-            // lands on the same place — a lone aberrant estimate (hand, glare)
-            // then never yanks a healthy overlay; it costs one extra tick of
-            // latency on a real sustained drift. Skipped while tracking is
-            // Lost: recovery wants the first plausible pose immediately.
+            // Drift gate + two-tick confirmation + Lost bypass live in
+            // ReanchorGate (unit-tested — the rules come from suites 123/
+            // 126/127, see docs/BLOB_REANCHOR_JITTER_ANALYSE.md).
+            std::vector<cv::Point2f> curImg;
+            curImg.reserve(4);
+            for (const auto& p : pcbCorners)
+                curImg.push_back(m_homography->pcbToImage(p));
+            overlay::ReanchorGate::Params gp;
+            gp.pendingMaxAgeMs = 3 * std::max<std::int64_t>(500,
+                static_cast<std::int64_t>(m_config->reanchorIntervalS() * 1000.0));
             const bool trackingLost = m_lastTrackingState ==
                 static_cast<int>(overlay::TrackingWorker::State::Lost);
-            if (!trackingLost) {
-                constexpr double kReanchorConfirmTolPx = 8.0;
-                const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-                const qint64 maxAgeMs = 3 * std::max<qint64>(500,
-                    static_cast<qint64>(m_config->reanchorIntervalS() * 1000.0));
-                bool confirmed = false;
-                if (m_pendingReanchorCorners.size() == 4 &&
-                    nowMs - m_pendingReanchorMs <= maxAgeMs) {
-                    double agree = 0.0;
-                    for (size_t i = 0; i < 4; ++i)
-                        agree = std::max(agree, static_cast<double>(
-                            cv::norm(newImg[i] - m_pendingReanchorCorners[i])));
-                    confirmed = agree <= kReanchorConfirmTolPx;
-                }
-                if (!confirmed) {
-                    m_pendingReanchorCorners = newImg;
-                    m_pendingReanchorMs = nowMs;
-                    spdlog::info("Component re-anchor: HELD (shift {:.1f}px, {}) — "
-                                 "waiting for a second concordant estimate",
-                                 maxShift, result.message);
-                    return;
-                }
+            const auto gate = m_reanchorGate.evaluate(
+                newImg, curImg, trackingLost,
+                QDateTime::currentMSecsSinceEpoch(), gp);
+            switch (gate.action) {
+            case overlay::ReanchorGate::Action::Skip:
+                spdlog::debug("Component re-anchor: {} (shift {:.1f}px), skipping",
+                              gate.reason, gate.maxShiftPx);
+                return;
+            case overlay::ReanchorGate::Action::Hold:
+                spdlog::info("Component re-anchor: HELD (shift {:.1f}px, {}) — {}",
+                             gate.maxShiftPx, result.message, gate.reason);
+                return;
+            case overlay::ReanchorGate::Action::Apply:
+                spdlog::info("Component re-anchor: correcting drift "
+                             "(shift {:.1f}px, {} — {})",
+                             gate.maxShiftPx, result.message, gate.reason);
+                break;
             }
-            spdlog::info("Component re-anchor: correcting drift (shift {:.1f}px, {})",
-                         maxShift, result.message);
         }
 
         // Applying a pose (silent confirmed, interactive, or Lost recovery)
         // supersedes any held confirmation candidate.
-        m_pendingReanchorCorners.clear();
+        m_reanchorGate.reset();
         m_homography->setMatrix(result.homography);
         m_baseHomography = m_homography->matrix().clone();
         if (m_mainWindow->boardMinimap())
@@ -2837,6 +2819,7 @@ void Application::connectControlSignals()
         setMultiAlignUIState(false);  // also clears the PCB Map click targets
 
         m_homography->reset();
+        m_reanchorGate.reset();  // no pose left for a held candidate to correct
         ++m_alignmentEpoch;
         m_currentPixelsPerMm = 0.0;
         if (auto* sp = m_mainWindow->statsPanel()) sp->setScale(0.0);

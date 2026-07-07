@@ -162,6 +162,7 @@ set(SOURCES
     src/overlay/BoardLocator.cpp
     src/overlay/ComponentReanchor.cpp
     src/overlay/BlobComponentDetector.cpp
+    src/overlay/ReanchorGate.cpp
 
     # GUI
     src/gui/MainWindow.cpp

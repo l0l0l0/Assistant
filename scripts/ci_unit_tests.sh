@@ -78,6 +78,10 @@ build_and_run test_letterbox \
     "$T/test_letterbox.cpp" \
     $OPENCV_LIBS $CATCH_LIBS
 
+build_and_run test_reanchor_gate \
+    "$T/test_reanchor_gate.cpp" "$S/overlay/ReanchorGate.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
 build_and_run test_boardlocator \
     "$T/test_boardlocator.cpp" "$S/overlay/BoardLocator.cpp" \
     "$S/overlay/Homography.cpp" \

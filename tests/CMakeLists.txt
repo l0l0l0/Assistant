@@ -61,6 +61,14 @@ add_ibom_test(test_blob_detector
             onnxruntime::onnxruntime spdlog::spdlog
 )
 
+# Re-anchor gate test — the silent-correction decision logic (drift gate,
+# two-tick confirmation, Lost bypass). Pure geometry, no Qt.
+add_ibom_test(test_reanchor_gate
+    SOURCES test_reanchor_gate.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/ReanchorGate.cpp
+    LIBS    opencv_core
+)
+
 # BoardLocator test — synthetic contour/depth scenes with a known pose.
 add_ibom_test(test_boardlocator
     SOURCES test_boardlocator.cpp
