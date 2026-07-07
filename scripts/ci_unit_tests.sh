@@ -117,6 +117,11 @@ if [ -n "$MOC" ] && pkg-config --exists Qt6Core 2>/dev/null; then
         $(pkg-config --cflags Qt6Gui) $(pkg-config --libs Qt6Gui) \
         $OPENCV_LIBS $CATCH_LIBS
 
+    build_and_run test_image_wrap \
+        "$T/test_image_wrap.cpp" "$S/utils/ImageUtils.cpp" \
+        $(pkg-config --cflags Qt6Gui) $(pkg-config --libs Qt6Gui) \
+        $OPENCV_LIBS $LOG_LIBS $CATCH_LIBS
+
     "$MOC" "$S/overlay/TrackingWorker.h" -o "$BUILD/moc_TrackingWorker.cpp" \
         -I"$S" $QT_CFLAGS
     build_and_run test_tracking_worker \

@@ -2,6 +2,7 @@
 
 #include <QImage>
 #include <opencv2/core.hpp>
+#include <memory>
 #include <string>
 
 namespace ibom::utils {
@@ -11,6 +12,23 @@ class ImageUtils {
 public:
     /// Convert cv::Mat (BGR) to QImage (RGB)
     static QImage matToQImage(const cv::Mat& mat);
+
+    /// ZERO-COPY wrap of a BGR (CV_8UC3 → Format_BGR888) or grayscale
+    /// (CV_8UC1 → Format_Grayscale8) Mat into a QImage. The Mat header is
+    /// heap-kept and released by the QImage's cleanup hook, so the pixel
+    /// buffer stays alive exactly as long as (any implicit-shared copy of)
+    /// the QImage — no cvtColor, no deep copy. This is the display hot path:
+    /// the previous per-frame BGR→RGB conversion + QImage::copy() moved
+    /// ~2×6 MB per 1080p frame on the GUI thread (INVESTIGATION_360 §3.1).
+    /// Unsupported types fall back to the converting matToQImage().
+    /// The buffer must not be written after wrapping (fresh cvtColor/remap
+    /// outputs and immutable FrameRefs both qualify).
+    static QImage wrapMatOwned(cv::Mat mat);
+
+    /// Same zero-copy wrap for an immutable shared frame (camera FrameRef =
+    /// shared_ptr<const cv::Mat>): the QImage holds a shared_ptr copy, so the
+    /// capture buffer outlives the camera loop for as long as it is displayed.
+    static QImage wrapMatShared(std::shared_ptr<const cv::Mat> frame);
 
     /// Convert QImage to cv::Mat (BGR)
     static cv::Mat qImageToMat(const QImage& image);

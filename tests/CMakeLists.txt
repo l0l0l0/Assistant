@@ -114,6 +114,15 @@ if(Qt6_FOUND)
                 ${CMAKE_SOURCE_DIR}/src/overlay/OverlayRenderer.cpp
         LIBS    Qt6::Gui opencv_core
     )
+
+    # Zero-copy Mat→QImage wraps (display hot path). Pure QImage data ops —
+    # no app instance, no moc.
+    add_ibom_test(test_image_wrap
+        SOURCES test_image_wrap.cpp
+                ${CMAKE_SOURCE_DIR}/src/utils/ImageUtils.cpp
+        LIBS    Qt6::Gui opencv_core opencv_imgproc opencv_imgcodecs
+                spdlog::spdlog
+    )
     add_executable(test_tracking_worker
         test_tracking_worker.cpp
         ${CMAKE_SOURCE_DIR}/src/overlay/TrackingWorker.cpp

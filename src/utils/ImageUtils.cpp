@@ -35,6 +35,49 @@ QImage ImageUtils::matToQImage(const cv::Mat& mat)
     }
 }
 
+namespace {
+
+QImage::Format wrapFormatFor(int matType)
+{
+    switch (matType) {
+    case CV_8UC3: return QImage::Format_BGR888;     // native BGR since Qt 5.14
+    case CV_8UC1: return QImage::Format_Grayscale8;
+    default:      return QImage::Format_Invalid;
+    }
+}
+
+} // namespace
+
+QImage ImageUtils::wrapMatOwned(cv::Mat mat)
+{
+    if (mat.empty()) return {};
+    const QImage::Format fmt = wrapFormatFor(mat.type());
+    if (fmt == QImage::Format_Invalid)
+        return matToQImage(mat);  // rare types: converting fallback
+    // The heap header owns a reference to the pixels; the QImage cleanup hook
+    // releases it when the last implicit-shared copy dies.
+    auto* keepAlive = new cv::Mat(std::move(mat));
+    return QImage(keepAlive->data, keepAlive->cols, keepAlive->rows,
+                  static_cast<qsizetype>(keepAlive->step), fmt,
+                  [](void* p) { delete static_cast<cv::Mat*>(p); },
+                  keepAlive);
+}
+
+QImage ImageUtils::wrapMatShared(std::shared_ptr<const cv::Mat> frame)
+{
+    if (!frame || frame->empty()) return {};
+    const QImage::Format fmt = wrapFormatFor(frame->type());
+    if (fmt == QImage::Format_Invalid)
+        return matToQImage(*frame);
+    auto* keepAlive = new std::shared_ptr<const cv::Mat>(std::move(frame));
+    // const-data constructor: Qt never writes through it; any detach makes
+    // its own copy first.
+    return QImage((*keepAlive)->data, (*keepAlive)->cols, (*keepAlive)->rows,
+                  static_cast<qsizetype>((*keepAlive)->step), fmt,
+                  [](void* p) { delete static_cast<std::shared_ptr<const cv::Mat>*>(p); },
+                  keepAlive);
+}
+
 cv::Mat ImageUtils::qImageToMat(const QImage& image)
 {
     if (image.isNull()) return {};

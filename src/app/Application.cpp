@@ -2055,31 +2055,21 @@ void Application::wireCameraSignals()
                 sharpness, sharpness >= m_config->datasetMinSharpness());
         }
 
-        // Apply undistortion if calibrated (allocates a new Mat; unavoidable).
-        // Skip for RealSense: librealsense already applies factory calibration.
-        cv::Mat processed;
+        // Display path — ZERO-COPY (INVESTIGATION_360 §3.1): QImage renders
+        // BGR natively (Format_BGR888), so the old per-frame BGR→RGB cvtColor
+        // AND the deep QImage::copy() (2 × ~6 MB per 1080p frame, every
+        // frame, on the GUI thread) are both gone. The wrap keeps the pixel
+        // buffer alive through the QImage's cleanup hook: the immutable
+        // FrameRef directly, or the fresh undistort output (remap allocates a
+        // new Mat — unavoidable, and skipped for RealSense: librealsense
+        // already applies factory calibration).
+        QImage display;
         if (m_calibration && m_calibration->isCalibrated()
             && backend != CameraBackend::RealSense) {
-            processed = m_calibration->undistort(frame);
+            display = utils::ImageUtils::wrapMatOwned(m_calibration->undistort(frame));
         } else {
-            processed = frame;  // header share, no pixel copy
+            display = utils::ImageUtils::wrapMatShared(frameRef);
         }
-
-        // Convert to RGB for QImage
-        cv::Mat rgb;
-        if (processed.channels() == 3)
-            cv::cvtColor(processed, rgb, cv::COLOR_BGR2RGB);
-        else if (processed.channels() == 1)
-            cv::cvtColor(processed, rgb, cv::COLOR_GRAY2RGB);
-        else
-            rgb = processed;
-
-        QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
-                    QImage::Format_RGB888);
-        // Deep copy: qimg only wraps rgb's pixel buffer, which dies with this
-        // scope. The copy is shared (COW) between the camera view and the
-        // remote stream.
-        const QImage display = qimg.copy();
         // In depth-view mode the colorized depth map drives the view instead.
         // In IR mode the infraredReady handler drives it. Keep overlay/remote
         // paths fed with the color image regardless.
@@ -2187,7 +2177,7 @@ void Application::wireCameraSignals()
         // channel (it is no longer suppressed while a valid overlay exists:
         // during a re-alignment both are visible, which is what you want).
         if (m_pickingHomographyPoints && !m_homographyImagePoints.empty()) {
-            QImage pickOverlay(rgb.cols, rgb.rows, QImage::Format_ARGB32_Premultiplied);
+            QImage pickOverlay(frame.cols, frame.rows, QImage::Format_ARGB32_Premultiplied);
             pickOverlay.fill(Qt::transparent);
             QPainter pickPainter(&pickOverlay);
             pickPainter.setRenderHint(QPainter::Antialiasing, true);
