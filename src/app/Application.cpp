@@ -213,6 +213,67 @@ void Application::refreshRecentFilesMenu()
     m_mainWindow->setRecentFiles(files);
 }
 
+void Application::setActiveLayer(ibom::Layer layer)
+{
+    if (layer == m_activeLayer) return;
+    m_activeLayer = layer;
+    const bool back = (layer == ibom::Layer::Back);
+    spdlog::info("Active board side → {}", back ? "BACK" : "FRONT");
+
+    // The board was physically flipped: the current pose is meaningless for
+    // the new side. Cancel any picking flow and drop the alignment — but keep
+    // the on-disk saved alignment (it belongs to the front view restored at
+    // iBOM load). The overlay re-renders via the m_ovSigLayer signature; the
+    // ERREUR #46 clear path blanks it until a new pose exists.
+    m_pickingHomographyPoints = false;
+    m_alignOnComponents = false;
+    m_alignCompStep = 0;
+    m_alignMulti = false;
+    m_alignMultiAwaitClick = false;
+    m_alignMultiHaveCorner1 = false;
+    m_anchorMode = false;
+    setMultiAlignUIState(false);
+    if (m_homography) m_homography->reset();
+    m_reanchorGate.reset();  // any held silent candidate belongs to the old side
+    ++m_alignmentEpoch;
+    m_currentPixelsPerMm = 0.0;
+    if (auto* sp = m_mainWindow ? m_mainWindow->statsPanel() : nullptr)
+        sp->setScale(0.0);
+
+    // Follow with the BOM panel's layer filter (1 = Front, 2 = Back) so the
+    // list shows the same side as the overlay.
+    if (auto* bp = m_mainWindow ? m_mainWindow->bomPanel() : nullptr)
+        bp->setLayerFilterIndex(back ? 2 : 1);
+
+    // Dataset capture labels the active side's components.
+    if (m_datasetCreator && m_ibomProject) {
+        QMetaObject::invokeMethod(m_datasetCreator, "setProject", Qt::QueuedConnection,
+            Q_ARG(std::shared_ptr<const ibom::IBomProject>,
+                  std::shared_ptr<const IBomProject>(m_ibomProject)),
+            Q_ARG(ibom::Layer, m_activeLayer));
+    }
+
+    if (m_mainWindow) {
+        m_mainWindow->updateStatusMessage(back
+            ? tr("Back side active (mirrored view) — re-align the flipped board "
+                 "(Auto-Align works on the back too)")
+            : tr("Front side active — re-align the board"));
+    }
+}
+
+void Application::refreshInspectionStats()
+{
+    // Push the absolute inspection progress to the StatsPanel. Called after
+    // every m_placedRefs mutation (place, reset, session restore) and on iBOM
+    // load — the panel's increment API alone can't represent restore/reset,
+    // which is why "Inspection Progress" stayed at 0% forever (ERREUR #40).
+    auto* sp = m_mainWindow ? m_mainWindow->statsPanel() : nullptr;
+    if (!sp) return;
+    sp->setTotalComponents(m_ibomProject
+        ? static_cast<int>(m_ibomProject->components.size()) : 0);
+    sp->setPlacedCount(static_cast<int>(m_placedRefs.size()));
+}
+
 void Application::saveInspectionState()
 {
     const std::string key = m_config->ibomFilePath();
@@ -455,29 +516,28 @@ void Application::createSubsystems()
     }
 
     // Periodic re-anchor timer (plan B): during live tracking, correct
-    // accumulated drift. Prefer the component path — it matches detections
+    // accumulated drift via the component path — it matches detections
     // (trained model OR model-free blobs) to iBOM positions and works when the
-    // board fills the frame. Fall back to the geometric outline only when
-    // component re-anchor can't run (no iBOM board bbox etc.). The timeout
-    // re-checks all conditions; updateReanchorTimer() starts/stops it.
+    // board fills the frame. The timeout re-checks all conditions;
+    // updateReanchorTimer() starts/stops it.
     m_reanchorTimer = new QTimer(this);
     m_reanchorTimer->setObjectName("ReanchorTimer");
     connect(m_reanchorTimer, &QTimer::timeout, this, [this]() {
         if (!m_config->reanchorEnabled() || !m_liveMode || !m_ibomProject || m_autoAligning)
             return;
-        // Periodic drift correction needs a STABLE absolute pose. A trained
-        // detector gives that; the model-free blob detector does NOT — its
-        // per-fit reproj is fine (~3px) but the pose wanders ~30px frame to
-        // frame (different blob subset each time), so re-applying it every few
-        // seconds yanks the overlay and resets the tracking reference instead
-        // of correcting drift (field log 2026-07-02). So: component re-anchor
-        // periodically only with a model; the geometric outline otherwise
-        // (harmless no-op when the board fills the frame). Blobs stay for
-        // one-shot Auto-Align and loss recovery, where a coarse pose is a win.
-        if (componentDetector())
-            componentReanchor(/*silent=*/true);
-        else
-            autoAlignBoard(/*silent=*/true, /*isRetry=*/false, /*geometricOnly=*/true);
+        // Periodic drift correction needs a repeatable absolute pose. The blob
+        // pose used to wander ~30 px tick to tick (13-63 px field log
+        // 2026-07-03) — not because of the detections, but because the 8-DOF
+        // findHomography fit noise-fitted its perspective terms, levering the
+        // board corners the drift gate measures. Blob poses are now fitted as
+        // a 4-DOF similarity on stable region centroids
+        // (docs/BLOB_REANCHOR_JITTER_ANALYSE.md): tick-to-tick corner jitter
+        // sits under the 12 px drift gate, so the periodic tick skips instead
+        // of yanking the overlay — the component path is safe again with or
+        // without a trained model. Belt on top: a correction only applies
+        // after two consecutive concordant estimates (ReanchorGate, unit-
+        // tested), so one aberrant tick can't move anything either.
+        componentReanchor(/*silent=*/true);
     });
     updateReanchorTimer();
 
@@ -736,8 +796,11 @@ void Application::reportAlignmentResult(const QString& summary)
     // Persist the homography so it can be offered back on the next launch if
     // the same iBOM is reloaded (see loadIBomFile()). Best-effort: there is no
     // way to know whether the camera/board actually moved since, so this is
-    // just "what we had last time", not a correctness guarantee.
-    if (m_homography && m_homography->isValid() && m_config) {
+    // just "what we had last time", not a correctness guarantee. Front only:
+    // a back-side pose saved here would be restored as-if-front at the next
+    // load (restore is likewise gated on the front side).
+    if (m_activeLayer == ibom::Layer::Front &&
+        m_homography && m_homography->isValid() && m_config) {
         Config::SavedAlignment sa;
         sa.valid         = true;
         sa.ibomFilePath  = m_config->ibomFilePath();
@@ -847,7 +910,7 @@ const Component* Application::componentAtPcb(cv::Point2f pcbPt) const
     double bestDist = std::numeric_limits<double>::max();
 
     for (const auto& c : m_ibomProject->components) {
-        if (c.layer != ibom::Layer::Front) continue;  // matches the rendered overlay
+        if (c.layer != m_activeLayer) continue;  // matches the rendered overlay
         const auto& bb = c.bbox;
         if (pcbPt.x >= bb.minX && pcbPt.x <= bb.maxX &&
             pcbPt.y >= bb.minY && pcbPt.y <= bb.maxY) {
@@ -995,16 +1058,22 @@ void Application::applyMultiAlignment()
             A.copyTo(H(cv::Rect(0, 0, 3, 2)));
         }
     } else {  // n == 2 — similarity
-        const double dxp = pcb[1].x - pcb[0].x, dyp = pcb[1].y - pcb[0].y;
+        // Back side: the camera sees the layout mirrored, which a similarity
+        // cannot represent. Fit in the view frame (pcb x negated — vx) so the
+        // resulting 3×3, expressed against RAW pcb coords, carries the mirror
+        // (negative determinant). n ≥ 3 needs no special casing: affine and
+        // homography fits represent a mirror natively.
+        const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
+        const double dxp = vx * (pcb[1].x - pcb[0].x), dyp = pcb[1].y - pcb[0].y;
         const double dxi = img[1].x - img[0].x, dyi = img[1].y - img[0].y;
         const double dp = std::hypot(dxp, dyp), di = std::hypot(dxi, dyi);
         if (dp >= 0.1 && di >= 1.0) {
             const double s = di / dp;
             const double rot = std::atan2(dyi, dxi) - std::atan2(dyp, dxp);
             const double c = std::cos(rot) * s, sn = std::sin(rot) * s;
-            const double tx = img[0].x - (c * pcb[0].x - sn * pcb[0].y);
-            const double ty = img[0].y - (sn * pcb[0].x + c * pcb[0].y);
-            H = (cv::Mat_<double>(3, 3) << c, -sn, tx, sn, c, ty, 0, 0, 1);
+            const double tx = img[0].x - (c * vx * pcb[0].x - sn * pcb[0].y);
+            const double ty = img[0].y - (sn * vx * pcb[0].x + c * pcb[0].y);
+            H = (cv::Mat_<double>(3, 3) << c * vx, -sn, tx, sn * vx, c, ty, 0, 0, 1);
         }
     }
     if (H.empty() || H.rows != 3 || H.cols != 3) {
@@ -1056,7 +1125,7 @@ void Application::applyMultiAlignment()
                  n, model, m_currentPixelsPerMm);
 }
 
-void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
+void Application::autoAlignBoard(bool silent, bool isRetry)
 {
     if (m_autoAligning) return;  // already running, ignore re-clicks
     if (!m_lastColorFrame || m_lastColorFrame->empty()) {
@@ -1269,8 +1338,10 @@ void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
     });
 
     ai::ComponentDetector* detector = componentDetector();
+    const ibom::Layer activeLayer = m_activeLayer;  // snapshot for the worker
     watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project,
-                                          expectedPixelsPerMm, detector, geometricOnly]() {
+                                          expectedPixelsPerMm, detector,
+                                          activeLayer]() {
         // Detection-first (docs/AUTO_ALIGN_V2_PLAN.md): register the detected-
         // component constellation against the iBOM layout — needs no visible
         // board outline, so it works exactly where the geometric path
@@ -1278,21 +1349,24 @@ void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
         // background). Detections come from the trained model when loaded,
         // else from the model-free blob detector (classic CV) — so component-
         // based alignment works even with an empty models/. BoardLocator stays
-        // as the last resort. geometricOnly skips this entirely (periodic
-        // drift correction without a model — blobs too jittery for that).
+        // as the last resort.
         std::vector<ai::Detection> detections;
         const char* detSrc = "model";
-        if (geometricOnly) {
-            // fall straight through to BoardLocator below
-        } else if (detector) {
+        if (detector) {
             detections = detector->detect(colorCopy);
         } else {
             detections = overlay::detectComponentBlobs(colorCopy, expectedPixelsPerMm);
             detSrc = "blobs";
         }
         if (!detections.empty()) {
+            // Blob centers are noisier than model detections: fit a 4-DOF
+            // similarity so the pose stays repeatable at the board corners
+            // (docs/BLOB_REANCHOR_JITTER_ANALYSE.md — a full homography
+            // noise-fits its perspective terms there).
+            overlay::ComponentReanchor::Params rp;
+            rp.fitSimilarity = (detector == nullptr);
             const auto boot = overlay::ComponentReanchor::bootstrap(
-                detections, *project, ibom::Layer::Front, expectedPixelsPerMm);
+                detections, *project, activeLayer, expectedPixelsPerMm, rp);
             if (boot.found) {
                 overlay::BoardLocateResult blr;
                 blr.found  = true;
@@ -1317,7 +1391,7 @@ void Application::autoAlignBoard(bool silent, bool isRetry, bool geometricOnly)
                          "falling back to board outline", detSrc, boot.message);
         }
         return overlay::BoardLocator::locate(colorCopy, depthCopy, *project,
-                                             expectedPixelsPerMm, ibom::Layer::Front);
+                                             expectedPixelsPerMm, activeLayer);
     }));
 }
 
@@ -1460,22 +1534,41 @@ void Application::componentReanchor(bool silent)
         std::vector<cv::Point2f> newImg;
         cv::perspectiveTransform(pcbCorners, newImg, result.homography);
         if (silent && m_homography && m_homography->isValid()) {
-            double maxShift = 0.0;
-            for (size_t i = 0; i < 4; ++i) {
-                const auto cur = m_homography->pcbToImage(pcbCorners[i]);
-                maxShift = std::max(maxShift,
-                    cv::norm(cv::Point2f(cur.x - newImg[i].x, cur.y - newImg[i].y)));
-            }
-            constexpr double kReanchorMinShiftPx = 12.0;
-            if (maxShift < kReanchorMinShiftPx) {
-                spdlog::debug("Component re-anchor: pose within {:.0f}px (shift {:.1f}), skipping",
-                              kReanchorMinShiftPx, maxShift);
+            // Drift gate + two-tick confirmation + Lost bypass live in
+            // ReanchorGate (unit-tested — the rules come from suites 123/
+            // 126/127, see docs/BLOB_REANCHOR_JITTER_ANALYSE.md).
+            std::vector<cv::Point2f> curImg;
+            curImg.reserve(4);
+            for (const auto& p : pcbCorners)
+                curImg.push_back(m_homography->pcbToImage(p));
+            overlay::ReanchorGate::Params gp;
+            gp.pendingMaxAgeMs = 3 * std::max<std::int64_t>(500,
+                static_cast<std::int64_t>(m_config->reanchorIntervalS() * 1000.0));
+            const bool trackingLost = m_lastTrackingState ==
+                static_cast<int>(overlay::TrackingWorker::State::Lost);
+            const auto gate = m_reanchorGate.evaluate(
+                newImg, curImg, trackingLost,
+                QDateTime::currentMSecsSinceEpoch(), gp);
+            switch (gate.action) {
+            case overlay::ReanchorGate::Action::Skip:
+                spdlog::debug("Component re-anchor: {} (shift {:.1f}px), skipping",
+                              gate.reason, gate.maxShiftPx);
                 return;
+            case overlay::ReanchorGate::Action::Hold:
+                spdlog::info("Component re-anchor: HELD (shift {:.1f}px, {}) — {}",
+                             gate.maxShiftPx, result.message, gate.reason);
+                return;
+            case overlay::ReanchorGate::Action::Apply:
+                spdlog::info("Component re-anchor: correcting drift "
+                             "(shift {:.1f}px, {} — {})",
+                             gate.maxShiftPx, result.message, gate.reason);
+                break;
             }
-            spdlog::info("Component re-anchor: correcting drift (shift {:.1f}px, {})",
-                         maxShift, result.message);
         }
 
+        // Applying a pose (silent confirmed, interactive, or Lost recovery)
+        // supersedes any held confirmation candidate.
+        m_reanchorGate.reset();
         m_homography->setMatrix(result.homography);
         m_baseHomography = m_homography->matrix().clone();
         if (m_mainWindow->boardMinimap())
@@ -1504,22 +1597,30 @@ void Application::componentReanchor(bool silent)
         spdlog::info("Component re-anchor succeeded ({})", result.message);
     });
 
+    const ibom::Layer activeLayer = m_activeLayer;  // snapshot for the worker
     watcher->setFuture(QtConcurrent::run([detector, colorCopy, project, priorPose,
-                                          scalePrior]() {
+                                          scalePrior, activeLayer]() {
         // Detections from the trained model when loaded, else model-free blobs
         // (classic CV) — component-based re-anchor works with an empty models/.
         const std::vector<ai::Detection> detections =
             detector ? detector->detect(colorCopy)
                      : overlay::detectComponentBlobs(colorCopy, scalePrior);
+        // Blob centers are noisier than model detections: fit a 4-DOF
+        // similarity so the pose is repeatable at the board corners — the
+        // periodic drift gate measures there, and the 8-DOF fit's noise-fitted
+        // perspective terms are what shook the overlay 13-63 px per tick
+        // (docs/BLOB_REANCHOR_JITTER_ANALYSE.md).
+        overlay::ComponentReanchor::Params rp;
+        rp.fitSimilarity = (detector == nullptr);
         // Prior-based correction first (cheap, precise when the pose is only
         // drifting); global bootstrap when there is no usable prior — no pose
         // yet, or a pose so stale (board moved/picked up) that nothing falls
         // inside the matching radius anymore.
         auto res = overlay::ComponentReanchor::estimate(
-            detections, *project, priorPose, ibom::Layer::Front);
+            detections, *project, priorPose, activeLayer, {}, rp);
         if (!res.found)
             res = overlay::ComponentReanchor::bootstrap(
-                detections, *project, ibom::Layer::Front, scalePrior);
+                detections, *project, activeLayer, scalePrior, rp);
         return res;
     }));
 }
@@ -1936,31 +2037,21 @@ void Application::wireCameraSignals()
                 sharpness, sharpness >= m_config->datasetMinSharpness());
         }
 
-        // Apply undistortion if calibrated (allocates a new Mat; unavoidable).
-        // Skip for RealSense: librealsense already applies factory calibration.
-        cv::Mat processed;
+        // Display path — ZERO-COPY (INVESTIGATION_360 §3.1): QImage renders
+        // BGR natively (Format_BGR888), so the old per-frame BGR→RGB cvtColor
+        // AND the deep QImage::copy() (2 × ~6 MB per 1080p frame, every
+        // frame, on the GUI thread) are both gone. The wrap keeps the pixel
+        // buffer alive through the QImage's cleanup hook: the immutable
+        // FrameRef directly, or the fresh undistort output (remap allocates a
+        // new Mat — unavoidable, and skipped for RealSense: librealsense
+        // already applies factory calibration).
+        QImage display;
         if (m_calibration && m_calibration->isCalibrated()
             && backend != CameraBackend::RealSense) {
-            processed = m_calibration->undistort(frame);
+            display = utils::ImageUtils::wrapMatOwned(m_calibration->undistort(frame));
         } else {
-            processed = frame;  // header share, no pixel copy
+            display = utils::ImageUtils::wrapMatShared(frameRef);
         }
-
-        // Convert to RGB for QImage
-        cv::Mat rgb;
-        if (processed.channels() == 3)
-            cv::cvtColor(processed, rgb, cv::COLOR_BGR2RGB);
-        else if (processed.channels() == 1)
-            cv::cvtColor(processed, rgb, cv::COLOR_GRAY2RGB);
-        else
-            rgb = processed;
-
-        QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
-                    QImage::Format_RGB888);
-        // Deep copy: qimg only wraps rgb's pixel buffer, which dies with this
-        // scope. The copy is shared (COW) between the camera view and the
-        // remote stream.
-        const QImage display = qimg.copy();
         // In depth-view mode the colorized depth map drives the view instead.
         // In IR mode the infraredReady handler drives it. Keep overlay/remote
         // paths fed with the color image regardless.
@@ -2007,7 +2098,8 @@ void Application::wireCameraSignals()
                 || colorKey != m_ovSigColorKey
                 || placedAlphaMul != m_ovSigPlacedOpacity
                 || selectedSilkW != m_ovSigSelectedSilkW
-                || m_ibomProject.get() != m_ovSigProject;
+                || m_ibomProject.get() != m_ovSigProject
+                || m_activeLayer != m_ovSigLayer;
 
             if (needsRender) {
                 overlay::OverlayInputs in;
@@ -2025,6 +2117,7 @@ void Application::wireCameraSignals()
                 in.selectedSilkW  = selectedSilkW;
                 in.drawPads = drawPads;
                 in.drawSilk = drawSilk;
+                in.activeLayer = m_activeLayer;
 
                 const auto t0 = std::chrono::steady_clock::now();
                 overlay::BoardOverlay bo = overlay::OverlayRenderer::renderBoardSpace(in);
@@ -2046,6 +2139,7 @@ void Application::wireCameraSignals()
                 m_ovSigPlacedOpacity = placedAlphaMul;
                 m_ovSigSelectedSilkW = selectedSilkW;
                 m_ovSigProject       = m_ibomProject.get();
+                m_ovSigLayer         = m_activeLayer;
             }
 
             // Per-frame: compose buffer→PCB with the freshest PCB→image pose.
@@ -2065,7 +2159,7 @@ void Application::wireCameraSignals()
         // channel (it is no longer suppressed while a valid overlay exists:
         // during a re-alignment both are visible, which is what you want).
         if (m_pickingHomographyPoints && !m_homographyImagePoints.empty()) {
-            QImage pickOverlay(rgb.cols, rgb.rows, QImage::Format_ARGB32_Premultiplied);
+            QImage pickOverlay(frame.cols, frame.rows, QImage::Format_ARGB32_Premultiplied);
             pickOverlay.fill(Qt::transparent);
             QPainter pickPainter(&pickOverlay);
             pickPainter.setRenderHint(QPainter::Antialiasing, true);
@@ -2562,6 +2656,12 @@ void Application::connectControlSignals()
         spdlog::info("Heatmap overlay {}", show ? "enabled" : "disabled");
     });
 
+    // ── Board side (front/back) ─────────────────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::boardSideChanged,
+            this, [this](bool back) {
+        setActiveLayer(back ? ibom::Layer::Back : ibom::Layer::Front);
+    });
+
     // ── InspectionWizard wiring ─────────────────────────────────
     auto* wizard = m_mainWindow->inspectionWizard();
     if (wizard) {
@@ -2719,6 +2819,7 @@ void Application::connectControlSignals()
         setMultiAlignUIState(false);  // also clears the PCB Map click targets
 
         m_homography->reset();
+        m_reanchorGate.reset();  // no pose left for a held candidate to correct
         ++m_alignmentEpoch;
         m_currentPixelsPerMm = 0.0;
         if (auto* sp = m_mainWindow->statsPanel()) sp->setScale(0.0);
@@ -2821,9 +2922,11 @@ void Application::connectControlSignals()
             double cosR = std::cos(rot) * scale;
             double sinR = std::sin(rot) * scale;
 
+            // Back side: mirrored view frame (vx) — see applyMultiAlignment().
+            const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
             // Translation so the target component maps to the clicked point.
-            double tx = imgPt.x - (cosR * m_anchorPcb.x - sinR * m_anchorPcb.y);
-            double ty = imgPt.y - (sinR * m_anchorPcb.x + cosR * m_anchorPcb.y);
+            double tx = imgPt.x - (cosR * vx * m_anchorPcb.x - sinR * m_anchorPcb.y);
+            double ty = imgPt.y - (sinR * vx * m_anchorPcb.x + cosR * m_anchorPcb.y);
 
             auto& bb = m_ibomProject->boardInfo.boardBBox;
             std::vector<cv::Point2f> pcbCorners = {
@@ -2835,8 +2938,8 @@ void Application::connectControlSignals()
             std::vector<cv::Point2f> imgCorners;
             for (const auto& p : pcbCorners) {
                 imgCorners.push_back({
-                    static_cast<float>(cosR * p.x - sinR * p.y + tx),
-                    static_cast<float>(sinR * p.x + cosR * p.y + ty)});
+                    static_cast<float>(cosR * vx * p.x - sinR * p.y + tx),
+                    static_cast<float>(sinR * vx * p.x + cosR * p.y + ty)});
             }
 
             ++m_alignmentEpoch;
@@ -2886,7 +2989,11 @@ void Application::connectControlSignals()
                 // PCB coords → image coords
                 // A similarity has 4 DOF: scale, rotation, tx, ty
                 // From 2 points we get exactly 4 equations
-                double dx_pcb = m_alignPcb2.x - m_alignPcb1.x;
+                // Back side: fit in the mirrored view frame (vx) — see
+                // applyMultiAlignment(); the mirror ends up inside the
+                // homography, which keeps mapping RAW pcb coords.
+                const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
+                double dx_pcb = vx * (m_alignPcb2.x - m_alignPcb1.x);
                 double dy_pcb = m_alignPcb2.y - m_alignPcb1.y;
                 double dx_img = m_alignImg2.x - m_alignImg1.x;
                 double dy_img = m_alignImg2.y - m_alignImg1.y;
@@ -2910,9 +3017,9 @@ void Application::connectControlSignals()
                 double cosR = std::cos(rot) * scale;
                 double sinR = std::sin(rot) * scale;
 
-                // Translation from point 1
-                double tx = m_alignImg1.x - (cosR * m_alignPcb1.x - sinR * m_alignPcb1.y);
-                double ty = m_alignImg1.y - (sinR * m_alignPcb1.x + cosR * m_alignPcb1.y);
+                // Translation from point 1 (view-frame x)
+                double tx = m_alignImg1.x - (cosR * vx * m_alignPcb1.x - sinR * m_alignPcb1.y);
+                double ty = m_alignImg1.y - (sinR * vx * m_alignPcb1.x + cosR * m_alignPcb1.y);
 
                 // Build 4 virtual corners from the board bbox using the similarity
                 auto& bb = m_ibomProject->boardInfo.boardBBox;
@@ -2924,8 +3031,8 @@ void Application::connectControlSignals()
                 };
                 std::vector<cv::Point2f> imgCorners;
                 for (const auto& p : pcbCorners) {
-                    float ix = static_cast<float>(cosR * p.x - sinR * p.y + tx);
-                    float iy = static_cast<float>(sinR * p.x + cosR * p.y + ty);
+                    float ix = static_cast<float>(cosR * vx * p.x - sinR * p.y + tx);
+                    float iy = static_cast<float>(sinR * vx * p.x + cosR * p.y + ty);
                     imgCorners.push_back({ix, iy});
                 }
 
@@ -2976,13 +3083,17 @@ void Application::connectControlSignals()
             spdlog::info("Manual homography: point 4/4 at ({:.0f}, {:.0f})",
                          imagePos.x(), imagePos.y());
 
-            // Compute homography: PCB board corners → clicked image points
+            // Compute homography: PCB board corners → clicked image points.
+            // The user clicks the corners AS SEEN: on the back side the view
+            // is mirrored, so "top-left as seen" is the RAW top-RIGHT corner —
+            // swap TL↔TR and BR↔BL and findHomography encodes the mirror.
             auto& bb = m_ibomProject->boardInfo.boardBBox;
+            const bool back = (m_activeLayer == ibom::Layer::Back);
             std::vector<cv::Point2f> pcbPts = {
-                {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},  // TL
-                {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},  // TR
-                {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},  // BR
-                {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}   // BL
+                {static_cast<float>(back ? bb.maxX : bb.minX), static_cast<float>(bb.minY)},  // TL as seen
+                {static_cast<float>(back ? bb.minX : bb.maxX), static_cast<float>(bb.minY)},  // TR as seen
+                {static_cast<float>(back ? bb.minX : bb.maxX), static_cast<float>(bb.maxY)},  // BR as seen
+                {static_cast<float>(back ? bb.maxX : bb.minX), static_cast<float>(bb.maxY)}   // BL as seen
             };
 
             ++m_alignmentEpoch;
@@ -3111,6 +3222,7 @@ void Application::connectControlSignals()
         m_placedRefs.insert(ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
         m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
+        refreshInspectionStats();
         // Persist on every placement: a restart (app or device) resumes
         // exactly where the inspection stopped.
         saveInspectionState();
@@ -3135,6 +3247,7 @@ void Application::connectControlSignals()
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             this, [this]() {
         m_placedRefs.clear();
+        refreshInspectionStats();
         saveInspectionState();  // empty set removes the saved entry
     });
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
@@ -3480,12 +3593,13 @@ void Application::loadIBomFile(const QString& path)
         spdlog::info("Restored {} placed components from a previous session",
                      m_placedRefs.size());
     }
+    refreshInspectionStats();  // total from the new project, placed from restore
 
     // Restore a previously saved alignment for this exact iBOM file, if any —
     // best-effort: we have no way to know whether the camera/board moved
     // since, so this is offered as a starting point, not a guarantee. Only
     // applies if the live tracking/alignment flow hasn't already set one.
-    if (!m_homography->isValid()) {
+    if (!m_homography->isValid() && m_activeLayer == ibom::Layer::Front) {
         const auto& sa = m_config->savedAlignment();
         if (sa.valid && sa.ibomFilePath == path.toStdString()) {
             cv::Mat m(3, 3, CV_64F);
@@ -3543,13 +3657,13 @@ void Application::loadIBomFile(const QString& path)
     m_mainWindow->updateStatusMessage(
         tr("iBOM loaded: %1 components").arg(m_ibomProject->components.size()));
 
-    // Hand the project to the dataset capture worker (Front face in v1 —
-    // matches the overlay, which also renders Layer::Front only).
+    // Hand the project to the dataset capture worker — same side as the
+    // overlay (kept in sync by setActiveLayer()).
     if (m_datasetCreator) {
         QMetaObject::invokeMethod(m_datasetCreator, "setProject", Qt::QueuedConnection,
             Q_ARG(std::shared_ptr<const ibom::IBomProject>,
                   std::shared_ptr<const IBomProject>(m_ibomProject)),
-            Q_ARG(ibom::Layer, Layer::Front));
+            Q_ARG(ibom::Layer, m_activeLayer));
     }
 
     emit ibomLoaded(static_cast<int>(m_ibomProject->components.size()));
@@ -3581,6 +3695,7 @@ void Application::startInspection()
     if (!m_placedRefs.empty()) {
         const int restored = m_pickAndPlace->restorePlaced(m_placedRefs);
         if (restored > 0) {
+            refreshInspectionStats();
             m_mainWindow->updateStatusMessage(
                 tr("Inspection resumed: %1/%2 already placed")
                     .arg(restored).arg(m_pickAndPlace->totalSteps()));
@@ -3588,6 +3703,7 @@ void Application::startInspection()
         }
         m_placedRefs.clear();  // saved refs match nothing in this board
     }
+    refreshInspectionStats();
 
     // Re-emit current step so InspectionPanel shows the first item of the new order
     if (m_pickAndPlace->totalSteps() > 0)

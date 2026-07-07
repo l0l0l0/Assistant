@@ -38,6 +38,23 @@ cv::Point2f componentCenter(const ibom::Component& c)
     return { static_cast<float>(c.position.x), static_cast<float>(c.position.y) };
 }
 
+/// Back side: the camera sees the layout MIRRORED. A similarity (and the
+/// bootstrap's pair→pair hypotheses) cannot represent a mirror, so the fits
+/// run in a "view frame" — x negated for Layer::Back (the mirror axis choice
+/// is irrelevant: the fitted translation absorbs any offset) — and the mirror
+/// is composed back into the returned matrix, preserving the app-wide
+/// convention that a homography always maps RAW PCB mm → image px (with a
+/// negative determinant when looking at the back).
+cv::Point2f viewPoint(cv::Point2f p, bool mirrored)
+{
+    return mirrored ? cv::Point2f(-p.x, p.y) : p;
+}
+
+cv::Mat mirrorX()
+{
+    return (cv::Mat_<double>(3, 3) << -1, 0, 0,  0, 1, 0,  0, 0, 1);
+}
+
 } // namespace
 
 ComponentReanchorResult ComponentReanchor::estimate(
@@ -77,11 +94,14 @@ ComponentReanchorResult ComponentReanchor::estimate(
 
     const bool useClass = params.useClassPrior
         && classOfComponent.size() == project.components.size();
+    const bool mirrored = (activeLayer == ibom::Layer::Back);
 
-    // Predicted image position of every candidate component on the active layer.
+    // Predicted image position of every candidate component on the active
+    // layer. Prediction goes through the RAW center (currentPose maps raw
+    // PCB → image, mirror included); the fit runs on view-frame coords.
     struct Cand {
         size_t compIdx;
-        cv::Point2f pcb;
+        cv::Point2f pcb;      // view-frame coords (x negated for Back)
         cv::Point2f predImg;
         int cls;
     };
@@ -90,8 +110,8 @@ ComponentReanchorResult ComponentReanchor::estimate(
     for (size_t i = 0; i < project.components.size(); ++i) {
         const auto& c = project.components[i];
         if (c.layer != activeLayer) continue;
-        const cv::Point2f pcb = componentCenter(c);
-        cands.push_back({ i, pcb, currentPose.pcbToImage(pcb),
+        const cv::Point2f raw = componentCenter(c);
+        cands.push_back({ i, viewPoint(raw, mirrored), currentPose.pcbToImage(raw),
                           useClass ? classOfComponent[i] : -1 });
     }
     if (cands.size() < static_cast<size_t>(params.minMatches)) {
@@ -138,11 +158,26 @@ ComponentReanchorResult ComponentReanchor::estimate(
     }
 
     cv::Mat mask;
-    cv::Mat H = cv::findHomography(pcbPts, imgPts, cv::RANSAC,
-                                   params.ransacThreshPx, mask);
-    if (H.empty()) {
-        r.message = "findHomography failed";
-        return r;
+    cv::Mat H;
+    if (params.fitSimilarity) {
+        // 4-DOF similarity: on a fronto-parallel scene with noisy centers the
+        // homography's perspective terms are noise-fit and wobble the board
+        // corners by tens of px (see Params::fitSimilarity).
+        const cv::Mat A = cv::estimateAffinePartial2D(
+            pcbPts, imgPts, mask, cv::RANSAC, params.ransacThreshPx);
+        if (A.empty()) {
+            r.message = "estimateAffinePartial2D failed";
+            return r;
+        }
+        H = cv::Mat::eye(3, 3, CV_64F);
+        A.copyTo(H(cv::Rect(0, 0, 3, 2)));
+    } else {
+        H = cv::findHomography(pcbPts, imgPts, cv::RANSAC,
+                               params.ransacThreshPx, mask);
+        if (H.empty()) {
+            r.message = "findHomography failed";
+            return r;
+        }
     }
 
     // Inlier count + median reprojection error among inliers.
@@ -168,7 +203,9 @@ ComponentReanchorResult ComponentReanchor::estimate(
     }
 
     r.found = true;
-    r.homography = H;
+    // H was fitted in the view frame — compose the mirror back in so the
+    // returned homography maps RAW PCB coords (see viewPoint()).
+    r.homography = mirrored ? cv::Mat(H * mirrorX()) : H;
     r.message = "re-anchored on " + std::to_string(r.inliers) + "/" +
                 std::to_string(r.matches) + " components, median " +
                 std::to_string(r.medianReprojPx) + "px";
@@ -197,12 +234,15 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
 {
     ComponentReanchorResult r;
 
-    // Component centers on the active layer (PCB mm).
+    // Component centers on the active layer, in the VIEW frame (x negated for
+    // Layer::Back — the pair→pair similarity hypotheses cannot represent the
+    // mirror a back view carries; see viewPoint()).
+    const bool mirrored = (activeLayer == ibom::Layer::Back);
     std::vector<cv::Point2f> comp;
     comp.reserve(project.components.size());
     for (const auto& c : project.components) {
         if (c.layer != activeLayer) continue;
-        comp.push_back(componentCenter(c));
+        comp.push_back(viewPoint(componentCenter(c), mirrored));
     }
     if (comp.size() < static_cast<size_t>(params.minMatches) ||
         detections.size() < static_cast<size_t>(params.minMatches)) {
@@ -327,8 +367,10 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
         bestCosS, -bestSinS, bestTx,
         bestSinS,  bestCosS, bestTy,
         0.0,       0.0,      1.0);
+    // S maps view-frame → image; estimate() expects a RAW-PCB → image prior
+    // (it re-derives the view frame internally for Back).
     Homography prior;
-    prior.setMatrix(S);
+    prior.setMatrix(mirrored ? cv::Mat(S * mirrorX()) : S);
 
     Params refine = params;
     const double tolPx = std::clamp(params.bootstrapTolMm * std::hypot(bestCosS, bestSinS),

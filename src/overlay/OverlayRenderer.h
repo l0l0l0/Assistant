@@ -8,9 +8,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace ibom {
-struct IBomProject;
-}
+#include "ibom/IBomData.h"   // ibom::Layer
 
 namespace ibom::overlay {
 
@@ -33,6 +31,14 @@ struct OverlayInputs {
     float  selectedSilkW  = 1.0f;   // outline width in buffer px (scales with zoom)
     bool   drawPads = true;
     bool   drawSilk = true;
+
+    /// Which side of the board the camera is looking at. Back renders THAT
+    /// layer's components into a MIRRORED (view-space) buffer — labels stay
+    /// readable in the buffer, and pcbToBuffer carries the mirror so the
+    /// composed buffer→image warp (with a raw-PCB→image homography whose
+    /// determinant is negative for a back view) remains orientation-
+    /// preserving on screen.
+    ibom::Layer activeLayer = ibom::Layer::Front;
 };
 
 /// A board-space overlay buffer plus the PCB→buffer mapping it was drawn with.

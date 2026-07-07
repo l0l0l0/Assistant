@@ -74,8 +74,21 @@ BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
 
-    const auto mapX = [&](double x) { return (x - ox) * s; };
+    // Back side: draw in VIEW space (x mirrored across the board's vertical
+    // mid-axis) so text/labels are drawn readable; pcbToBuffer (below) carries
+    // the same mirror, so the buffer→image warp stays orientation-preserving.
+    const bool back = (in.activeLayer == Layer::Back);
+    const auto mapX = [&](double x) {
+        return ((back ? (minX + maxX - x) : x) - ox) * s;
+    };
     const auto mapY = [&](double y) { return (y - oy) * s; };
+    // mapX reverses order for the back view — build rects from normalized
+    // extremes instead of assuming x0 maps left of x1.
+    const auto rectPcb = [&](double x0, double y0, double x1, double y1) {
+        const double a = mapX(x0), b = mapX(x1);
+        return QRectF(QPointF(std::min(a, b), mapY(std::min(y0, y1))),
+                      QPointF(std::max(a, b), mapY(std::max(y0, y1))));
+    };
 
     // Labels live in board space now, so they scale with zoom (AR-style)
     // instead of keeping a fixed screen size: ~0.6 mm cap height reads when
@@ -89,7 +102,7 @@ BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
     auto withAlpha = [](QColor c, int a) { c.setAlpha(a); return c; };
 
     for (const auto& comp : in.project->components) {
-        if (comp.layer != Layer::Front) continue;
+        if (comp.layer != in.activeLayer) continue;
 
         const bool isSelected = (comp.reference == in.selectedRef);
         const bool isPlaced   = !isSelected && in.placedRefs.count(comp.reference) > 0;
@@ -119,9 +132,10 @@ BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
             painter.setPen(Qt::NoPen);
             painter.setBrush(padColor);
             for (const auto& pad : comp.pads) {
-                const QRectF r(mapX(pad.position.x - pad.sizeX / 2.0),
-                               mapY(pad.position.y - pad.sizeY / 2.0),
-                               pad.sizeX * s, pad.sizeY * s);
+                const QRectF r = rectPcb(pad.position.x - pad.sizeX / 2.0,
+                                         pad.position.y - pad.sizeY / 2.0,
+                                         pad.position.x + pad.sizeX / 2.0,
+                                         pad.position.y + pad.sizeY / 2.0);
                 if (pad.shape == Pad::Shape::Circle || pad.shape == Pad::Shape::Oval)
                     painter.drawEllipse(r);
                 else
@@ -138,11 +152,8 @@ BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
                     painter.drawLine(QPointF(mapX(seg.start.x), mapY(seg.start.y)),
                                      QPointF(mapX(seg.end.x),   mapY(seg.end.y)));
                 } else if (seg.type == DrawingSegment::Type::Rect) {
-                    const QRectF r(QPointF(mapX(std::min(seg.start.x, seg.end.x)),
-                                           mapY(std::min(seg.start.y, seg.end.y))),
-                                   QPointF(mapX(std::max(seg.start.x, seg.end.x)),
-                                           mapY(std::max(seg.start.y, seg.end.y))));
-                    painter.drawRect(r);
+                    painter.drawRect(rectPcb(seg.start.x, seg.start.y,
+                                             seg.end.x, seg.end.y));
                 } else if (seg.type == DrawingSegment::Type::Circle) {
                     painter.drawEllipse(QPointF(mapX(seg.start.x), mapY(seg.start.y)),
                                         seg.radius * s, seg.radius * s);
@@ -170,8 +181,16 @@ BoardOverlay OverlayRenderer::renderBoardSpace(const OverlayInputs& in)
 
     BoardOverlay out;
     out.image = img;
-    // p_buf = (p − o)·s — row-vector convention: translate first, then scale.
-    out.pcbToBuffer = QTransform::fromTranslate(-ox, -oy)
+    // p_buf = (view(p) − o)·s — row-vector convention: (mirror,) translate,
+    // scale. For the back view the mirror lives HERE, matching mapX above, so
+    // buffer content stays readable and the composed buffer→image transform
+    // (this inverse × a mirrored raw-PCB→image homography) is orientation-
+    // preserving on screen.
+    const QTransform view = back
+        ? QTransform(-1, 0, 0, 1, minX + maxX, 0)   // x' = (minX+maxX) − x
+        : QTransform();
+    out.pcbToBuffer = view
+                      * QTransform::fromTranslate(-ox, -oy)
                       * QTransform::fromScale(s, s);
     return out;
 }

@@ -32,6 +32,11 @@ public:
     void setComponentState(const std::string& reference, const QString& state);
     void setProgress(int placed, int total);
 
+    /// Programmatically select the layer filter (0 = All, 1 = Front, 2 = Back).
+    /// Goes through setCurrentIndex so the normal filter handler runs — used
+    /// to follow the app-wide active board side (Application::setActiveLayer).
+    void setLayerFilterIndex(int index);
+
     QStringList getCheckedReferences() const;
 
 signals:

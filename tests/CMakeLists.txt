@@ -61,6 +61,28 @@ add_ibom_test(test_blob_detector
             onnxruntime::onnxruntime spdlog::spdlog
 )
 
+# Re-anchor gate test — the silent-correction decision logic (drift gate,
+# two-tick confirmation, Lost bypass). Pure geometry, no Qt.
+add_ibom_test(test_reanchor_gate
+    SOURCES test_reanchor_gate.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/ReanchorGate.cpp
+    LIBS    opencv_core
+)
+
+# BoardLocator test — synthetic contour/depth scenes with a known pose.
+add_ibom_test(test_boardlocator
+    SOURCES test_boardlocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/BoardLocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/Homography.cpp
+    LIBS    opencv_core opencv_imgproc opencv_calib3d spdlog::spdlog
+)
+
+# Letterbox test — pure geometry (header-only src/ai/Letterbox.h), no ONNX.
+add_ibom_test(test_letterbox
+    SOURCES test_letterbox.cpp
+    LIBS    opencv_core opencv_imgproc
+)
+
 # Component matching test — needs ComponentMap.cpp (no extra libs)
 add_ibom_test(test_component_matching
     SOURCES test_component_matching.cpp
@@ -90,8 +112,25 @@ endif()
 # BFMatcher + RANSAC from opencv features2d/calib3d. Built as its own target
 # with AUTOMOC + Qt6::Core (CameraCapture.h, pulled in for FrameRef, only needs
 # Core: QObject/QMetaType/QSize). Guarded so a Qt-less host just skips it.
-find_package(Qt6 QUIET COMPONENTS Core)
+find_package(Qt6 QUIET COMPONENTS Core Gui)
 if(Qt6_FOUND)
+    # Overlay renderer test — board-space buffer, active-layer filter and the
+    # mirrored back-side view. QPainter on QImage runs headless (the test
+    # boots a QGuiApplication on the offscreen platform). No Q_OBJECT → no moc.
+    add_ibom_test(test_overlay_renderer
+        SOURCES test_overlay_renderer.cpp
+                ${CMAKE_SOURCE_DIR}/src/overlay/OverlayRenderer.cpp
+        LIBS    Qt6::Gui opencv_core
+    )
+
+    # Zero-copy Mat→QImage wraps (display hot path). Pure QImage data ops —
+    # no app instance, no moc.
+    add_ibom_test(test_image_wrap
+        SOURCES test_image_wrap.cpp
+                ${CMAKE_SOURCE_DIR}/src/utils/ImageUtils.cpp
+        LIBS    Qt6::Gui opencv_core opencv_imgproc opencv_imgcodecs
+                spdlog::spdlog
+    )
     add_executable(test_tracking_worker
         test_tracking_worker.cpp
         ${CMAKE_SOURCE_DIR}/src/overlay/TrackingWorker.cpp

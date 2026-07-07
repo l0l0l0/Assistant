@@ -17,6 +17,9 @@
 #include <unordered_set>
 
 #include "camera/ICameraSource.h"  // for ibom::camera::FrameRef/DepthFrameRef
+#include "ibom/IBomData.h"         // ibom::Layer (m_activeLayer — an enum
+                                   // class can't be forward-declared here)
+#include "overlay/ReanchorGate.h"  // silent re-anchor decision logic (member)
 
 namespace ibom {
 
@@ -149,15 +152,7 @@ private:
     ///                fresh frames (~300 ms apart) before reporting failure, so
     ///                one badly-timed frame (blur, glare, hand) doesn't fail
     ///                the whole click.
-    /// @param geometricOnly Skip the component-detection (model/blob) bootstrap
-    ///                and use only the geometric BoardLocator. Used by the
-    ///                PERIODIC drift-correction timer without a trained model:
-    ///                the blob pose is one-shot-accurate but too jittery
-    ///                (~30 px frame to frame) for continuous correction, so
-    ///                periodic re-anchor must not use it (ERREUR #54 / field
-    ///                log). One-shot Auto-Align and loss recovery keep blobs.
-    void autoAlignBoard(bool silent = false, bool isRetry = false,
-                        bool geometricOnly = false);
+    void autoAlignBoard(bool silent = false, bool isRetry = false);
 
     /// Flip the ControlPanel's Live Tracking checkbox on after a successful
     /// alignment (any path: 4-corner, 2-comp, multi-comp, anchor, Auto-Align,
@@ -170,17 +165,20 @@ private:
 
     /// Self-re-arming recovery poll started when live tracking reports LOST:
     /// as long as the state stays Lost (and live mode is on), periodically
-    /// re-locate the board outright — component re-anchor when a detector is
-    /// loaded, geometric BoardLocator otherwise — independent of the
-    /// reanchor_enabled periodic-correction setting (this is loss RECOVERY,
-    /// not drift correction). Stops as soon as tracking recovers.
+    /// re-locate the board outright via component re-anchor (trained model or
+    /// model-free blobs) — independent of the reanchor_enabled
+    /// periodic-correction setting (this is loss RECOVERY, not drift
+    /// correction). Stops as soon as tracking recovers.
     void attemptLostRecovery();
     /// Component-level re-anchor (docs/AI_MODEL_DATASETS_PLAN.md, "Piste B"):
-    /// runs the AI component detector on the current frame, matches detections
-    /// to expected iBOM positions (current pose as prior) and re-fits the
-    /// homography via RANSAC. Works when the board fills the frame — exactly
-    /// where the geometric BoardLocator path (autoAlignBoard) fails. No-op
-    /// unless a detector is ready. @param silent as in autoAlignBoard().
+    /// detects components on the current frame (trained model when loaded,
+    /// else model-free blobs), matches detections to expected iBOM positions
+    /// (current pose as prior, global bootstrap otherwise) and re-fits the
+    /// pose via RANSAC — a similarity fit for blob detections, so the pose is
+    /// repeatable enough for the periodic drift gate
+    /// (docs/BLOB_REANCHOR_JITTER_ANALYSE.md). Works when the board fills the
+    /// frame — exactly where the geometric BoardLocator path (autoAlignBoard)
+    /// fails. @param silent as in autoAlignBoard().
     void componentReanchor(bool silent = false);
     /// Start/stop/retune the periodic geometric re-anchor timer from Config
     /// (features: reanchor_enabled / reanchor_interval_s).
@@ -201,6 +199,15 @@ private:
     void loadIBomFile(const QString& path);
     void refreshRecentFilesMenu();
     void applyRemoteViewConfig();
+    /// Switch the side of the board being inspected. Re-renders the overlay
+    /// for that layer (mirrored view for Back), resets the alignment (the
+    /// board was physically flipped — the pose is meaningless) and re-targets
+    /// the dataset capture. No-op when already on that side.
+    void setActiveLayer(ibom::Layer layer);
+    /// Push total/placed counts to the StatsPanel "Inspection Progress" box.
+    /// Call after every m_placedRefs mutation and on iBOM load (ERREUR #40:
+    /// the counters were never fed, the panel showed 0% forever).
+    void refreshInspectionStats();
     /// Persist m_placedRefs for the current iBOM (session_state.json,
     /// keyed by iBOM path). An empty set removes the entry.
     void saveInspectionState();
@@ -264,13 +271,20 @@ private:
     QTimer* m_fpsTimer = nullptr;
     std::atomic<int> m_frameCount{0};
 
-    // Periodic geometric re-anchor (plan B): when enabled + live tracking, a
-    // timer runs BoardLocator (silent autoAlignBoard) to correct accumulated
-    // drift from the PCB outline. Off by default; needs the board edges visible
-    // (not the microscope zoomed-in case). See docs/JETSON_SESSION_LOG.md.
+    // Periodic re-anchor (plan B): when enabled + live tracking, a timer runs
+    // a silent componentReanchor() to correct accumulated drift (trained
+    // model or model-free blobs — blob poses use a similarity fit to stay
+    // under the drift gate, docs/BLOB_REANCHOR_JITTER_ANALYSE.md). Off by
+    // default. See docs/JETSON_SESSION_LOG.md.
     QTimer* m_reanchorTimer = nullptr;
     int     m_reanchorFailStreak = 0;   // consecutive BoardLocator misses → back off
     int     m_reanchorTickCount  = 0;   // for skipping ticks while backing off
+
+    // Decision logic for silent corrections (drift gate + two-tick
+    // confirmation + Lost bypass — remède C, BLOB_REANCHOR_JITTER_ANALYSE.md
+    // §3), extracted into a unit-tested class. reset() on every applied pose
+    // and whenever the pose is deliberately dropped (Reset, layer flip).
+    overlay::ReanchorGate m_reanchorGate;
 
     // Interactive Auto-Align retry budget (see autoAlignBoard's isRetry doc).
     int  m_autoAlignRetriesLeft = 0;
@@ -322,6 +336,14 @@ private:
 
     // Selected component ref for overlay highlight
     std::string m_selectedRef;
+
+    // Which side of the board the camera is looking at. Drives the overlay
+    // (that layer's components, mirrored view for Back), every detection/
+    // alignment path (bootstrap, BoardLocator, manual similarity fits — the
+    // homography keeps mapping RAW PCB mm → image px, with a negative
+    // determinant for a back view), click-select and the dataset capture.
+    // Session-only (flipping the board is a transient physical state).
+    ibom::Layer m_activeLayer = ibom::Layer::Front;
 
     // Components already placed during the current inspection — used to render
     // them in a faded "done" color in the overlay.
@@ -437,6 +459,7 @@ private:
     float       m_ovSigPlacedOpacity = -1.0f;
     float       m_ovSigSelectedSilkW = -1.0f;
     const void* m_ovSigProject = nullptr;    // identity of the rendered IBomProject
+    ibom::Layer m_ovSigLayer   = ibom::Layer::Front;
     // buffer→PCB mapping of the current board buffer (inverse of the renderer's
     // pcbToBuffer), composed with the live homography into the per-frame warp.
     QTransform  m_boardBufferToPcb;
