@@ -123,6 +123,57 @@ TEST_CASE("bootstrap recovers a pose from detections without any prior", "[reanc
     }
 }
 
+TEST_CASE("bootstrap registers a BACK-side view (mirrored constellation)", "[reanchor]")
+{
+    std::vector<cv::Point2f> centers;
+    ibom::IBomProject project = makeProject(centers);
+    for (auto& c : project.components) c.layer = ibom::Layer::Back;
+
+    // Ground truth back view: mirror (x → −x) then a similarity — what the
+    // camera sees once the board is physically flipped. A similarity alone
+    // cannot represent this; ComponentReanchor must compose the mirror in.
+    const double s = 7.0, th = -12.0 * CV_PI / 180.0;
+    const auto gtB = [&](cv::Point2f p) {
+        const double x = -p.x;
+        return cv::Point2f(
+            static_cast<float>(s * std::cos(th) * x - s * std::sin(th) * p.y + 700.0),
+            static_cast<float>(s * std::sin(th) * x + s * std::cos(th) * p.y + 150.0));
+    };
+    std::mt19937 rng(5);
+    std::normal_distribution<float> noise(0.f, 1.0f);
+    std::vector<ai::Detection> dets;
+    for (size_t i = 0; i < centers.size(); ++i) {
+        if (i % 5 == 4) continue;  // 20% dropouts
+        cv::Point2f q = gtB(centers[i]);
+        q.x += noise(rng);
+        q.y += noise(rng);
+        dets.push_back(detectionAt(q));
+    }
+
+    ComponentReanchor::Params p;
+    p.fitSimilarity = true;  // production blob path
+    const auto r = ComponentReanchor::bootstrap(dets, project,
+                                                ibom::Layer::Back, s, p);
+    INFO(r.message);
+    REQUIRE(r.found);
+
+    // The returned homography maps RAW pcb coords with the mirror inside:
+    // negative determinant of the linear part…
+    const double det =
+        r.homography.at<double>(0, 0) * r.homography.at<double>(1, 1)
+        - r.homography.at<double>(0, 1) * r.homography.at<double>(1, 0);
+    REQUIRE(det < 0.0);
+    // …and it reprojects raw centers onto the mirrored view positions.
+    std::vector<cv::Point2f> proj;
+    cv::perspectiveTransform(centers, proj, r.homography);
+    std::vector<double> errs;
+    for (size_t i = 0; i < centers.size(); ++i)
+        errs.push_back(cv::norm(proj[i] - gtB(centers[i])));
+    std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
+    INFO("median reprojection vs ground truth = " << errs[errs.size() / 2] << " px");
+    REQUIRE(errs[errs.size() / 2] < 4.0);
+}
+
 TEST_CASE("bootstrap rejects an unrelated constellation", "[reanchor]")
 {
     std::vector<cv::Point2f> centers;

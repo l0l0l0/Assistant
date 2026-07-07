@@ -213,6 +213,53 @@ void Application::refreshRecentFilesMenu()
     m_mainWindow->setRecentFiles(files);
 }
 
+void Application::setActiveLayer(ibom::Layer layer)
+{
+    if (layer == m_activeLayer) return;
+    m_activeLayer = layer;
+    const bool back = (layer == ibom::Layer::Back);
+    spdlog::info("Active board side → {}", back ? "BACK" : "FRONT");
+
+    // The board was physically flipped: the current pose is meaningless for
+    // the new side. Cancel any picking flow and drop the alignment — but keep
+    // the on-disk saved alignment (it belongs to the front view restored at
+    // iBOM load). The overlay re-renders via the m_ovSigLayer signature; the
+    // ERREUR #46 clear path blanks it until a new pose exists.
+    m_pickingHomographyPoints = false;
+    m_alignOnComponents = false;
+    m_alignCompStep = 0;
+    m_alignMulti = false;
+    m_alignMultiAwaitClick = false;
+    m_alignMultiHaveCorner1 = false;
+    m_anchorMode = false;
+    setMultiAlignUIState(false);
+    if (m_homography) m_homography->reset();
+    ++m_alignmentEpoch;
+    m_currentPixelsPerMm = 0.0;
+    if (auto* sp = m_mainWindow ? m_mainWindow->statsPanel() : nullptr)
+        sp->setScale(0.0);
+
+    // Follow with the BOM panel's layer filter (1 = Front, 2 = Back) so the
+    // list shows the same side as the overlay.
+    if (auto* bp = m_mainWindow ? m_mainWindow->bomPanel() : nullptr)
+        bp->setLayerFilterIndex(back ? 2 : 1);
+
+    // Dataset capture labels the active side's components.
+    if (m_datasetCreator && m_ibomProject) {
+        QMetaObject::invokeMethod(m_datasetCreator, "setProject", Qt::QueuedConnection,
+            Q_ARG(std::shared_ptr<const ibom::IBomProject>,
+                  std::shared_ptr<const IBomProject>(m_ibomProject)),
+            Q_ARG(ibom::Layer, m_activeLayer));
+    }
+
+    if (m_mainWindow) {
+        m_mainWindow->updateStatusMessage(back
+            ? tr("Back side active (mirrored view) — re-align the flipped board "
+                 "(Auto-Align works on the back too)")
+            : tr("Front side active — re-align the board"));
+    }
+}
+
 void Application::refreshInspectionStats()
 {
     // Push the absolute inspection progress to the StatsPanel. Called after
@@ -748,8 +795,11 @@ void Application::reportAlignmentResult(const QString& summary)
     // Persist the homography so it can be offered back on the next launch if
     // the same iBOM is reloaded (see loadIBomFile()). Best-effort: there is no
     // way to know whether the camera/board actually moved since, so this is
-    // just "what we had last time", not a correctness guarantee.
-    if (m_homography && m_homography->isValid() && m_config) {
+    // just "what we had last time", not a correctness guarantee. Front only:
+    // a back-side pose saved here would be restored as-if-front at the next
+    // load (restore is likewise gated on the front side).
+    if (m_activeLayer == ibom::Layer::Front &&
+        m_homography && m_homography->isValid() && m_config) {
         Config::SavedAlignment sa;
         sa.valid         = true;
         sa.ibomFilePath  = m_config->ibomFilePath();
@@ -859,7 +909,7 @@ const Component* Application::componentAtPcb(cv::Point2f pcbPt) const
     double bestDist = std::numeric_limits<double>::max();
 
     for (const auto& c : m_ibomProject->components) {
-        if (c.layer != ibom::Layer::Front) continue;  // matches the rendered overlay
+        if (c.layer != m_activeLayer) continue;  // matches the rendered overlay
         const auto& bb = c.bbox;
         if (pcbPt.x >= bb.minX && pcbPt.x <= bb.maxX &&
             pcbPt.y >= bb.minY && pcbPt.y <= bb.maxY) {
@@ -1007,16 +1057,22 @@ void Application::applyMultiAlignment()
             A.copyTo(H(cv::Rect(0, 0, 3, 2)));
         }
     } else {  // n == 2 — similarity
-        const double dxp = pcb[1].x - pcb[0].x, dyp = pcb[1].y - pcb[0].y;
+        // Back side: the camera sees the layout mirrored, which a similarity
+        // cannot represent. Fit in the view frame (pcb x negated — vx) so the
+        // resulting 3×3, expressed against RAW pcb coords, carries the mirror
+        // (negative determinant). n ≥ 3 needs no special casing: affine and
+        // homography fits represent a mirror natively.
+        const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
+        const double dxp = vx * (pcb[1].x - pcb[0].x), dyp = pcb[1].y - pcb[0].y;
         const double dxi = img[1].x - img[0].x, dyi = img[1].y - img[0].y;
         const double dp = std::hypot(dxp, dyp), di = std::hypot(dxi, dyi);
         if (dp >= 0.1 && di >= 1.0) {
             const double s = di / dp;
             const double rot = std::atan2(dyi, dxi) - std::atan2(dyp, dxp);
             const double c = std::cos(rot) * s, sn = std::sin(rot) * s;
-            const double tx = img[0].x - (c * pcb[0].x - sn * pcb[0].y);
-            const double ty = img[0].y - (sn * pcb[0].x + c * pcb[0].y);
-            H = (cv::Mat_<double>(3, 3) << c, -sn, tx, sn, c, ty, 0, 0, 1);
+            const double tx = img[0].x - (c * vx * pcb[0].x - sn * pcb[0].y);
+            const double ty = img[0].y - (sn * vx * pcb[0].x + c * pcb[0].y);
+            H = (cv::Mat_<double>(3, 3) << c * vx, -sn, tx, sn * vx, c, ty, 0, 0, 1);
         }
     }
     if (H.empty() || H.rows != 3 || H.cols != 3) {
@@ -1281,8 +1337,10 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
     });
 
     ai::ComponentDetector* detector = componentDetector();
+    const ibom::Layer activeLayer = m_activeLayer;  // snapshot for the worker
     watcher->setFuture(QtConcurrent::run([colorCopy, depthCopy, project,
-                                          expectedPixelsPerMm, detector]() {
+                                          expectedPixelsPerMm, detector,
+                                          activeLayer]() {
         // Detection-first (docs/AUTO_ALIGN_V2_PLAN.md): register the detected-
         // component constellation against the iBOM layout — needs no visible
         // board outline, so it works exactly where the geometric path
@@ -1307,7 +1365,7 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
             overlay::ComponentReanchor::Params rp;
             rp.fitSimilarity = (detector == nullptr);
             const auto boot = overlay::ComponentReanchor::bootstrap(
-                detections, *project, ibom::Layer::Front, expectedPixelsPerMm, rp);
+                detections, *project, activeLayer, expectedPixelsPerMm, rp);
             if (boot.found) {
                 overlay::BoardLocateResult blr;
                 blr.found  = true;
@@ -1332,7 +1390,7 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
                          "falling back to board outline", detSrc, boot.message);
         }
         return overlay::BoardLocator::locate(colorCopy, depthCopy, *project,
-                                             expectedPixelsPerMm, ibom::Layer::Front);
+                                             expectedPixelsPerMm, activeLayer);
     }));
 }
 
@@ -1557,8 +1615,9 @@ void Application::componentReanchor(bool silent)
         spdlog::info("Component re-anchor succeeded ({})", result.message);
     });
 
+    const ibom::Layer activeLayer = m_activeLayer;  // snapshot for the worker
     watcher->setFuture(QtConcurrent::run([detector, colorCopy, project, priorPose,
-                                          scalePrior]() {
+                                          scalePrior, activeLayer]() {
         // Detections from the trained model when loaded, else model-free blobs
         // (classic CV) — component-based re-anchor works with an empty models/.
         const std::vector<ai::Detection> detections =
@@ -1576,10 +1635,10 @@ void Application::componentReanchor(bool silent)
         // yet, or a pose so stale (board moved/picked up) that nothing falls
         // inside the matching radius anymore.
         auto res = overlay::ComponentReanchor::estimate(
-            detections, *project, priorPose, ibom::Layer::Front, {}, rp);
+            detections, *project, priorPose, activeLayer, {}, rp);
         if (!res.found)
             res = overlay::ComponentReanchor::bootstrap(
-                detections, *project, ibom::Layer::Front, scalePrior, rp);
+                detections, *project, activeLayer, scalePrior, rp);
         return res;
     }));
 }
@@ -2067,7 +2126,8 @@ void Application::wireCameraSignals()
                 || colorKey != m_ovSigColorKey
                 || placedAlphaMul != m_ovSigPlacedOpacity
                 || selectedSilkW != m_ovSigSelectedSilkW
-                || m_ibomProject.get() != m_ovSigProject;
+                || m_ibomProject.get() != m_ovSigProject
+                || m_activeLayer != m_ovSigLayer;
 
             if (needsRender) {
                 overlay::OverlayInputs in;
@@ -2085,6 +2145,7 @@ void Application::wireCameraSignals()
                 in.selectedSilkW  = selectedSilkW;
                 in.drawPads = drawPads;
                 in.drawSilk = drawSilk;
+                in.activeLayer = m_activeLayer;
 
                 const auto t0 = std::chrono::steady_clock::now();
                 overlay::BoardOverlay bo = overlay::OverlayRenderer::renderBoardSpace(in);
@@ -2106,6 +2167,7 @@ void Application::wireCameraSignals()
                 m_ovSigPlacedOpacity = placedAlphaMul;
                 m_ovSigSelectedSilkW = selectedSilkW;
                 m_ovSigProject       = m_ibomProject.get();
+                m_ovSigLayer         = m_activeLayer;
             }
 
             // Per-frame: compose buffer→PCB with the freshest PCB→image pose.
@@ -2622,6 +2684,12 @@ void Application::connectControlSignals()
         spdlog::info("Heatmap overlay {}", show ? "enabled" : "disabled");
     });
 
+    // ── Board side (front/back) ─────────────────────────────────
+    connect(m_mainWindow->controlPanel(), &gui::ControlPanel::boardSideChanged,
+            this, [this](bool back) {
+        setActiveLayer(back ? ibom::Layer::Back : ibom::Layer::Front);
+    });
+
     // ── InspectionWizard wiring ─────────────────────────────────
     auto* wizard = m_mainWindow->inspectionWizard();
     if (wizard) {
@@ -2881,9 +2949,11 @@ void Application::connectControlSignals()
             double cosR = std::cos(rot) * scale;
             double sinR = std::sin(rot) * scale;
 
+            // Back side: mirrored view frame (vx) — see applyMultiAlignment().
+            const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
             // Translation so the target component maps to the clicked point.
-            double tx = imgPt.x - (cosR * m_anchorPcb.x - sinR * m_anchorPcb.y);
-            double ty = imgPt.y - (sinR * m_anchorPcb.x + cosR * m_anchorPcb.y);
+            double tx = imgPt.x - (cosR * vx * m_anchorPcb.x - sinR * m_anchorPcb.y);
+            double ty = imgPt.y - (sinR * vx * m_anchorPcb.x + cosR * m_anchorPcb.y);
 
             auto& bb = m_ibomProject->boardInfo.boardBBox;
             std::vector<cv::Point2f> pcbCorners = {
@@ -2895,8 +2965,8 @@ void Application::connectControlSignals()
             std::vector<cv::Point2f> imgCorners;
             for (const auto& p : pcbCorners) {
                 imgCorners.push_back({
-                    static_cast<float>(cosR * p.x - sinR * p.y + tx),
-                    static_cast<float>(sinR * p.x + cosR * p.y + ty)});
+                    static_cast<float>(cosR * vx * p.x - sinR * p.y + tx),
+                    static_cast<float>(sinR * vx * p.x + cosR * p.y + ty)});
             }
 
             ++m_alignmentEpoch;
@@ -2946,7 +3016,11 @@ void Application::connectControlSignals()
                 // PCB coords → image coords
                 // A similarity has 4 DOF: scale, rotation, tx, ty
                 // From 2 points we get exactly 4 equations
-                double dx_pcb = m_alignPcb2.x - m_alignPcb1.x;
+                // Back side: fit in the mirrored view frame (vx) — see
+                // applyMultiAlignment(); the mirror ends up inside the
+                // homography, which keeps mapping RAW pcb coords.
+                const double vx = (m_activeLayer == ibom::Layer::Back) ? -1.0 : 1.0;
+                double dx_pcb = vx * (m_alignPcb2.x - m_alignPcb1.x);
                 double dy_pcb = m_alignPcb2.y - m_alignPcb1.y;
                 double dx_img = m_alignImg2.x - m_alignImg1.x;
                 double dy_img = m_alignImg2.y - m_alignImg1.y;
@@ -2970,9 +3044,9 @@ void Application::connectControlSignals()
                 double cosR = std::cos(rot) * scale;
                 double sinR = std::sin(rot) * scale;
 
-                // Translation from point 1
-                double tx = m_alignImg1.x - (cosR * m_alignPcb1.x - sinR * m_alignPcb1.y);
-                double ty = m_alignImg1.y - (sinR * m_alignPcb1.x + cosR * m_alignPcb1.y);
+                // Translation from point 1 (view-frame x)
+                double tx = m_alignImg1.x - (cosR * vx * m_alignPcb1.x - sinR * m_alignPcb1.y);
+                double ty = m_alignImg1.y - (sinR * vx * m_alignPcb1.x + cosR * m_alignPcb1.y);
 
                 // Build 4 virtual corners from the board bbox using the similarity
                 auto& bb = m_ibomProject->boardInfo.boardBBox;
@@ -2984,8 +3058,8 @@ void Application::connectControlSignals()
                 };
                 std::vector<cv::Point2f> imgCorners;
                 for (const auto& p : pcbCorners) {
-                    float ix = static_cast<float>(cosR * p.x - sinR * p.y + tx);
-                    float iy = static_cast<float>(sinR * p.x + cosR * p.y + ty);
+                    float ix = static_cast<float>(cosR * vx * p.x - sinR * p.y + tx);
+                    float iy = static_cast<float>(sinR * vx * p.x + cosR * p.y + ty);
                     imgCorners.push_back({ix, iy});
                 }
 
@@ -3036,13 +3110,17 @@ void Application::connectControlSignals()
             spdlog::info("Manual homography: point 4/4 at ({:.0f}, {:.0f})",
                          imagePos.x(), imagePos.y());
 
-            // Compute homography: PCB board corners → clicked image points
+            // Compute homography: PCB board corners → clicked image points.
+            // The user clicks the corners AS SEEN: on the back side the view
+            // is mirrored, so "top-left as seen" is the RAW top-RIGHT corner —
+            // swap TL↔TR and BR↔BL and findHomography encodes the mirror.
             auto& bb = m_ibomProject->boardInfo.boardBBox;
+            const bool back = (m_activeLayer == ibom::Layer::Back);
             std::vector<cv::Point2f> pcbPts = {
-                {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},  // TL
-                {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},  // TR
-                {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},  // BR
-                {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}   // BL
+                {static_cast<float>(back ? bb.maxX : bb.minX), static_cast<float>(bb.minY)},  // TL as seen
+                {static_cast<float>(back ? bb.minX : bb.maxX), static_cast<float>(bb.minY)},  // TR as seen
+                {static_cast<float>(back ? bb.minX : bb.maxX), static_cast<float>(bb.maxY)},  // BR as seen
+                {static_cast<float>(back ? bb.maxX : bb.minX), static_cast<float>(bb.maxY)}   // BL as seen
             };
 
             ++m_alignmentEpoch;
@@ -3548,7 +3626,7 @@ void Application::loadIBomFile(const QString& path)
     // best-effort: we have no way to know whether the camera/board moved
     // since, so this is offered as a starting point, not a guarantee. Only
     // applies if the live tracking/alignment flow hasn't already set one.
-    if (!m_homography->isValid()) {
+    if (!m_homography->isValid() && m_activeLayer == ibom::Layer::Front) {
         const auto& sa = m_config->savedAlignment();
         if (sa.valid && sa.ibomFilePath == path.toStdString()) {
             cv::Mat m(3, 3, CV_64F);
@@ -3606,13 +3684,13 @@ void Application::loadIBomFile(const QString& path)
     m_mainWindow->updateStatusMessage(
         tr("iBOM loaded: %1 components").arg(m_ibomProject->components.size()));
 
-    // Hand the project to the dataset capture worker (Front face in v1 —
-    // matches the overlay, which also renders Layer::Front only).
+    // Hand the project to the dataset capture worker — same side as the
+    // overlay (kept in sync by setActiveLayer()).
     if (m_datasetCreator) {
         QMetaObject::invokeMethod(m_datasetCreator, "setProject", Qt::QueuedConnection,
             Q_ARG(std::shared_ptr<const ibom::IBomProject>,
                   std::shared_ptr<const IBomProject>(m_ibomProject)),
-            Q_ARG(ibom::Layer, Layer::Front));
+            Q_ARG(ibom::Layer, m_activeLayer));
     }
 
     emit ibomLoaded(static_cast<int>(m_ibomProject->components.size()));

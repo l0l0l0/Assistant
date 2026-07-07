@@ -196,6 +196,11 @@ private:
     void loadIBomFile(const QString& path);
     void refreshRecentFilesMenu();
     void applyRemoteViewConfig();
+    /// Switch the side of the board being inspected. Re-renders the overlay
+    /// for that layer (mirrored view for Back), resets the alignment (the
+    /// board was physically flipped — the pose is meaningless) and re-targets
+    /// the dataset capture. No-op when already on that side.
+    void setActiveLayer(ibom::Layer layer);
     /// Push total/placed counts to the StatsPanel "Inspection Progress" box.
     /// Call after every m_placedRefs mutation and on iBOM load (ERREUR #40:
     /// the counters were never fed, the panel showed 0% forever).
@@ -335,6 +340,14 @@ private:
     // Selected component ref for overlay highlight
     std::string m_selectedRef;
 
+    // Which side of the board the camera is looking at. Drives the overlay
+    // (that layer's components, mirrored view for Back), every detection/
+    // alignment path (bootstrap, BoardLocator, manual similarity fits — the
+    // homography keeps mapping RAW PCB mm → image px, with a negative
+    // determinant for a back view), click-select and the dataset capture.
+    // Session-only (flipping the board is a transient physical state).
+    ibom::Layer m_activeLayer = ibom::Layer::Front;
+
     // Components already placed during the current inspection — used to render
     // them in a faded "done" color in the overlay.
     std::unordered_set<std::string> m_placedRefs;
@@ -449,6 +462,7 @@ private:
     float       m_ovSigPlacedOpacity = -1.0f;
     float       m_ovSigSelectedSilkW = -1.0f;
     const void* m_ovSigProject = nullptr;    // identity of the rendered IBomProject
+    ibom::Layer m_ovSigLayer   = ibom::Layer::Front;
     // buffer→PCB mapping of the current board buffer (inverse of the renderer's
     // pcbToBuffer), composed with the live homography into the per-frame warp.
     QTransform  m_boardBufferToPcb;

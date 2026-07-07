@@ -64,6 +64,8 @@ signals:
     void showSilkscreenChanged(bool show);
     void showFabricationChanged(bool show);
     void showHeatmapChanged(bool show);
+    /// true = inspect the BACK of the board (mirrored overlay view).
+    void boardSideChanged(bool back);
     void autoInspectChanged(bool enabled);
     void cameraSettingsChanged(int index, int w, int h, int fps);
     void realSenseControlsRequested();
@@ -93,6 +95,7 @@ private:
     QCheckBox*     m_showSilkscreen  = nullptr;
     QCheckBox*     m_showFabrication = nullptr;
     QCheckBox*     m_showHeatmap     = nullptr;
+    QCheckBox*     m_backSide        = nullptr;
 
     // AI controls
     QDoubleSpinBox* m_confidenceSpin = nullptr;

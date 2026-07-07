@@ -104,8 +104,16 @@ endif()
 # BFMatcher + RANSAC from opencv features2d/calib3d. Built as its own target
 # with AUTOMOC + Qt6::Core (CameraCapture.h, pulled in for FrameRef, only needs
 # Core: QObject/QMetaType/QSize). Guarded so a Qt-less host just skips it.
-find_package(Qt6 QUIET COMPONENTS Core)
+find_package(Qt6 QUIET COMPONENTS Core Gui)
 if(Qt6_FOUND)
+    # Overlay renderer test — board-space buffer, active-layer filter and the
+    # mirrored back-side view. QPainter on QImage runs headless (the test
+    # boots a QGuiApplication on the offscreen platform). No Q_OBJECT → no moc.
+    add_ibom_test(test_overlay_renderer
+        SOURCES test_overlay_renderer.cpp
+                ${CMAKE_SOURCE_DIR}/src/overlay/OverlayRenderer.cpp
+        LIBS    Qt6::Gui opencv_core
+    )
     add_executable(test_tracking_worker
         test_tracking_worker.cpp
         ${CMAKE_SOURCE_DIR}/src/overlay/TrackingWorker.cpp

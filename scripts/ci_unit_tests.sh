@@ -111,6 +111,12 @@ if [ -n "$MOC" ] && pkg-config --exists Qt6Core 2>/dev/null; then
     QT_CFLAGS=$(pkg-config --cflags Qt6Core)
     QT_LIBS=$(pkg-config --libs Qt6Core)
 
+    # No moc needed (no Q_OBJECT); QPainter runs on the offscreen platform.
+    build_and_run test_overlay_renderer \
+        "$T/test_overlay_renderer.cpp" "$S/overlay/OverlayRenderer.cpp" \
+        $(pkg-config --cflags Qt6Gui) $(pkg-config --libs Qt6Gui) \
+        $OPENCV_LIBS $CATCH_LIBS
+
     "$MOC" "$S/overlay/TrackingWorker.h" -o "$BUILD/moc_TrackingWorker.cpp" \
         -I"$S" $QT_CFLAGS
     build_and_run test_tracking_worker \

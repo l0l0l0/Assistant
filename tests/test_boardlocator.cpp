@@ -38,9 +38,20 @@ cv::Point2f gt(cv::Point2f p)
                                 + kScale * std::cos(th) * p.y + 90.0) };
 }
 
+// Ground-truth BACK view: the flipped board shows point (x,y) where the
+// front view would show (boardW−x, y) — mirror about the board's vertical
+// mid-axis, then the same bench similarity.
+cv::Point2f gtBack(cv::Point2f p)
+{
+    return gt({ 100.f - p.x, p.y });
+}
+
+using ViewFn = cv::Point2f (*)(cv::Point2f);
+
 // Asymmetric component layout (a symmetric one would leave the 0/90/180/270
 // disambiguation genuinely ambiguous — not what these tests are about).
-ibom::IBomProject makeProject(std::vector<cv::Point2f>& centersOut)
+ibom::IBomProject makeProject(std::vector<cv::Point2f>& centersOut,
+                              ibom::Layer layer = ibom::Layer::Front)
 {
     ibom::IBomProject p;
     std::mt19937 rng(31);
@@ -56,7 +67,7 @@ ibom::IBomProject makeProject(std::vector<cv::Point2f>& centersOut)
         pts.push_back(c);
         ibom::Component comp;
         comp.reference = "U" + std::to_string(pts.size());
-        comp.layer     = ibom::Layer::Front;
+        comp.layer     = layer;
         comp.position  = { c.x, c.y };
         comp.bbox      = { c.x - 1.5, c.y - 1.5, c.x + 1.5, c.y + 1.5 };
         p.components.push_back(std::move(comp));
@@ -67,29 +78,29 @@ ibom::IBomProject makeProject(std::vector<cv::Point2f>& centersOut)
 }
 
 // Board quad (PCB bbox corners) in image space, ground truth.
-std::vector<cv::Point> boardQuadImg()
+std::vector<cv::Point> boardQuadImg(ViewFn view = gt)
 {
     std::vector<cv::Point> quad;
     for (const cv::Point2f& c : { cv::Point2f(0, 0), cv::Point2f(100, 0),
                                   cv::Point2f(100, 80), cv::Point2f(0, 80) }) {
-        const cv::Point2f q = gt(c);
+        const cv::Point2f q = view(c);
         quad.emplace_back(cvRound(q.x), cvRound(q.y));
     }
     return quad;
 }
 
 // Light board + dark component bodies on a dark bench.
-cv::Mat renderColor(const std::vector<cv::Point2f>& centers)
+cv::Mat renderColor(const std::vector<cv::Point2f>& centers, ViewFn view = gt)
 {
     cv::Mat img(kFrame, CV_8UC3, cv::Scalar(25, 25, 25));
-    cv::fillConvexPoly(img, boardQuadImg(), cv::Scalar(190, 195, 190));
+    cv::fillConvexPoly(img, boardQuadImg(view), cv::Scalar(190, 195, 190));
     for (const auto& c : centers) {
         std::vector<cv::Point> body;
         for (const cv::Point2f& k : { cv::Point2f(c.x - 1.5f, c.y - 1.5f),
                                       cv::Point2f(c.x + 1.5f, c.y - 1.5f),
                                       cv::Point2f(c.x + 1.5f, c.y + 1.5f),
                                       cv::Point2f(c.x - 1.5f, c.y + 1.5f) }) {
-            const cv::Point2f q = gt(k);
+            const cv::Point2f q = view(k);
             body.emplace_back(cvRound(q.x), cvRound(q.y));
         }
         cv::fillConvexPoly(img, body, cv::Scalar(40, 40, 45));
@@ -103,7 +114,8 @@ cv::Mat renderColor(const std::vector<cv::Point2f>& centers)
 // the 8 corner orderings won, as long as it is the CORRECT one.
 void requireAligned(const BoardLocateResult& r,
                     const ibom::IBomProject& project,
-                    const std::vector<cv::Point2f>& centers)
+                    const std::vector<cv::Point2f>& centers,
+                    ViewFn view = gt)
 {
     REQUIRE(r.found);
     REQUIRE(r.imageCorners.size() == 4);
@@ -121,7 +133,7 @@ void requireAligned(const BoardLocateResult& r,
     std::vector<double> errs;
     for (const auto& c : centers) {
         const auto proj = h.pcbToImage(c);
-        errs.push_back(cv::norm(cv::Point2f(proj.x - gt(c).x, proj.y - gt(c).y)));
+        errs.push_back(cv::norm(cv::Point2f(proj.x - view(c).x, proj.y - view(c).y)));
     }
     std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
     INFO("method=" << r.method << " score=" << r.score
@@ -164,6 +176,21 @@ TEST_CASE("BoardLocator uses the raised depth plane when depth is available", "[
     INFO(r.message);
     requireAligned(r, project, centers);
     REQUIRE(r.method == "depth");
+}
+
+TEST_CASE("BoardLocator orients the BACK side (mirrored view, negative-det pose)", "[boardlocator]")
+{
+    // Same board flipped over: back-layer components, mirrored scene. The
+    // 8-candidate disambiguation (4 rotations x 2 windings) must pick a
+    // MIRRORED corner ordering — i.e. a homography with negative determinant.
+    std::vector<cv::Point2f> centers;
+    const ibom::IBomProject project = makeProject(centers, ibom::Layer::Back);
+    const cv::Mat color = renderColor(centers, gtBack);
+
+    const auto r = BoardLocator::locate(color, cv::Mat(), project, kScale,
+                                        ibom::Layer::Back);
+    INFO(r.message);
+    requireAligned(r, project, centers, gtBack);
 }
 
 TEST_CASE("BoardLocator reports not-found on a featureless frame", "[boardlocator]")

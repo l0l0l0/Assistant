@@ -181,7 +181,7 @@ Le blocage historique était « ONNX Runtime absent d'apt » (bandeau de `ci.yml
 | **P0** | Entraîner `component_detector.onnx` | 4.3 | Majeur (débloque détection, re-anchor stable, P&P assisté) | hors-code | tuto prêt |
 | **P1** | ✅ **Fait (suite 129)** — Letterbox (`src/ai/Letterbox.h` + test) ; décision imgsz/tuilage reste ouverte (l'app s'adapte à l'imgsz du .onnx) | 4.1-4.2 | Fort | ½s | avant l'éval du modèle |
 | **P1** | Hot-path GUI (conversion hors GUI, suppression `copy()`) | 3.1 | Fort (CPU Orin) | ½-1s | mesurer d'abord |
-| **P1** | Face arrière (Back) bout en bout | 6.1 | Majeur produit | 1-2s | rien |
+| **P1** | ✅ **Fait (suite 131)** — Face arrière (Back) bout en bout (overlay miroité, alignements, re-anchor, dataset, UI ; convention : H = PCB brut → image, det < 0 en vue arrière) | 6.1 | Majeur produit | 1-2s | validation Jetson |
 | **P1** | Consolidation journal + bloc « à valider » | 10 | Fort (vélocité sessions) | ½s | rien |
 | **P2** | Extraction `AlignmentController` + tests des gates | 7.1/8.2 | Fort (testabilité) | 1s/contrôleur | CI P0 en place |
 | **P2** | Reconnexion caméra à chaud | 2.2 | Moyen (confort atelier) | ½s | rien |
