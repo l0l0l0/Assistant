@@ -85,6 +85,15 @@ QGroupBox* ControlPanel::createOverlayGroup()
     connect(m_showHeatmap, &QCheckBox::toggled, this, &ControlPanel::showHeatmapChanged);
     layout->addWidget(m_showHeatmap);
 
+    m_backSide = new QCheckBox(tr("Back side (board flipped)"));
+    m_backSide->setChecked(false);
+    m_backSide->setToolTip(tr(
+        "Inspect the BACK of the board: the overlay shows the back layer's "
+        "components in a mirrored view. Flipping resets the alignment — "
+        "re-align after physically turning the board over."));
+    connect(m_backSide, &QCheckBox::toggled, this, &ControlPanel::boardSideChanged);
+    layout->addWidget(m_backSide);
+
     return group;
 }
 

@@ -141,6 +141,14 @@ void BomPanel::setProgress(int placed, int total)
     m_progressLabel->setText(QString("%1 / %2 placed").arg(placed).arg(total));
 }
 
+void BomPanel::setLayerFilterIndex(int index)
+{
+    if (!m_layerFilter) return;
+    if (index < 0 || index >= m_layerFilter->count()) return;
+    // setCurrentIndex fires currentIndexChanged → the normal filter handler.
+    m_layerFilter->setCurrentIndex(index);
+}
+
 QStringList BomPanel::getCheckedReferences() const
 {
     QStringList checked;

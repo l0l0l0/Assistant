@@ -7,6 +7,8 @@
 #include <QHeaderView>
 #include <QDateTime>
 
+#include <algorithm>
+
 namespace ibom::gui {
 
 StatsPanel::StatsPanel(QWidget* parent)
@@ -214,6 +216,13 @@ void StatsPanel::resetStats()
 void StatsPanel::setTotalComponents(int total)
 {
     m_total = total;
+    updateProgress();
+}
+
+void StatsPanel::setPlacedCount(int placed)
+{
+    m_placed = std::max(0, placed);
+    m_placedLabel->setText(QString::number(m_placed));
     updateProgress();
 }
 
