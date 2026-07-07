@@ -196,6 +196,10 @@ private:
     void loadIBomFile(const QString& path);
     void refreshRecentFilesMenu();
     void applyRemoteViewConfig();
+    /// Push total/placed counts to the StatsPanel "Inspection Progress" box.
+    /// Call after every m_placedRefs mutation and on iBOM load (ERREUR #40:
+    /// the counters were never fed, the panel showed 0% forever).
+    void refreshInspectionStats();
     /// Persist m_placedRefs for the current iBOM (session_state.json,
     /// keyed by iBOM path). An empty set removes the entry.
     void saveInspectionState();

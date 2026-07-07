@@ -21,6 +21,9 @@ public:
 
     void resetStats();
     void setTotalComponents(int total);
+    /// Absolute placed count — unlike incrementPlaced() this supports session
+    /// restore and Reset (the placed set can shrink or be loaded wholesale).
+    void setPlacedCount(int placed);
     void incrementPlaced();
     void incrementMissing();
     void incrementDefect();

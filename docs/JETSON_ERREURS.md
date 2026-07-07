@@ -31,7 +31,7 @@
 | 43 | 2026-06-19 | Application — sortie process | 🔴 OUVERT | [Segmentation fault au moment de quitter l'app (après "Application exiting with code 0") — non investigué](#erreur-43--segfault-a-la-sortie-de-lapplication) |
 | 42 | 2026-06-19 | Application.cpp / BoardMinimap | ✅ RÉSOLU | [Clic minimap déplaçait tout l'overlay sur D405 (anchor 1-point pensé pour microscope FOV étroit) au lieu de surligner le composant](#erreur-42--clic-minimap-deplace-loverlay-sur-realsense-au-lieu-de-highlighter) |
 | 41 | 2026-06-18 | BoardLocator.cpp — Auto-Align depth | 🟡 CONTOURNÉ | [Auto-Align D405 intermittent : carte posée à plat sur une surface coplanaire → le plan de profondeur englobe carte + table (2.5×), rejet par `validateSize()`](#erreur-41--auto-align-d405-carte-coplanaire-avec-la-table) |
-| 40 | 2026-06-18 | StatsPanel.cpp — Inspection Progress | 🔴 OUVERT | [`StatsPanel::setTotalComponents()` jamais appelé — le panneau Inspection Progress affiche toujours "No inspection data" / 0%](#erreur-40--settotalcomponents-jamais-appele--inspection-progress-toujours-a-zero) |
+| 40 | 2026-06-18 | StatsPanel.cpp — Inspection Progress | ✅ RÉSOLU (2026-07-06, à valider au build) | [`StatsPanel::setTotalComponents()` jamais appelé — le panneau Inspection Progress affiche toujours "No inspection data" / 0%](#erreur-40--settotalcomponents-jamais-appele--inspection-progress-toujours-a-zero) |
 | 39 | 2026-06-18 | BoardLocator.cpp / Application.cpp / RealSenseCapture.cpp / StatsPanel.cpp — D405 glare | ✅ RÉSOLU | [Distance/Auto-Align/self-cal faux sous glare D405 — depth fill bas non détecté](#erreur-39--distanceauto-alignself-cal-faux-sous-glare-d405) |
 | 38 | 2026-06-18 | Application.cpp / BoardLocator — Auto-Align D405 | ✅ RÉSOLU | [Auto-Align échoue sur D405 : scale px/mm périmé (calibration checkerboard à une autre distance/caméra) rejette le bon contour](#erreur-38--auto-align-echoue-sur-d405-scale-pxmm-perime) |
 | 37 | 2026-06-18 | Application.cpp / build Jetson | ✅ RÉSOLU | [Build Jetson échoue : variable locale `tr` masque `QObject::tr()` dans `autoAlignBoard()`](#erreur-37--variable-locale-tr-masque-qobjecttr-dans-autoalignboard) |
@@ -1780,7 +1780,7 @@ La segmentation par plan de profondeur suppose que l'objet est le plan le plus p
 
 **Date :** 2026-06-18
 **Composant :** `src/gui/StatsPanel.{h,cpp}`
-**Statut :** 🔴 OUVERT (constaté en creusant un rapport utilisateur, pas encore corrigé)
+**Statut :** ✅ RÉSOLU (2026-07-06, suite 130 — ⚠️ à valider au build Jetson)
 
 ### Symptôme
 Sur un screenshot utilisateur (D405, carte visible, après reboot de l'app), le panneau « Inspection Progress » affiche « No inspection data » et 0% alors que la carte semble correctement chargée (overlay partiellement visible). `Placed`/`Missing`/`Defects`/`Pending` sont tous à 0.
@@ -1791,8 +1791,8 @@ Sur un screenshot utilisateur (D405, carte visible, après reboot de l'app), le 
 ### Impact sur le diagnostic en cours
 Repéré en tentant de déterminer, à partir d'un screenshot, si un iBOM était chargé au moment où l'utilisateur a signalé qu'« Auto-Align ne fonctionne pas » après reboot. Ce panneau ne peut **pas** servir de signal pour ça tant qu'il n'est pas câblé — toujours à 0 par construction actuelle, qu'on ait un projet chargé ou pas.
 
-### Solution (pas encore appliquée)
-Appeler `m_mainWindow->statsPanel()->setTotalComponents(...)` après chargement d'un iBOM réussi (`loadIBomFile()`, count = `m_ibomProject->components.size()`) et le maintenir à jour quand `m_placedRefs` change (placement/retrait de composants). Périmètre exact (quels événements doivent incrémenter `Placed`/`Missing`/`Defects`) à clarifier avant d'implémenter — pas fait dans cette session pour rester focalisé sur le rapport glare/Auto-Align en cours.
+### Solution (appliquée 2026-07-06, suite 130)
+Nouveau helper `Application::refreshInspectionStats()` : pousse `setTotalComponents(m_ibomProject->components.size())` + le **nouveau** `StatsPanel::setPlacedCount(m_placedRefs.size())` (compte absolu — l'API increment seule ne pouvait pas représenter le restore de session ni le Reset). Appelé aux 5 points où l'état change : chargement iBOM (`loadIBomFile`, après restore des placed), clic « Placed » (`stepPlaced`), Reset, et les deux branches de `startInspection` (resume réussi / départ à zéro). `Missing`/`Defects` restent à 0 par design tant que `SolderInspector` n'est pas câblé (leur seule source prévue). ⚠️ Non compilé ici — vérifier au build que le panneau affiche la progression dès le chargement d'un iBOM.
 
 ### Leçon
 Une méthode publique définie mais jamais appelée dans un GUI Qt ne provoque ni erreur de compilation ni warning évident — seul un grep cross-fichier (`setTotalComponents(` dans tout `src/`) l'a révélée. À surveiller : tout nouveau setter ajouté à un panneau d'affichage doit être immédiatement câblé à un site d'appel, sinon il devient un panneau mort silencieux.

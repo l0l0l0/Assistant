@@ -213,6 +213,19 @@ void Application::refreshRecentFilesMenu()
     m_mainWindow->setRecentFiles(files);
 }
 
+void Application::refreshInspectionStats()
+{
+    // Push the absolute inspection progress to the StatsPanel. Called after
+    // every m_placedRefs mutation (place, reset, session restore) and on iBOM
+    // load — the panel's increment API alone can't represent restore/reset,
+    // which is why "Inspection Progress" stayed at 0% forever (ERREUR #40).
+    auto* sp = m_mainWindow ? m_mainWindow->statsPanel() : nullptr;
+    if (!sp) return;
+    sp->setTotalComponents(m_ibomProject
+        ? static_cast<int>(m_ibomProject->components.size()) : 0);
+    sp->setPlacedCount(static_cast<int>(m_placedRefs.size()));
+}
+
 void Application::saveInspectionState()
 {
     const std::string key = m_config->ibomFilePath();
@@ -3158,6 +3171,7 @@ void Application::connectControlSignals()
         m_placedRefs.insert(ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
         m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
+        refreshInspectionStats();
         // Persist on every placement: a restart (app or device) resumes
         // exactly where the inspection stopped.
         saveInspectionState();
@@ -3182,6 +3196,7 @@ void Application::connectControlSignals()
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             this, [this]() {
         m_placedRefs.clear();
+        refreshInspectionStats();
         saveInspectionState();  // empty set removes the saved entry
     });
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
@@ -3527,6 +3542,7 @@ void Application::loadIBomFile(const QString& path)
         spdlog::info("Restored {} placed components from a previous session",
                      m_placedRefs.size());
     }
+    refreshInspectionStats();  // total from the new project, placed from restore
 
     // Restore a previously saved alignment for this exact iBOM file, if any —
     // best-effort: we have no way to know whether the camera/board moved
@@ -3628,6 +3644,7 @@ void Application::startInspection()
     if (!m_placedRefs.empty()) {
         const int restored = m_pickAndPlace->restorePlaced(m_placedRefs);
         if (restored > 0) {
+            refreshInspectionStats();
             m_mainWindow->updateStatusMessage(
                 tr("Inspection resumed: %1/%2 already placed")
                     .arg(restored).arg(m_pickAndPlace->totalSteps()));
@@ -3635,6 +3652,7 @@ void Application::startInspection()
         }
         m_placedRefs.clear();  // saved refs match nothing in this board
     }
+    refreshInspectionStats();
 
     // Re-emit current step so InspectionPanel shows the first item of the new order
     if (m_pickAndPlace->totalSteps() > 0)

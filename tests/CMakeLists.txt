@@ -61,6 +61,14 @@ add_ibom_test(test_blob_detector
             onnxruntime::onnxruntime spdlog::spdlog
 )
 
+# BoardLocator test — synthetic contour/depth scenes with a known pose.
+add_ibom_test(test_boardlocator
+    SOURCES test_boardlocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/BoardLocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/overlay/Homography.cpp
+    LIBS    opencv_core opencv_imgproc opencv_calib3d spdlog::spdlog
+)
+
 # Letterbox test — pure geometry (header-only src/ai/Letterbox.h), no ONNX.
 add_ibom_test(test_letterbox
     SOURCES test_letterbox.cpp
