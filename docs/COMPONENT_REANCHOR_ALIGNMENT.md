@@ -7,7 +7,7 @@
 > dans le code (`src/overlay/ReanchorGate.h`).
 
 Sources : `src/overlay/ComponentReanchor.{h,cpp}`, appelé depuis
-`Application::componentReanchor()` (`src/app/Application.cpp:1449`).
+`Application::componentReanchor()` (`src/app/Application.cpp:1470`).
 
 ---
 
@@ -18,13 +18,13 @@ jamais regarder le contour de la carte**. Il met en correspondance :
 
 | Côté modèle (attendu) | Côté image (observé) |
 |-----------------------|----------------------|
-| La **constellation des composants** de l'iBOM (leurs positions en mm) | Les **détections de composants** dans la frame |
+| Une **constellation iBOM** (positions en mm) : centres de **composants**, ou **pads** sur carte nue (`Params::constellation`, ERREUR #57) | Les **détections de composants** dans la frame |
 
 Les détections viennent :
 
 - d'un **modèle YOLO** si `models/` en contient un (`detector->detect()`), ou
 - de **blobs CV classiques** sinon (`overlay::detectComponentBlobs()`,
-  `Application.cpp:1607`) — l'alignement par composants fonctionne donc avec un
+  `Application.cpp:1628`) — l'alignement par composants fonctionne donc avec un
   dossier `models/` vide.
 
 C'est le pendant de `BoardLocator` : il marche **précisément là où celui-ci
@@ -43,15 +43,20 @@ pas, il reste alors à `(0,0)` et effondrerait tous les composants sur l'origine
 
 ## 2. Deux modes selon qu'on a une pose ou non
 
-Le caller (`Application.cpp:1619-1623`) tente toujours `estimate()` d'abord, puis
-bascule sur `bootstrap()` en cas d'échec :
+Le caller (`Application::componentReanchor`, worker) tente toujours `estimate()`
+d'abord, puis bascule sur `bootstrap()` en cas d'échec. Depuis la suite 136
+(ERREUR #57), les chemins **blobs** (sans modèle entraîné) essaient chaque étape
+avec les **deux constellations** — composants puis pads — et gardent le fit au
+meilleur ratio `inliers/matches` :
 
 ```cpp
-auto res = overlay::ComponentReanchor::estimate(
-    detections, *project, priorPose, activeLayer, {}, rp);
-if (!res.found)
-    res = overlay::ComponentReanchor::bootstrap(
-        detections, *project, activeLayer, scalePrior, rp);
+auto res = estimate(detections, *project, priorPose, activeLayer, {}, rp);
+if (!detector) {                       // blobs : essayer aussi les pads
+    const auto resPads = estimate(..., rpPads);
+    if (resPads.found && (!res.found || ratio(resPads) > ratio(res)))
+        res = resPads;
+}
+if (!res.found) { /* même schéma avec bootstrap() */ }
 ```
 
 ### 2.1 `estimate()` — correction d'une pose existante (cas rapide)
@@ -66,8 +71,11 @@ On dispose déjà d'une pose (même dérivée). Étapes :
    par distance puis assignés **gloutonnement**, chacun utilisé une seule fois.
 3. **Fit RANSAC** sur les correspondances : `findHomography` 8-DOF, ou
    `estimateAffinePartial2D` 4-DOF (similarité) selon `fitSimilarity`.
-4. **Validation** : inliers ≥ `minInliers` (8) **et** erreur de reprojection
-   médiane ≤ `maxMedianReprojPx` (8 px). Sinon rejet (`found = false`).
+4. **Validation** : inliers ≥ `minInliers` (8), **ratio** inliers/matches ≥
+   `minInlierRatio` (0.4 — un fit soutenu par une minorité des matches est une
+   coïncidence de constellation, pas un lock ; ERREUR #57), **et** erreur de
+   reprojection médiane ≤ `maxMedianReprojPx` (8 px). Sinon rejet
+   (`found = false`).
 
 L'appariement est **purement spatial** : un détecteur « présence de composant »
 mono-classe suffit. La classe (si un vrai modèle la fournit) n'est qu'un filtre
@@ -100,7 +108,17 @@ s'aligne toute seule » dès qu'un détecteur est disponible.
 
 ---
 
-## 3. Deux subtilités importantes
+### 2.3 Choix du rayon de gating
+
+Le gate de matching peut être **physique** : quand `matchGateMm` et
+`scalePxPerMm` sont fournis, le rayon devient `clamp(mm × échelle, 15, 90) px`
+au lieu du `maxMatchDistPx` fixe (60 px = **13,6 mm** en vue D405 large à
+4.4 px/mm, mais 1,2 mm au microscope — INVESTIGATION_360 §1.1). Le re-anchor
+périodique l'active à 5 mm.
+
+---
+
+## 3. Trois subtilités importantes
 
 ### 3.1 Face arrière (miroir)
 
@@ -120,9 +138,26 @@ coins du board** — exactement ce que le gate de dérive mesure, d'où le jitte
 13-63 px de juillet 2026 (`BLOB_REANCHOR_JITTER_ANALYSE.md`).
 
 On force donc la similarité 4-DOF quand il n'y a pas de vrai modèle
-(`rp.fitSimilarity = (detector == nullptr)`, `Application.cpp:1614`), ce qui
-divise ce jitter de coin par ~4. Avec un modèle entraîné (centres répétables),
-on garde l'homographie complète, qui bénéficie alors d'un vrai tilt caméra.
+(`rp.fitSimilarity = (detector == nullptr)`), ce qui divise ce jitter de coin
+par ~4. Avec un modèle entraîné (centres répétables), on garde l'homographie
+complète, qui bénéficie alors d'un vrai tilt caméra.
+
+### 3.3 Carte nue : constellation de pads (ERREUR #57)
+
+L'assemblage main **commence carte nue** — et sur une carte nue, les blobs MSER
+sont les **pads étamés**, pas des corps de composants. Les apparier aux centres
+de composants n'a qu'une ressemblance de coïncidence : sur le terrain, une pose
+aliasée à 40/117 = 34 % d'inliers a été acceptée avec un « score 1.00 »
+(synthétique `0.4 + inliers/30`, saturé — remplacé depuis par le ratio
+`inliers/matches`).
+
+`Constellation::Pads` construit la constellation attendue depuis les
+**positions de pads** (coordonnées carte absolues, directement du parser —
+c'est ce que l'overlay dessine). Le problème devient bien posé : sur le
+scénario synthétique carte nue, le lock passe à **98 % de ratio** et 0,26 px
+d'erreur vs vérité terrain (`test_component_reanchor.cpp`). Cap à 250 pads
+(plus grands d'abord — ceux que le détecteur voit) pour borner le consensus
+O(nRef × nDet) du bootstrap.
 
 ---
 
@@ -130,7 +165,7 @@ on garde l'homographie complète, qui bénéficie alors d'un vrai tilt caméra.
 
 Une fois `estimate`/`bootstrap` a rendu une homographie, le caller projette les
 **4 coins du board** avec, et c'est **là seulement** que `ReanchorGate`
-intervient (`Application.cpp:1549`) : il compare coins-nouveaux vs coins-actuels
+intervient (`Application.cpp:1570`) : il compare coins-nouveaux vs coins-actuels
 pour décider **Skip / Hold / Apply**.
 
 > **Les composants calculent la pose ; les coins ne servent que de métrique de
@@ -162,9 +197,12 @@ timer périodique ─▶ componentReanchor(silent=true)         [Application.cpp
 | Paramètre | Défaut | Rôle |
 |-----------|--------|------|
 | `maxMatchDistPx` | 60.0 | Rayon de gating autour de la position prédite (`estimate`) |
+| `matchGateMm` / `scalePxPerMm` | 0.0 / 0.0 | Si les deux > 0 : gate **physique** `clamp(mm×échelle, 15, 90) px` remplace `maxMatchDistPx` (§1.1, ERREUR #57) |
+| `constellation` | `Components` | Source de la constellation attendue : centres de composants ou **pads** (carte nue, ERREUR #57) |
 | `minMatches` | 8 | Correspondances minimales avant `findHomography` |
 | `ransacThreshPx` | 6.0 | Seuil de reprojection RANSAC |
 | `minInliers` | 8 | Inliers RANSAC minimaux pour accepter |
+| `minInlierRatio` | 0.4 | Rejet si inliers/matches < ce ratio — une pose aliasée passe les gates absolus avec 30-40 % de support (ERREUR #57) ; 0 = off |
 | `maxMedianReprojPx` | 8.0 | Rejet si l'erreur médiane inlier dépasse ce seuil |
 | `useClassPrior` | false | N'apparier qu'à classe égale (nécessite `classOfComponent`) |
 | `fitSimilarity` | false | Fit 4-DOF au lieu de 8-DOF (blobs bruités) |

@@ -174,6 +174,201 @@ TEST_CASE("bootstrap registers a BACK-side view (mirrored constellation)", "[rea
     REQUIRE(errs[errs.size() / 2] < 4.0);
 }
 
+namespace {
+
+// Bare-board project (ERREUR #57): the pads carry the observable geometry —
+// varied 2-pad footprints (horizontal and vertical) at absolute board coords,
+// exactly how IBomParser fills Pad::position. Component centers are what the
+// recovered pose is validated against.
+ibom::IBomProject makeBareProject(std::vector<cv::Point2f>& centersOut,
+                                  std::vector<cv::Point2f>& padsOut)
+{
+    ibom::IBomProject p;
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> ux(5.f, 95.f);
+    std::uniform_real_distribution<float> uy(5.f, 75.f);
+    for (int i = 0; i < 30; ++i) {
+        ibom::Component c;
+        c.reference = "R" + std::to_string(i);
+        c.layer     = ibom::Layer::Front;
+        c.position  = { ux(rng), uy(rng) };
+        c.bbox = { c.position.x - 1.5, c.position.y - 1.0,
+                   c.position.x + 1.5, c.position.y + 1.0 };
+        const bool vertical = (i % 3 == 0);
+        for (int k = -1; k <= 1; k += 2) {
+            ibom::Pad pad;
+            pad.position = vertical
+                ? ibom::Point2D{ c.position.x, c.position.y + 1.1 * k }
+                : ibom::Point2D{ c.position.x + 1.1 * k, c.position.y };
+            pad.sizeX = 1.0;
+            pad.sizeY = 1.2;
+            pad.isSMD = true;
+            padsOut.push_back({ static_cast<float>(pad.position.x),
+                                static_cast<float>(pad.position.y) });
+            c.pads.push_back(std::move(pad));
+        }
+        centersOut.push_back({ static_cast<float>(c.position.x),
+                               static_cast<float>(c.position.y) });
+        p.components.push_back(std::move(c));
+    }
+    p.boardInfo.boardBBox = { 0.0, 0.0, 100.0, 80.0 };
+    return p;
+}
+
+// A similarity prior as ComponentReanchor consumes it (raw PCB mm → image px).
+ibom::overlay::Homography makeSimilarityPose(double s, double tx, double ty)
+{
+    cv::Mat H = (cv::Mat_<double>(3, 3) << s, 0, tx,  0, s, ty,  0, 0, 1);
+    ibom::overlay::Homography pose;
+    pose.setMatrix(H);
+    return pose;
+}
+
+} // namespace
+
+TEST_CASE("pads constellation registers a BARE board", "[reanchor]")
+{
+    // Field scenario ERREUR #57: bare PCB under a D405 at ~100 mm — the blob
+    // detector sees the shiny tinned PADS, not component bodies. The pad
+    // constellation makes that a well-posed registration.
+    std::vector<cv::Point2f> centers, padPts;
+    const ibom::IBomProject project = makeBareProject(centers, padPts);
+
+    // Ground truth at the field scale: 4.4 px/mm, 15° rotation.
+    const double s = 4.4, th = 15.0 * CV_PI / 180.0;
+    const auto gt = [&](cv::Point2f p) {
+        return cv::Point2f(
+            static_cast<float>(s * std::cos(th) * p.x - s * std::sin(th) * p.y + 250.0),
+            static_cast<float>(s * std::sin(th) * p.x + s * std::cos(th) * p.y + 120.0));
+    };
+
+    // Detections = pads (that is the point), ±0.8 px noise, 20% dropouts,
+    // 8 spurious blobs (vias, silkscreen).
+    std::mt19937 rng(31);
+    std::normal_distribution<float> noise(0.f, 0.8f);
+    std::uniform_real_distribution<float> fx(0.f, 848.f), fy(0.f, 480.f);
+    std::vector<ai::Detection> dets;
+    for (size_t i = 0; i < padPts.size(); ++i) {
+        if (i % 5 == 4) continue;
+        cv::Point2f q = gt(padPts[i]);
+        q.x += noise(rng);
+        q.y += noise(rng);
+        dets.push_back(detectionAt(q));
+    }
+    for (int i = 0; i < 8; ++i)
+        dets.push_back(detectionAt({ fx(rng), fy(rng) }));
+
+    ComponentReanchor::Params p;
+    p.fitSimilarity = true;  // production blob path
+    p.constellation = ComponentReanchor::Constellation::Pads;
+    const auto r = ComponentReanchor::bootstrap(dets, project,
+                                                ibom::Layer::Front, s, p);
+    INFO(r.message);
+    REQUIRE(r.found);
+    REQUIRE(r.message.find("pads") != std::string::npos);
+
+    // The recovered pose must map COMPONENT CENTERS (what the overlay draws)
+    // onto their ground-truth positions.
+    std::vector<cv::Point2f> proj;
+    cv::perspectiveTransform(centers, proj, r.homography);
+    std::vector<double> errs;
+    for (size_t i = 0; i < centers.size(); ++i)
+        errs.push_back(cv::norm(proj[i] - gt(centers[i])));
+    std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
+    INFO("median reprojection vs ground truth = " << errs[errs.size() / 2] << " px");
+    REQUIRE(errs[errs.size() / 2] < 4.0);
+}
+
+TEST_CASE("inlier-ratio gate rejects a constellation coincidence", "[reanchor]")
+{
+    // The exact ERREUR #57 signature: enough detections agree with SOME pose
+    // to clear the absolute gates (12 ≥ minInliers, tiny median error), but
+    // they are a minority of the gated matches (12/40 = 30 % — the field lock
+    // was 40/117 = 34 %, applied with a perfect synthetic score).
+    std::vector<cv::Point2f> centers;
+    const ibom::IBomProject project = makeProject(centers);
+    const auto prior = makeSimilarityPose(5.0, 100.0, 60.0);
+
+    std::vector<ai::Detection> dets;
+    for (size_t i = 0; i < centers.size(); ++i) {
+        cv::Point2f q(static_cast<float>(5.0 * centers[i].x + 100.0),
+                      static_cast<float>(5.0 * centers[i].y + 60.0));
+        if (i >= 12) {
+            // Structureless disagreement: 18-28 px away from the predicted
+            // position — inside the legacy 60 px gate, far outside the 6 px
+            // RANSAC band, and with no similarity consistent across them.
+            const double a = 0.7 * static_cast<double>(i);
+            const double m = 18.0 + static_cast<double>(i % 6) * 2.0;
+            q.x += static_cast<float>(m * std::cos(a));
+            q.y += static_cast<float>(m * std::sin(a));
+        }
+        dets.push_back(detectionAt(q));
+    }
+
+    ComponentReanchor::Params p;
+    p.fitSimilarity = true;
+
+    SECTION("default ratio gate rejects it") {
+        const auto r = ComponentReanchor::estimate(dets, project, prior,
+                                                   ibom::Layer::Front, {}, p);
+        INFO(r.message);
+        REQUIRE_FALSE(r.found);
+        REQUIRE(r.message.find("inlier ratio") != std::string::npos);
+    }
+    SECTION("disabling the gate restores the old (unsafe) acceptance") {
+        p.minInlierRatio = 0.0;
+        const auto r = ComponentReanchor::estimate(dets, project, prior,
+                                                   ibom::Layer::Front, {}, p);
+        INFO(r.message);
+        REQUIRE(r.found);  // proves the ratio gate is what rejected it above
+    }
+}
+
+TEST_CASE("physical matching gate scales with px/mm", "[reanchor]")
+{
+    // 60 px is 13.6 mm at the D405 wide view (4.4 px/mm) — wide enough to
+    // gate anything onto something. A 5 mm physical gate is 22 px there.
+    std::vector<cv::Point2f> centers;
+    const ibom::IBomProject project = makeProject(centers);
+    const double s = 4.4;
+    const auto prior = makeSimilarityPose(s, 200.0, 100.0);
+
+    // Every detection sits 30 px from its predicted position: inside the
+    // legacy 60 px gate, outside the 22 px physical gate.
+    std::vector<ai::Detection> dets;
+    for (size_t i = 0; i < centers.size(); ++i) {
+        cv::Point2f q(static_cast<float>(s * centers[i].x + 200.0),
+                      static_cast<float>(s * centers[i].y + 100.0));
+        const double a = 1.3 * static_cast<double>(i);
+        q.x += static_cast<float>(30.0 * std::cos(a));
+        q.y += static_cast<float>(30.0 * std::sin(a));
+        dets.push_back(detectionAt(q));
+    }
+
+    ComponentReanchor::Params p;
+    p.fitSimilarity = true;
+
+    // Legacy 60 px gate: essentially everything pairs up (each detection is
+    // 30 px from its own component's prediction).
+    const auto legacy = ComponentReanchor::estimate(dets, project, prior,
+                                                    ibom::Layer::Front, {}, p);
+    INFO("legacy: " << legacy.message << " (matches " << legacy.matches << ")");
+    REQUIRE(legacy.matches >= 30);
+    REQUIRE_FALSE(legacy.found);  // structureless offsets — rejected downstream
+
+    // 5 mm physical gate = 22 px at this scale: the 30 px own-matches are
+    // excluded. A few detections may still land within 22 px of a NEIGHBOR's
+    // prediction on a dense board — the gate cannot prevent cross-matches,
+    // only starve them — so assert a massive reduction, not zero.
+    p.matchGateMm  = 5.0;
+    p.scalePxPerMm = s;
+    const auto phys = ComponentReanchor::estimate(dets, project, prior,
+                                                  ibom::Layer::Front, {}, p);
+    INFO("physical: " << phys.message << " (matches " << phys.matches << ")");
+    REQUIRE_FALSE(phys.found);
+    REQUIRE(phys.matches <= legacy.matches / 3);
+}
+
 TEST_CASE("bootstrap rejects an unrelated constellation", "[reanchor]")
 {
     std::vector<cv::Point2f> centers;

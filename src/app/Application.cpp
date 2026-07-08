@@ -1365,17 +1365,38 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
             // noise-fits its perspective terms there).
             overlay::ComponentReanchor::Params rp;
             rp.fitSimilarity = (detector == nullptr);
-            const auto boot = overlay::ComponentReanchor::bootstrap(
+            auto boot = overlay::ComponentReanchor::bootstrap(
                 detections, *project, activeLayer, expectedPixelsPerMm, rp);
+            if (detector == nullptr) {
+                // Model-free blobs on a bare/partially populated board are
+                // the shiny PADS, not component bodies — matching them against
+                // component centers is a constellation coincidence that
+                // aliases (ERREUR #57: 40/117 inliers applied as score 1.00).
+                // Try the pad constellation too, keep the better-supported fit.
+                overlay::ComponentReanchor::Params rpPads = rp;
+                rpPads.constellation =
+                    overlay::ComponentReanchor::Constellation::Pads;
+                const auto bootPads = overlay::ComponentReanchor::bootstrap(
+                    detections, *project, activeLayer, expectedPixelsPerMm, rpPads);
+                const auto ratio = [](const overlay::ComponentReanchorResult& r) {
+                    return r.matches > 0
+                        ? static_cast<double>(r.inliers) / r.matches : 0.0;
+                };
+                if (bootPads.found && (!boot.found || ratio(bootPads) > ratio(boot)))
+                    boot = bootPads;
+            }
             if (boot.found) {
                 overlay::BoardLocateResult blr;
                 blr.found  = true;
                 blr.method = std::string("components(") + detSrc + ")";
-                // Map inliers onto the shared [0,1] score consumed by the
-                // trust (0.45) and reanchor (0.5) gates: 8 inliers → 0.67,
-                // saturates at 18+. Component consensus is far more specific
-                // than edge agreement, hence the generous floor.
-                blr.score   = std::min(1.0, 0.4 + boot.inliers / 30.0);
+                // Honest confidence for the trust (0.45) and reanchor (0.5)
+                // gates: the inlier fraction of the gated matches. The old
+                // mapping (0.4 + inliers/30) saturated at 1.00 from 18 inliers
+                // no matter how many matches disagreed — the ERREUR #57
+                // aliased lock scored a perfect 1.00.
+                blr.score   = boot.matches > 0
+                    ? std::min(1.0, static_cast<double>(boot.inliers) / boot.matches)
+                    : 0.0;
                 blr.message = boot.message;
                 const auto& bb = project->boardInfo.boardBBox;
                 const std::vector<cv::Point2f> pcb = {
@@ -1612,15 +1633,41 @@ void Application::componentReanchor(bool silent)
         // (docs/BLOB_REANCHOR_JITTER_ANALYSE.md).
         overlay::ComponentReanchor::Params rp;
         rp.fitSimilarity = (detector == nullptr);
+        // Physical matching gate (ERREUR #57 / INVESTIGATION_360 §1.1): 5 mm
+        // around each predicted position instead of a fixed 60 px — which is
+        // 13.6 mm at a D405 wide view, wide enough to gate almost anything
+        // onto something.
+        rp.matchGateMm  = 5.0;
+        rp.scalePxPerMm = scalePrior;
+        overlay::ComponentReanchor::Params rpPads = rp;
+        rpPads.constellation = overlay::ComponentReanchor::Constellation::Pads;
+        const auto ratio = [](const overlay::ComponentReanchorResult& r) {
+            return r.matches > 0 ? static_cast<double>(r.inliers) / r.matches : 0.0;
+        };
         // Prior-based correction first (cheap, precise when the pose is only
-        // drifting); global bootstrap when there is no usable prior — no pose
-        // yet, or a pose so stale (board moved/picked up) that nothing falls
-        // inside the matching radius anymore.
+        // drifting); with model-free blobs, try BOTH constellations — bodies
+        // on a populated board, pads on a bare one (ERREUR #57) — and keep
+        // the better-supported fit. Global bootstrap when there is no usable
+        // prior — no pose yet, or a pose so stale (board moved/picked up)
+        // that nothing falls inside the matching radius anymore.
         auto res = overlay::ComponentReanchor::estimate(
             detections, *project, priorPose, activeLayer, {}, rp);
-        if (!res.found)
+        if (!detector) {
+            const auto resPads = overlay::ComponentReanchor::estimate(
+                detections, *project, priorPose, activeLayer, {}, rpPads);
+            if (resPads.found && (!res.found || ratio(resPads) > ratio(res)))
+                res = resPads;
+        }
+        if (!res.found) {
             res = overlay::ComponentReanchor::bootstrap(
                 detections, *project, activeLayer, scalePrior, rp);
+            if (!detector) {
+                const auto bootPads = overlay::ComponentReanchor::bootstrap(
+                    detections, *project, activeLayer, scalePrior, rpPads);
+                if (bootPads.found && (!res.found || ratio(bootPads) > ratio(res)))
+                    res = bootPads;
+            }
+        }
         return res;
     }));
 }

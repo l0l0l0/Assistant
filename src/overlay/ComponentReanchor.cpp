@@ -38,6 +38,46 @@ cv::Point2f componentCenter(const ibom::Component& c)
     return { static_cast<float>(c.position.x), static_cast<float>(c.position.y) };
 }
 
+/// Expected constellation in raw PCB mm. Components → one point per component
+/// (bbox center); Pads → every pad position (absolute board coords, straight
+/// from the parser — OverlayRenderer draws them unshifted), falling back to
+/// the component center for a padless component. maxPoints caps the list for
+/// bootstrap's O(nRef × nDet) consensus loop, keeping the LARGEST pads — the
+/// ones the blob detector actually sees.
+struct RefPoint { size_t compIdx; cv::Point2f raw; double sortKey; };
+
+std::vector<RefPoint> buildConstellation(const ibom::IBomProject& project,
+                                         ibom::Layer layer,
+                                         ComponentReanchor::Constellation src,
+                                         size_t maxPoints = 0)
+{
+    std::vector<RefPoint> pts;
+    for (size_t i = 0; i < project.components.size(); ++i) {
+        const auto& c = project.components[i];
+        if (c.layer != layer) continue;
+        if (src == ComponentReanchor::Constellation::Pads && !c.pads.empty()) {
+            for (const auto& pad : c.pads)
+                pts.push_back({ i,
+                    { static_cast<float>(pad.position.x),
+                      static_cast<float>(pad.position.y) },
+                    pad.sizeX * pad.sizeY });
+        } else {
+            pts.push_back({ i, componentCenter(c), 0.0 });
+        }
+    }
+    if (maxPoints > 0 && pts.size() > maxPoints) {
+        std::partial_sort(pts.begin(), pts.begin() + maxPoints, pts.end(),
+            [](const RefPoint& a, const RefPoint& b) { return a.sortKey > b.sortKey; });
+        pts.resize(maxPoints);
+    }
+    return pts;
+}
+
+const char* constellationName(ComponentReanchor::Constellation c)
+{
+    return c == ComponentReanchor::Constellation::Pads ? "pads" : "components";
+}
+
 /// Back side: the camera sees the layout MIRRORED. A similarity (and the
 /// bootstrap's pair→pair hypotheses) cannot represent a mirror, so the fits
 /// run in a "view frame" — x negated for Layer::Back (the mirror axis choice
@@ -96,34 +136,40 @@ ComponentReanchorResult ComponentReanchor::estimate(
         && classOfComponent.size() == project.components.size();
     const bool mirrored = (activeLayer == ibom::Layer::Back);
 
-    // Predicted image position of every candidate component on the active
-    // layer. Prediction goes through the RAW center (currentPose maps raw
-    // PCB → image, mirror included); the fit runs on view-frame coords.
+    // Predicted image position of every constellation point (component
+    // centers, or pads on a bare board) on the active layer. Prediction goes
+    // through the RAW coords (currentPose maps raw PCB → image, mirror
+    // included); the fit runs on view-frame coords.
     struct Cand {
         size_t compIdx;
         cv::Point2f pcb;      // view-frame coords (x negated for Back)
         cv::Point2f predImg;
         int cls;
     };
+    const auto refs = buildConstellation(project, activeLayer, params.constellation);
     std::vector<Cand> cands;
-    cands.reserve(project.components.size());
-    for (size_t i = 0; i < project.components.size(); ++i) {
-        const auto& c = project.components[i];
-        if (c.layer != activeLayer) continue;
-        const cv::Point2f raw = componentCenter(c);
-        cands.push_back({ i, viewPoint(raw, mirrored), currentPose.pcbToImage(raw),
-                          useClass ? classOfComponent[i] : -1 });
+    cands.reserve(refs.size());
+    for (const auto& rp : refs) {
+        cands.push_back({ rp.compIdx, viewPoint(rp.raw, mirrored),
+                          currentPose.pcbToImage(rp.raw),
+                          useClass ? classOfComponent[rp.compIdx] : -1 });
     }
     if (cands.size() < static_cast<size_t>(params.minMatches)) {
-        r.message = "too few components on active layer to re-anchor";
+        r.message = std::string("too few ") + constellationName(params.constellation)
+                  + " on active layer to re-anchor";
         return r;
     }
 
-    // Candidate (detection, component) pairs within the gating radius, sorted
-    // by distance, then assigned greedily so each is used at most once.
+    // Candidate (detection, constellation-point) pairs within the gating
+    // radius, sorted by distance, then assigned greedily so each is used at
+    // most once. The gate is physical when the caller provides a scale
+    // (see Params::matchGateMm).
     struct Pair { double dist; size_t det; size_t cand; };
     std::vector<Pair> pairs;
-    const double maxD2 = params.maxMatchDistPx * params.maxMatchDistPx;
+    double gatePx = params.maxMatchDistPx;
+    if (params.matchGateMm > 0.0 && params.scalePxPerMm > 0.0)
+        gatePx = std::clamp(params.matchGateMm * params.scalePxPerMm, 15.0, 90.0);
+    const double maxD2 = gatePx * gatePx;
     for (size_t di = 0; di < detections.size(); ++di) {
         const cv::Point2f dc = detectionCenter(detections[di]);
         for (size_t ci = 0; ci < cands.size(); ++ci) {
@@ -196,6 +242,16 @@ ComponentReanchorResult ComponentReanchor::estimate(
                     " < " + std::to_string(params.minInliers) + ")";
         return r;
     }
+    // Relative support gate: an aliased pose on a repetitive/bare layout can
+    // clear the ABSOLUTE gates with a minority of the matches agreeing
+    // (field case ERREUR #57: 40/117 = 34 % accepted, wrong pose applied).
+    if (params.minInlierRatio > 0.0 &&
+        r.inliers < params.minInlierRatio * r.matches) {
+        r.message = "inlier ratio too low (" + std::to_string(r.inliers) + "/" +
+                    std::to_string(r.matches) +
+                    ") — constellation coincidence, not a lock";
+        return r;
+    }
     if (r.medianReprojPx > params.maxMedianReprojPx) {
         r.message = "median reprojection error too high (" +
                     std::to_string(r.medianReprojPx) + "px)";
@@ -207,7 +263,8 @@ ComponentReanchorResult ComponentReanchor::estimate(
     // returned homography maps RAW PCB coords (see viewPoint()).
     r.homography = mirrored ? cv::Mat(H * mirrorX()) : H;
     r.message = "re-anchored on " + std::to_string(r.inliers) + "/" +
-                std::to_string(r.matches) + " components, median " +
+                std::to_string(r.matches) + " " +
+                constellationName(params.constellation) + ", median " +
                 std::to_string(r.medianReprojPx) + "px";
     spdlog::debug("[comp-reanchor] {}", r.message);
     return r;
@@ -234,19 +291,23 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
 {
     ComponentReanchorResult r;
 
-    // Component centers on the active layer, in the VIEW frame (x negated for
-    // Layer::Back — the pair→pair similarity hypotheses cannot represent the
-    // mirror a back view carries; see viewPoint()).
+    // Constellation points (component centers, or pads on a bare board) on
+    // the active layer, in the VIEW frame (x negated for Layer::Back — the
+    // pair→pair similarity hypotheses cannot represent the mirror a back view
+    // carries; see viewPoint()). Pads are capped to the 250 largest so the
+    // O(nRef × nDet) consensus loop stays bounded.
     const bool mirrored = (activeLayer == ibom::Layer::Back);
+    const auto refs = buildConstellation(project, activeLayer,
+                                         params.constellation, /*maxPoints=*/250);
     std::vector<cv::Point2f> comp;
-    comp.reserve(project.components.size());
-    for (const auto& c : project.components) {
-        if (c.layer != activeLayer) continue;
-        comp.push_back(viewPoint(componentCenter(c), mirrored));
-    }
+    comp.reserve(refs.size());
+    for (const auto& rp : refs)
+        comp.push_back(viewPoint(rp.raw, mirrored));
     if (comp.size() < static_cast<size_t>(params.minMatches) ||
         detections.size() < static_cast<size_t>(params.minMatches)) {
-        r.message = "bootstrap: too few components (" + std::to_string(comp.size()) +
+        r.message = std::string("bootstrap: too few ")
+                  + constellationName(params.constellation)
+                  + " (" + std::to_string(comp.size()) +
                     ") or detections (" + std::to_string(detections.size()) + ")";
         spdlog::info("[comp-reanchor] {}", r.message);
         return r;
@@ -273,8 +334,9 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
         spdlog::warn("[comp-reanchor] {}", r.message);
         return r;
     }
-    spdlog::debug("[comp-reanchor] bootstrap: {} components (diag {:.1f} mm), {} detections",
-                  comp.size(), layoutDiag, det.size());
+    spdlog::debug("[comp-reanchor] bootstrap: {} {} (diag {:.1f} mm), {} detections",
+                  comp.size(), constellationName(params.constellation),
+                  layoutDiag, det.size());
     const double minCompSep = std::max(2.0, 0.15 * layoutDiag);  // mm
     const double minDetSep  = 30.0;                              // px
 
@@ -376,6 +438,9 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
     const double tolPx = std::clamp(params.bootstrapTolMm * std::hypot(bestCosS, bestSinS),
                                     8.0, 80.0);
     refine.maxMatchDistPx = std::max(params.maxMatchDistPx, 1.5 * tolPx);
+    // The px widening above already encodes the right tolerance for a coarse
+    // bootstrap prior — don't let a caller-set physical gate re-shrink it.
+    refine.matchGateMm = 0.0;
 
     r = estimate(detections, project, prior, activeLayer, {}, refine);
     r.message = "bootstrap(" + std::to_string(bestScore) + " consensus): " + r.message;

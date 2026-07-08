@@ -38,11 +38,44 @@ struct ComponentReanchorResult {
 /// available (Piste A), is an optional gating prior — see Params::useClassPrior.
 class ComponentReanchor {
 public:
+    /// Where the expected (iBOM-side) constellation comes from.
+    enum class Constellation {
+        /// Component bbox centers — populated board, detections are component
+        /// bodies. The historical behaviour.
+        Components,
+        /// Pad positions (absolute PCB mm, straight from the parser) — bare or
+        /// partially populated board, where the model-free blobs are the shiny
+        /// tinned PADS, not bodies. Matching pad blobs against component
+        /// centers is a constellation coincidence and aliases to a wrong pose
+        /// (field case ERREUR #57: 40/117 inliers accepted as score 1.00).
+        Pads
+    };
+
     struct Params {
         /// Gating radius (px) around a component's predicted image position.
         /// A detection farther than this from every predicted position is
         /// unmatched. Should comfortably exceed expected drift.
         double maxMatchDistPx = 60.0;
+
+        /// When both are > 0 the matching gate becomes PHYSICAL:
+        /// clamp(matchGateMm × scalePxPerMm, 15, 90) px replaces
+        /// maxMatchDistPx. A fixed 60 px is 13.6 mm at a D405 wide view
+        /// (4.4 px/mm) — wide enough to gate almost anything to something —
+        /// yet only 1.2 mm under a microscope. Same principle as
+        /// bootstrapTolMm (INVESTIGATION_360 §1.1).
+        double matchGateMm  = 0.0;
+        double scalePxPerMm = 0.0;
+
+        /// Expected-constellation source. Pads is the right choice on a bare
+        /// board (hand assembly starts with one); the callers with model-free
+        /// blob detections try both and keep the better-supported fit.
+        Constellation constellation = Constellation::Components;
+
+        /// Reject a fit supported by fewer than this fraction of the gated
+        /// matches. An aliased pose on a repetitive/bare layout can pass the
+        /// absolute gates (minInliers, median error) with 30-40 % support —
+        /// a healthy lock sits at 60-90 %. 0 disables.
+        double minInlierRatio = 0.4;
 
         /// Minimum kept correspondences before attempting findHomography.
         int minMatches = 8;
