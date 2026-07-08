@@ -72,6 +72,7 @@
 #include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/calib3d.hpp>
 #include <filesystem>
 
@@ -81,6 +82,64 @@ Q_DECLARE_METATYPE(ibom::Layer)
 Q_DECLARE_METATYPE(std::vector<cv::Point2f>)
 
 namespace ibom {
+
+namespace {
+
+/// Annotated re-anchor debug frame (ERREUR #59) : detections in RED, the pad
+/// constellation projected under the RESULT pose in GREEN, result message on
+/// top — so a field misalignment is diagnosed from what the algorithm actually
+/// saw instead of guesses over screenshots. Rolling window of 10 files under
+/// dataDir()/debug/, written only at debug log verbosity (the config's
+/// verbose-logging switch the user already runs with). Called from the
+/// QtConcurrent worker threads — touches only its arguments and the disk.
+void dumpReanchorDebug(const cv::Mat& frame,
+                       const std::vector<ai::Detection>& detections,
+                       const IBomProject& project,
+                       Layer layer,
+                       const overlay::ComponentReanchorResult& res)
+{
+    if (spdlog::default_logger()->level() > spdlog::level::debug) return;
+    try {
+        cv::Mat vis = frame.clone();
+        for (const auto& d : detections) {
+            const cv::Point c(static_cast<int>(d.bbox.x + d.bbox.width * 0.5f),
+                              static_cast<int>(d.bbox.y + d.bbox.height * 0.5f));
+            const int r = std::max(3, static_cast<int>(d.bbox.width * 0.5f));
+            cv::circle(vis, c, r, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
+        }
+        if (res.found && !res.homography.empty()) {
+            std::vector<cv::Point2f> pcb;
+            for (const auto& comp : project.components) {
+                if (comp.layer != layer) continue;
+                for (const auto& pad : comp.pads)
+                    pcb.push_back({ static_cast<float>(pad.position.x),
+                                    static_cast<float>(pad.position.y) });
+            }
+            if (!pcb.empty()) {
+                std::vector<cv::Point2f> img;
+                cv::perspectiveTransform(pcb, img, res.homography);
+                for (const auto& p : img)
+                    cv::drawMarker(vis, p, cv::Scalar(0, 255, 0),
+                                   cv::MARKER_CROSS, 7, 1, cv::LINE_AA);
+            }
+        }
+        cv::putText(vis, res.message.substr(0, 90), cv::Point(8, 22),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                    cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+        static std::atomic<int> counter{ 0 };
+        namespace fs = std::filesystem;
+        const fs::path dir = utils::dataDir() / "debug";
+        fs::create_directories(dir);
+        const fs::path file =
+            dir / ("reanchor_" + std::to_string(counter++ % 10) + ".jpg");
+        cv::imwrite(file.string(), vis);
+        spdlog::debug("[comp-reanchor] debug frame written: {}", file.string());
+    } catch (const std::exception& e) {
+        spdlog::debug("[comp-reanchor] debug dump failed: {}", e.what());
+    }
+}
+
+} // namespace
 
 Application::Application(QApplication& qapp)
     : QObject(&qapp)
@@ -1406,6 +1465,8 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
                 if (bootPads.found && (!boot.found || ratio(bootPads) > ratio(boot)))
                     boot = bootPads;
             }
+            // Full 600-blob set on purpose: junk must be VISIBLE in the dump.
+            dumpReanchorDebug(colorCopy, detections, *project, activeLayer, boot);
             if (boot.found) {
                 overlay::BoardLocateResult blr;
                 blr.found  = true;
@@ -1716,6 +1777,8 @@ void Application::componentReanchor(bool silent)
                     res = bootPads;
             }
         }
+        // Full 600-blob set on purpose: junk must be VISIBLE in the dump.
+        dumpReanchorDebug(colorCopy, detections, *project, activeLayer, res);
         return res;
     }));
 }
