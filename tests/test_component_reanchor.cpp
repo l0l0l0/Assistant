@@ -93,6 +93,7 @@ TEST_CASE("bootstrap recovers a pose from detections without any prior", "[reanc
         dets.push_back(detectionAt({ fx(rng), fy(rng) }));
 
     const auto verify = [&](const ibom::overlay::ComponentReanchorResult& r) {
+        INFO(r.message);
         REQUIRE(r.found);
         REQUIRE(r.inliers >= 8);
         // The recovered homography must map component centers onto their
@@ -367,6 +368,126 @@ TEST_CASE("physical matching gate scales with px/mm", "[reanchor]")
     INFO("physical: " << phys.message << " (matches " << phys.matches << ")");
     REQUIRE_FALSE(phys.found);
     REQUIRE(phys.matches <= legacy.matches / 3);
+}
+
+namespace {
+
+// Repetitive pad lattice (the ERREUR #58 board): a regular grid aliases under
+// shifts and 180° rotation; a handful of distinctive off-grid pads break the
+// symmetry — barely. nx × ny grid at `pitch` mm plus `extras` markers.
+ibom::IBomProject makeLatticeProject(int nx, int ny, float pitch,
+                                     const std::vector<cv::Point2f>& extras,
+                                     std::vector<cv::Point2f>& padsOut)
+{
+    ibom::IBomProject p;
+    auto addPad = [&](ibom::Component& c, float x, float y) {
+        ibom::Pad pad;
+        pad.position = { x, y };
+        pad.sizeX = 1.0;
+        pad.sizeY = 1.0;
+        pad.isSMD = true;
+        padsOut.push_back({ x, y });
+        c.pads.push_back(std::move(pad));
+    };
+    int idx = 0;
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            ibom::Component c;
+            c.reference = "G" + std::to_string(idx++);
+            c.layer     = ibom::Layer::Front;
+            const float x = 10.f + i * pitch, y = 10.f + j * pitch;
+            c.bbox = { x - 0.5, y - 0.5, x + 0.5, y + 0.5 };
+            addPad(c, x, y);
+            p.components.push_back(std::move(c));
+        }
+    for (const auto& e : extras) {
+        ibom::Component c;
+        c.reference = "M" + std::to_string(idx++);
+        c.layer     = ibom::Layer::Front;
+        c.bbox = { e.x - 0.5, e.y - 0.5, e.x + 0.5, e.y + 0.5 };
+        addPad(c, e.x, e.y);
+        p.components.push_back(std::move(c));
+    }
+    p.boardInfo.boardBBox = { 0.0, 0.0, 20.0 + (nx - 1) * pitch,
+                              20.0 + (ny - 1) * pitch };
+    return p;
+}
+
+} // namespace
+
+TEST_CASE("scale-compatible sampling resolves a repetitive lattice", "[reanchor]")
+{
+    // 12×10 grid (2 mm pitch) + 8 distinctive markers: shift/rotation aliases
+    // score high (the lattice mostly lands on itself) but the true pose is
+    // strictly better — provided the sampler actually DRAWS it. Blind
+    // pair→pair sampling drowned it among the aliases (ERREUR #58).
+    const std::vector<cv::Point2f> extras = {
+        { 3.f, 4.f }, { 36.f, 5.5f }, { 2.5f, 25.f }, { 34.f, 27.f },
+        { 5.f, 15.5f }, { 33.f, 16.f }, { 19.f, 2.5f }, { 17.f, 30.f }
+    };
+    std::vector<cv::Point2f> pads;
+    const ibom::IBomProject project = makeLatticeProject(12, 10, 2.0f, extras, pads);
+
+    // Ground truth: the field scale, board rotated 90° on the bench — the
+    // user's exact scenario (rotating the board to match made it lock).
+    const double s = 4.4, th = 90.0 * CV_PI / 180.0;
+    const auto gt = [&](cv::Point2f p) {
+        return cv::Point2f(
+            static_cast<float>(s * std::cos(th) * p.x - s * std::sin(th) * p.y + 500.0),
+            static_cast<float>(s * std::sin(th) * p.x + s * std::cos(th) * p.y + 100.0));
+    };
+    std::mt19937 rng(17);
+    std::normal_distribution<float> noise(0.f, 0.5f);
+    std::vector<ai::Detection> dets;
+    for (const auto& p : pads) {
+        cv::Point2f q = gt(p);
+        q.x += noise(rng);
+        q.y += noise(rng);
+        dets.push_back(detectionAt(q));
+    }
+
+    ComponentReanchor::Params rp;
+    rp.fitSimilarity = true;
+    rp.constellation = ComponentReanchor::Constellation::Pads;
+    const auto r = ComponentReanchor::bootstrap(dets, project,
+                                                ibom::Layer::Front, s, rp);
+    INFO(r.message);
+    REQUIRE(r.found);
+
+    std::vector<cv::Point2f> proj;
+    cv::perspectiveTransform(pads, proj, r.homography);
+    std::vector<double> errs;
+    for (size_t i = 0; i < pads.size(); ++i)
+        errs.push_back(cv::norm(proj[i] - gt(pads[i])));
+    std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
+    INFO("median reprojection vs ground truth = " << errs[errs.size() / 2] << " px");
+    REQUIRE(errs[errs.size() / 2] < 3.0);
+}
+
+TEST_CASE("bootstrap refuses a perfectly symmetric lattice as ambiguous", "[reanchor]")
+{
+    // Pure 8×8 grid, no distinctive feature: the 180°-rotated pose scores
+    // EXACTLY the same consensus as the true one. Picking one is a coin flip
+    // that lands the overlay upside down half the time — the ambiguity margin
+    // must refuse instead (ERREUR #58).
+    std::vector<cv::Point2f> pads;
+    const ibom::IBomProject project =
+        makeLatticeProject(8, 8, 2.0f, {}, pads);
+
+    const double s = 5.0;
+    std::vector<ai::Detection> dets;
+    for (const auto& p : pads)
+        dets.push_back(detectionAt({ static_cast<float>(s * p.x + 300.0),
+                                     static_cast<float>(s * p.y + 150.0) }));
+
+    ComponentReanchor::Params rp;
+    rp.fitSimilarity = true;
+    rp.constellation = ComponentReanchor::Constellation::Pads;
+    const auto r = ComponentReanchor::bootstrap(dets, project,
+                                                ibom::Layer::Front, s, rp);
+    INFO(r.message);
+    REQUIRE_FALSE(r.found);
+    REQUIRE(r.message.find("ambiguous") != std::string::npos);
 }
 
 TEST_CASE("bootstrap rejects an unrelated constellation", "[reanchor]")

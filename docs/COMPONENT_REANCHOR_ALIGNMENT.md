@@ -88,20 +88,35 @@ Pas de pose, ou pose trop périmée (carte prise puis reposée) : plus rien ne t
 dans le rayon de gating, `estimate()` est inutile. `bootstrap()` résout le
 **problème global** :
 
-- RANSAC sur des hypothèses **paire→paire** : chaque correspondance (paire de
-  détections ↔ paire de composants) détermine entièrement une similarité
-  scale + rotation + translation.
-- **Consensus** = nombre de composants qui, une fois transformés, tombent sur une
-  détection dans une **tolérance physique** (`bootstrapTolMm = 1.2 mm` converti
-  en px via l'échelle de l'hypothèse — reste valable de la vue D405 large au fort
-  grossissement microscope).
-- Filtres : paires trop rapprochées rejetées (baseline courte ⇒ angle/échelle
-  noyés dans le bruit) ; fenêtre d'échelle plausible bornée par
-  `scalePriorPxPerMm` (~[0.55, 1.8]×).
-- **RNG déterministe** (seed `0x5EED`) : même scène → même pose, aucune loterie
-  image par image.
-- La similarité gagnante est ensuite passée à `estimate()` comme prior, pour
-  bénéficier du fit précis et de la validation inliers/reprojection.
+Chaque correspondance (paire de détections ↔ paire de points de constellation)
+détermine entièrement une similarité scale + rotation + translation. Le
+**consensus** = nombre de points qui, transformés, tombent sur une détection
+dans une **tolérance physique** (`bootstrapTolMm = 1.2 mm` × échelle de
+l'hypothèse). Depuis l'ERREUR #58, la recherche a **deux phases** :
+
+- **Phase 1 — seeding déterministe par ancres** : paires longues-baselines à
+  extrémités *disjointes* parmi les ~40 plus grosses détections (les points
+  extrémaux sont là où vit le junk ; disjoint ⇒ des ancres saines survivent) ;
+  pour chaque ancre, énumération **exhaustive** des paires de constellation
+  compatibles-échelle (index trié des séparations), pré-score bas coût (hash
+  spatial des détections, ~60 refs en foulée sur toute la constellation),
+  consensus complet sur les 256 meilleures graines. Sur un layout répétitif,
+  le tirage aléatoire trouve les alias (des milliers de paires les
+  soutiennent) et la vraie pose seulement par chance — le seeding la trouve
+  **par construction**.
+- **Phase 2 — filet aléatoire** : tirages paire→paire compatibles-échelle
+  (RNG déterministe seed `0x5EED` : même scène → même pose), filtres baseline
+  courte et fenêtre d'échelle `scalePriorPxPerMm` (~[0.55, 1.8]×).
+
+**Marge d'ambiguïté** (`bootstrapAmbiguityRatio = 0.97`) : si une pose
+*distincte* (partie linéaire, ou déplacement du **centroïde du layout** — pas
+de l'origine PCB, dont le bras de levier fabrique de fausses distinctions)
+atteint ≥ 97 % du meilleur consensus, refus explicite `ambiguous registration`
+— une grille symétrique est refusée au lieu d'être posée à l'envers une fois
+sur deux.
+
+La similarité gagnante est ensuite passée à `estimate()` comme prior, pour
+bénéficier du fit précis et de la validation inliers/reprojection/ratio.
 
 C'est ce qui transforme l'Auto-Align en « pose la carte sous la caméra et elle
 s'aligne toute seule » dès qu'un détecteur est disponible.
@@ -170,8 +185,12 @@ pour décider **Skip / Hold / Apply**.
 
 > **Les composants calculent la pose ; les coins ne servent que de métrique de
 > décision** — ne pas perturber un tracking sain avec une micro-correction, ni
-> laisser un tick aberrant (main, reflet) tirer l'overlay. Détail des règles du
-> gate : `src/overlay/ReanchorGate.h` + `tests/test_reanchor_gate.cpp`.
+> laisser un tick aberrant (main, reflet) tirer l'overlay. Depuis l'ERREUR #58
+> le gate porte aussi un **cap** (`maxShiftPx`, 12 mm côté caller) : tracking
+> sain + shift énorme = estimation aliasée ou carte déplacée — refus dans les
+> deux cas (les déplacements passent par Lost, exempté). Sans lui, un alias
+> **répétable** passait la confirmation 2-ticks (le « clack » terrain, 185 px).
+> Détail des règles : `src/overlay/ReanchorGate.h` + `tests/test_reanchor_gate.cpp`.
 
 Chemin complet d'un re-anchor silencieux périodique :
 
@@ -206,8 +225,9 @@ timer périodique ─▶ componentReanchor(silent=true)         [Application.cpp
 | `maxMedianReprojPx` | 8.0 | Rejet si l'erreur médiane inlier dépasse ce seuil |
 | `useClassPrior` | false | N'apparier qu'à classe égale (nécessite `classOfComponent`) |
 | `fitSimilarity` | false | Fit 4-DOF au lieu de 8-DOF (blobs bruités) |
-| `bootstrapIterations` | 3000 | Hypothèses paire→paire RANSAC (`bootstrap`) |
+| `bootstrapIterations` | 3000 | Hypothèses paire→paire RANSAC (`bootstrap`, phase 2) |
 | `bootstrapTolMm` | 1.2 | Tolérance de consensus physique en mm (`bootstrap`) |
+| `bootstrapAmbiguityRatio` | 0.97 | Refus `ambiguous` si une pose distincte atteint cette fraction du meilleur consensus (ERREUR #58) ; 0 = off |
 
 Le prior d'échelle (`scalePriorPxPerMm`) provient, dans l'ordre : pinhole D405
 (`fx / distance`) si disponible, sinon le px/mm courant, sinon 0 (espace

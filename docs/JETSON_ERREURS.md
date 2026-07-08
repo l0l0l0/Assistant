@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 58 | 2026-07-08 | ComponentReanchor / ReanchorGate — alias de réseau | ✅ RÉSOLU (à valider terrain) | [Retour terrain du fix #57 : le réseau de pads répétitif **aliase** — locks pads à 44-65 % de ratio sur des poses décalées, et le « clack » (un alias **répétable** passe la confirmation 2-ticks et éjecte une pose parfaite de 185 px) ; fix : seeding déterministe par ancres + marge d'ambiguïté + cap de correction silencieuse + filtre 6 mm](#erreur-58--alias-de-reseau-de-pads--seeding-deterministe--cap-anti-clack) |
 | 57 | 2026-07-08 | ComponentReanchor / Application — Auto-Align blobs | ✅ RÉSOLU (à valider terrain) | [Auto-Align verrouille une pose fausse sur **carte nue** avec « score 1.00 » — les blobs sont des PADS, pas des corps de composants ; le score `0.4+inliers/30` sature à 1.00 et les gates absolus laissent passer 40/117 = 34 % d'inliers ; fix : constellation de pads + gate de ratio + score honnête + gate de matching en mm](#erreur-57--auto-align-carte-nue--pose-aliasee-acceptee-a-score-100) |
 | 56 | 2026-07-02 | ComponentReanchor / IBomParser — Component::position | ✅ RÉSOLU | [`bootstrap: degenerate component layout` — `Component::position` reste (0,0) quand l'iBOM n'a pas de champ `center` → tout le re-anchor composant (bootstrap ET estimate, modèle compris) cassé ; fix : utiliser le centre de la bbox](#erreur-56--componentposition-non-remplie--re-anchor-composant-degenere) |
 | 55 | 2026-07-02 | tests/test_component_reanchor.cpp — build | ✅ RÉSOLU | [`ai::Detection` ne résout pas à portée globale — `ai` est le namespace imbriqué `ibom::ai`, visible sans qualification seulement depuis `namespace ibom`](#erreur-55--aidetection-ne-resout-pas-a-portee-globale-dans-le-test) |
@@ -1388,6 +1389,30 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 58 — Alias de réseau de pads : seeding déterministe + cap anti-« clack »
+
+**Date :** 2026-07-08 (même session que #57, retour terrain immédiat)
+**Composant :** `src/overlay/ComponentReanchor.cpp` (bootstrap) + `src/overlay/ReanchorGate.{h,cpp}` + `src/app/Application.cpp`
+**Statut :** ✅ RÉSOLU (unit-testé ici ; terrain à valider)
+
+### Symptôme
+Le fix #57 tourne sur le Jetson : le gate de ratio rejette bien l'ancienne pose (`inlier ratio too low (30/117)`), le chemin pads gagne… mais **verrouille des poses décalées à 44-51 % de ratio** (`re-anchored on 99/195 pads`), overlay toujours faux. Pire, rapporté par l'utilisateur : *« si je tourne la carte pour correspondre à l'empreinte, l'auto-align est parfait — et clack, il part sur le côté »* — log : `Component re-anchor: HELD (shift 185.5px, re-anchored on 80/124 pads)` → confirmé au tick suivant → une pose parfaite éjectée. Et `300 dets` systématique = cap MSER saturé par le grain du bois / tapis.
+
+### Cause (quatre mécanismes)
+1. **Alias de réseau** : les pads en rangées répétitives font qu'une pose décalée d'un pas de grille pose ~la moitié des pads sur d'autres pads → ratio 44-65 %, au-dessus de tout gate raisonnable.
+2. **Le tirage aléatoire paire→paire ne tire jamais la vraie pose** : une seule correspondance correcte parmi des dizaines de milliers de paires compatibles, contre des milliers de paires qui soutiennent chaque alias. 3000 itérations trouvent les alias par défaut, la vraie pose par chance (E[hits] < 1). C'est pour ça que tourner la carte vers l'orientation nominale « répare » : les hypothèses proches de l'identité abondent.
+3. **La confirmation 2-ticks suppose l'aberration aléatoire** : un alias est **systématique** (même scène → même pose) → deux ticks concordants → confirmé → « clack ».
+4. **Le cap 300 du détecteur garde les plus GROS blobs** : le junk d'arrière-plan (bois, ombres) est gros → il évince les vrais pads (petits).
+
+### Solution appliquée ✅
+1. **Seeding déterministe par ancres** (`bootstrap` phase 1) : paires longues-baselines à extrémités **disjointes** parmi les 40 plus grosses détections (l'extrémal = là où vit le junk ; disjoint ⇒ ≥ 12−s ancres saines) ; pour chaque ancre, énumération **exhaustive** des paires de constellation compatibles-échelle (index trié des séparations) ; pré-score bas coût contre un hash spatial des détections sur ~60 refs **en foulée** sur toute la constellation (les pads discriminants sont souvent en fin de liste) ; consensus complet sur les 256 meilleures graines. La vraie pose est trouvée **par construction, pas par chance**. Test réseau 12×10+8 marqueurs tourné 90° : consensus 128/128, 0.08 px vs GT (l'aléatoire seul : deux alias 116/113).
+2. **Marge d'ambiguïté** (`bootstrapAmbiguityRatio = 0.97`) : si une pose **distincte** (comparaison partie linéaire + centroïde du layout — pas l'origine PCB, dont le bras de levier fabrique de fausses distinctions) atteint ≥ 97 % du meilleur consensus → refus explicite `ambiguous registration … refusing to guess`. Une grille parfaitement symétrique est refusée au lieu d'être posée à l'envers une fois sur deux.
+3. **Cap anti-« clack »** (`ReanchorGate::Params::maxShiftPx`, posé à 12 mm clamp 40-250 px) : tracking sain + shift énorme = estimation aliasée ou vrai déplacement de carte — dans les deux cas on **refuse la correction silencieuse** (les déplacements passent par la récupération Lost, exemptée). Purge aussi le pending : l'alias répétable ne peut plus se confirmer.
+4. **Échantillonnage compatible-échelle** (phase 2) + **filtre 6 mm** côté pads (cap détecteur monté à 600, sous-ensembles par constellation) : le junk gros ne pollue plus le matching ni n'évince les pads.
+
+### Leçon
+La confirmation multi-échantillons ne protège que contre le bruit **aléatoire** — face à une erreur **systématique**, elle la valide avec enthousiasme ; il faut une défense d'amplitude (cap), pas de répétition. Et un RANSAC dont les bonnes hypothèses sont exponentiellement plus rares que les alias ne converge pas vers la vérité en ajoutant des itérations : il faut rendre la découverte **déterministe** (énumération guidée) là où la structure du problème le permet.
 
 ## ERREUR 57 — Auto-Align carte nue : pose aliasée acceptée à « score 1.00 »
 

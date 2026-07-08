@@ -1355,7 +1355,11 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
         if (detector) {
             detections = detector->detect(colorCopy);
         } else {
-            detections = overlay::detectComponentBlobs(colorCopy, expectedPixelsPerMm);
+            // High cap: the per-constellation subsets below re-cap. With the
+            // old 300 cap, large background junk (wood grain, shadows) evicted
+            // the small pad blobs it outranked by area (ERREUR #58).
+            detections = overlay::detectComponentBlobs(colorCopy, expectedPixelsPerMm,
+                                                       /*maxDetections=*/600);
             detSrc = "blobs";
         }
         if (!detections.empty()) {
@@ -1365,19 +1369,36 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
             // noise-fits its perspective terms there).
             overlay::ComponentReanchor::Params rp;
             rp.fitSimilarity = (detector == nullptr);
+            // Component-body attempt: the 300 largest (historic behaviour —
+            // detectComponentBlobs returns area-descending).
+            std::vector<ai::Detection> compDets = detections;
+            if (!detector && compDets.size() > 300) compDets.resize(300);
             auto boot = overlay::ComponentReanchor::bootstrap(
-                detections, *project, activeLayer, expectedPixelsPerMm, rp);
+                compDets, *project, activeLayer, expectedPixelsPerMm, rp);
             if (detector == nullptr) {
                 // Model-free blobs on a bare/partially populated board are
                 // the shiny PADS, not component bodies — matching them against
                 // component centers is a constellation coincidence that
                 // aliases (ERREUR #57: 40/117 inliers applied as score 1.00).
-                // Try the pad constellation too, keep the better-supported fit.
+                // Try the pad constellation too, keep the better-supported
+                // fit. Pads are small: drop anything over 6 mm (wood grain,
+                // shadows, shields — junk that both pollutes the matching and
+                // evicts real pads at the cap, ERREUR #58).
+                std::vector<ai::Detection> padDets;
+                padDets.reserve(detections.size());
+                for (const auto& d : detections) {
+                    if (expectedPixelsPerMm > 0.0 &&
+                        std::max(d.bbox.width, d.bbox.height) >
+                            6.0 * expectedPixelsPerMm)
+                        continue;
+                    padDets.push_back(d);
+                }
+                if (padDets.size() > 400) padDets.resize(400);
                 overlay::ComponentReanchor::Params rpPads = rp;
                 rpPads.constellation =
                     overlay::ComponentReanchor::Constellation::Pads;
                 const auto bootPads = overlay::ComponentReanchor::bootstrap(
-                    detections, *project, activeLayer, expectedPixelsPerMm, rpPads);
+                    padDets, *project, activeLayer, expectedPixelsPerMm, rpPads);
                 const auto ratio = [](const overlay::ComponentReanchorResult& r) {
                     return r.matches > 0
                         ? static_cast<double>(r.inliers) / r.matches : 0.0;
@@ -1565,6 +1586,15 @@ void Application::componentReanchor(bool silent)
             overlay::ReanchorGate::Params gp;
             gp.pendingMaxAgeMs = 3 * std::max<std::int64_t>(500,
                 static_cast<std::int64_t>(m_config->reanchorIntervalS() * 1000.0));
+            // 12 mm cap (clamped 40-250 px) on silent corrections while
+            // tracking is healthy: beyond that the "correction" is an aliased
+            // estimate (repetitive pad lattice) or a real board move — and
+            // board moves recover via Lost. Without it a repeatable alias
+            // passes the two-tick confirmation and yanks a perfect pose
+            // sideways (ERREUR #58, the field « clack », shift 185 px).
+            gp.maxShiftPx = m_currentPixelsPerMm > 0.0
+                ? std::clamp(12.0 * m_currentPixelsPerMm, 40.0, 250.0)
+                : 150.0;
             const bool trackingLost = m_lastTrackingState ==
                 static_cast<int>(overlay::TrackingWorker::State::Lost);
             const auto gate = m_reanchorGate.evaluate(
@@ -1623,9 +1653,27 @@ void Application::componentReanchor(bool silent)
                                           scalePrior, activeLayer]() {
         // Detections from the trained model when loaded, else model-free blobs
         // (classic CV) — component-based re-anchor works with an empty models/.
+        // High blob cap: per-constellation subsets below re-cap (ERREUR #58 —
+        // the old 300 cap let large background junk evict the small pads).
         const std::vector<ai::Detection> detections =
             detector ? detector->detect(colorCopy)
-                     : overlay::detectComponentBlobs(colorCopy, scalePrior);
+                     : overlay::detectComponentBlobs(colorCopy, scalePrior,
+                                                     /*maxDetections=*/600);
+        std::vector<ai::Detection> compDets = detections;
+        if (!detector && compDets.size() > 300) compDets.resize(300);
+        std::vector<ai::Detection> padDets;
+        if (!detector) {
+            // Pad attempt: pads are small — drop blobs over 6 mm (wood grain,
+            // shadows, shields) before the cap (ERREUR #58).
+            padDets.reserve(detections.size());
+            for (const auto& d : detections) {
+                if (scalePrior > 0.0 &&
+                    std::max(d.bbox.width, d.bbox.height) > 6.0 * scalePrior)
+                    continue;
+                padDets.push_back(d);
+            }
+            if (padDets.size() > 400) padDets.resize(400);
+        }
         // Blob centers are noisier than model detections: fit a 4-DOF
         // similarity so the pose is repeatable at the board corners — the
         // periodic drift gate measures there, and the 8-DOF fit's noise-fitted
@@ -1651,19 +1699,19 @@ void Application::componentReanchor(bool silent)
         // prior — no pose yet, or a pose so stale (board moved/picked up)
         // that nothing falls inside the matching radius anymore.
         auto res = overlay::ComponentReanchor::estimate(
-            detections, *project, priorPose, activeLayer, {}, rp);
+            compDets, *project, priorPose, activeLayer, {}, rp);
         if (!detector) {
             const auto resPads = overlay::ComponentReanchor::estimate(
-                detections, *project, priorPose, activeLayer, {}, rpPads);
+                padDets, *project, priorPose, activeLayer, {}, rpPads);
             if (resPads.found && (!res.found || ratio(resPads) > ratio(res)))
                 res = resPads;
         }
         if (!res.found) {
             res = overlay::ComponentReanchor::bootstrap(
-                detections, *project, activeLayer, scalePrior, rp);
+                compDets, *project, activeLayer, scalePrior, rp);
             if (!detector) {
                 const auto bootPads = overlay::ComponentReanchor::bootstrap(
-                    detections, *project, activeLayer, scalePrior, rpPads);
+                    padDets, *project, activeLayer, scalePrior, rpPads);
                 if (bootPads.found && (!res.found || ratio(bootPads) > ratio(res)))
                     res = bootPads;
             }

@@ -113,6 +113,13 @@ public:
         /// the hypothesis scale) — physical tolerance, so it stays meaningful
         /// from wide D405 views to high microscope magnification.
         double bootstrapTolMm      = 1.2;
+        /// Reject the bootstrap when a DISTINCT pose reaches at least this
+        /// fraction of the best consensus: a (near-)symmetric layout aliases,
+        /// and picking between two equal poses is a coin flip — refuse and say
+        /// so instead of applying a maybe-mirrored overlay (ERREUR #58).
+        /// Deliberately tight: partial repetition (alias at 80-95 % of the
+        /// true pose) must still lock on the best one. 0 disables.
+        double bootstrapAmbiguityRatio = 0.97;
     };
 
     /// @param detections   AI detections in image space (bbox in px).
