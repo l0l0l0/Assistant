@@ -1,6 +1,7 @@
 #include "ComponentReanchor.h"
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/imgproc.hpp>  // getPerspectiveTransform (orientation vote)
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -686,6 +687,56 @@ ComponentReanchorResult ComponentReanchor::bootstrap(
     if (r.found)
         spdlog::info("[comp-reanchor] {}", r.message);
     return r;
+}
+
+ComponentReanchorResult ComponentReanchor::estimateOrientations(
+    const std::vector<ai::Detection>& detections,
+    const ibom::IBomProject& project,
+    const std::vector<cv::Point2f>& imageCorners,
+    ibom::Layer activeLayer,
+    const Params& params)
+{
+    ComponentReanchorResult best;
+    if (imageCorners.size() != 4) {
+        best.message = "orientation vote: need 4 board corners";
+        return best;
+    }
+    const auto& bb = project.boardInfo.boardBBox;
+    const std::vector<cv::Point2f> pcb = {
+        { static_cast<float>(bb.minX), static_cast<float>(bb.minY) },
+        { static_cast<float>(bb.maxX), static_cast<float>(bb.minY) },
+        { static_cast<float>(bb.maxX), static_cast<float>(bb.maxY) },
+        { static_cast<float>(bb.minX), static_cast<float>(bb.maxY) }
+    };
+    const auto ratioOf = [](const ComponentReanchorResult& r) {
+        return r.matches > 0 ? static_cast<double>(r.inliers) / r.matches : 0.0;
+    };
+    int bestRot = -1;
+    for (int k = 0; k < 4; ++k) {
+        // Rotate the corner ASSIGNMENT (which pcb corner maps to which image
+        // corner) — the quad itself is fixed by the outline. On a non-square
+        // board the two 90° assignments produce a heavily skewed prior whose
+        // estimate simply fails to lock; harmless.
+        std::vector<cv::Point2f> img(4);
+        for (int i = 0; i < 4; ++i) img[i] = imageCorners[(i + k) % 4];
+        Homography prior;
+        prior.setMatrix(cv::getPerspectiveTransform(pcb, img));
+        auto r = estimate(detections, project, prior, activeLayer, {}, params);
+        if (r.found && (!best.found || ratioOf(r) > ratioOf(best))) {
+            best = std::move(r);
+            bestRot = k;
+        }
+    }
+    if (best.found) {
+        best.message = "orientation vote (rot " + std::to_string(bestRot * 90) +
+                       "°): " + best.message;
+        spdlog::info("[comp-reanchor] {}", best.message);
+    } else {
+        best.message = "orientation vote: no rotation locked on the "
+                       + std::string(constellationName(params.constellation));
+        spdlog::info("[comp-reanchor] {}", best.message);
+    }
+    return best;
 }
 
 } // namespace ibom::overlay

@@ -490,6 +490,69 @@ TEST_CASE("bootstrap refuses a perfectly symmetric lattice as ambiguous", "[rean
     REQUIRE(r.message.find("ambiguous") != std::string::npos);
 }
 
+TEST_CASE("orientation vote fixes the corner assignment the outline can't", "[reanchor]")
+{
+    // Field pipeline "contour + pads" (suite 142): BoardLocator reliably finds
+    // the board QUAD but its edge-agreement pick of the orientation is weakly
+    // discriminative — simulate it handing over the right quad with the WRONG
+    // corner assignment (off by one = 90°). The pad vote must recover the true
+    // one and lock with strong support.
+    std::vector<cv::Point2f> centers, padPts;
+    const ibom::IBomProject project = makeBareProject(centers, padPts);
+
+    // Physical scene: board rotated 90° on the bench, field scale.
+    const double s = 4.4, th = 90.0 * CV_PI / 180.0;
+    const auto gt = [&](cv::Point2f p) {
+        return cv::Point2f(
+            static_cast<float>(s * std::cos(th) * p.x - s * std::sin(th) * p.y + 480.0),
+            static_cast<float>(s * std::sin(th) * p.x + s * std::cos(th) * p.y + 60.0));
+    };
+    std::mt19937 rng(53);
+    std::normal_distribution<float> noise(0.f, 0.5f);
+    std::vector<ai::Detection> dets;
+    for (size_t i = 0; i < padPts.size(); ++i) {
+        if (i % 10 == 9) continue;  // 10% dropouts
+        cv::Point2f q = gt(padPts[i]);
+        q.x += noise(rng);
+        q.y += noise(rng);
+        dets.push_back(detectionAt(q));
+    }
+
+    // The located quad: exact corner positions, assignment shifted by one —
+    // i.e. the outline said "rot 0" while the truth is one step away.
+    const auto& bb = project.boardInfo.boardBBox;
+    const std::vector<cv::Point2f> pcb = {
+        { static_cast<float>(bb.minX), static_cast<float>(bb.minY) },
+        { static_cast<float>(bb.maxX), static_cast<float>(bb.minY) },
+        { static_cast<float>(bb.maxX), static_cast<float>(bb.maxY) },
+        { static_cast<float>(bb.minX), static_cast<float>(bb.maxY) }
+    };
+    std::vector<cv::Point2f> located(4);
+    for (int i = 0; i < 4; ++i) located[i] = gt(pcb[(i + 1) % 4]);
+
+    ComponentReanchor::Params p;
+    p.fitSimilarity = true;
+    p.constellation = ComponentReanchor::Constellation::Pads;
+    p.matchGateMm   = 5.0;
+    p.scalePxPerMm  = s;
+
+    const auto r = ComponentReanchor::estimateOrientations(
+        dets, project, located, ibom::Layer::Front, p);
+    INFO(r.message);
+    REQUIRE(r.found);
+    REQUIRE(r.message.find("orientation vote") != std::string::npos);
+    REQUIRE(r.inliers >= static_cast<int>(0.7 * r.matches));
+
+    std::vector<cv::Point2f> proj;
+    cv::perspectiveTransform(centers, proj, r.homography);
+    std::vector<double> errs;
+    for (size_t i = 0; i < centers.size(); ++i)
+        errs.push_back(cv::norm(proj[i] - gt(centers[i])));
+    std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
+    INFO("median reprojection vs ground truth = " << errs[errs.size() / 2] << " px");
+    REQUIRE(errs[errs.size() / 2] < 3.0);
+}
+
 TEST_CASE("bootstrap rejects an unrelated constellation", "[reanchor]")
 {
     std::vector<cv::Point2f> centers;

@@ -1547,8 +1547,47 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
             spdlog::info("Auto-Align: component bootstrap ({}) didn't lock ({}), "
                          "falling back to board outline", detSrc, boot.message);
         }
-        return overlay::BoardLocator::locate(colorCopy, depthCopy, *project,
-                                             expectedPixelsPerMm, activeLayer);
+        auto blr = overlay::BoardLocator::locate(colorCopy, depthCopy, *project,
+                                                 expectedPixelsPerMm, activeLayer);
+        if (blr.found && !detector && blr.imageCorners.size() == 4) {
+            // Contour + pads fusion (field insight, suite 142): the located
+            // outline reliably fixes position, scale and the board SURFACE —
+            // mask detections to it (+20 % margin ≈ 1-2 cm) — while the PADS
+            // decide the orientation the edge-agreement score can't (weakly
+            // discriminative on a busy PCB). Four discrete hypotheses with a
+            // known surface beat the open-ended prior-free bootstrap.
+            const auto& bb = project->boardInfo.boardBBox;
+            const std::vector<cv::Point2f> pcb = {
+                {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+                {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+                {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+                {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}
+            };
+            overlay::Homography quadPose;
+            quadPose.setMatrix(cv::getPerspectiveTransform(pcb, blr.imageCorners));
+            std::vector<ai::Detection> padsOnBoard =
+                overlay::detectPadBlobs(colorCopy, expectedPixelsPerMm);
+            padsOnBoard = filterToBoardRegion(padsOnBoard, *project, quadPose, 0.2);
+            overlay::ComponentReanchor::Params rpo;
+            rpo.fitSimilarity = true;
+            rpo.constellation = overlay::ComponentReanchor::Constellation::Pads;
+            rpo.matchGateMm   = 5.0;
+            rpo.scalePxPerMm  = expectedPixelsPerMm;
+            const auto vote = overlay::ComponentReanchor::estimateOrientations(
+                padsOnBoard, *project, blr.imageCorners, activeLayer, rpo);
+            if (vote.found) {
+                blr.method  += "+pads";
+                // Honest confidence: pad-support ratio of the winning rotation.
+                blr.score    = vote.matches > 0
+                    ? std::min(1.0, static_cast<double>(vote.inliers) / vote.matches)
+                    : 0.0;
+                blr.message  = vote.message;
+                cv::perspectiveTransform(pcb, blr.imageCorners, vote.homography);
+                dumpReanchorDebug(colorCopy, {}, padsOnBoard, *project,
+                                  activeLayer, vote);
+            }
+        }
+        return blr;
     }));
 }
 

@@ -131,7 +131,19 @@ s'aligne toute seule » dès qu'un détecteur est disponible.
 
 ---
 
-### 2.3 Choix du rayon de gating
+### 2.3 `estimateOrientations()` — fusion contour + pads (suite 142)
+
+Quand `BoardLocator` a localisé le **quad** de la carte (fiable : le contour
+verrouille presque toujours), la pose est connue **à l'orientation près** — un
+quad est 4-fois ambigu et l'edge-agreement qui départage est peu discriminant
+sur un PCB chargé. `estimateOrientations()` essaie les **4 assignations de
+coins** comme priors d'`estimate()` et garde celle au meilleur ratio de
+support : 4 hypothèses discrètes à surface connue battent le bootstrap
+prior-free ouvert. Le caller masque d'abord les détections au quad + 20 % de
+marge (`filterToBoardRegion`) — la « surface + 1-2 cm ». C'est le chemin
+`contour+pads` de l'Auto-Align carte nue.
+
+### 2.4 Choix du rayon de gating
 
 Le gate de matching peut être **physique** : quand `matchGateMm` et
 `scalePxPerMm` sont fournis, le rayon devient `clamp(mm × échelle, 15, 90) px`

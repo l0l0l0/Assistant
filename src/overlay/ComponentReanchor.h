@@ -196,6 +196,28 @@ public:
         const ibom::IBomProject& project,
         ibom::Layer activeLayer,
         double scalePriorPxPerMm = 0.0);
+
+    /// Orientation vote on a LOCATED board quad (field insight, suite 142):
+    /// a board outline (BoardLocator contour/depth) reliably fixes position,
+    /// scale and the board surface — but a quad is 4-fold ambiguous in
+    /// orientation, and the edge-agreement score that picks one is weakly
+    /// discriminative on a busy PCB. The constellation decides instead: build
+    /// the pose for each of the 4 corner assignments and keep the one whose
+    /// support (inlier ratio) wins. Four discrete hypotheses with a known
+    /// surface beat an open-ended prior-free search — this is what makes
+    /// "contour + pads" the robust bare-board path.
+    ///
+    /// @param imageCorners  The located quad, ordered to match the PCB bbox
+    ///                      corners {TL, TR, BR, BL} under SOME orientation
+    ///                      guess (BoardLocateResult::imageCorners as-is).
+    /// Returns the best-supported estimate() result; message is prefixed with
+    /// the winning rotation.
+    static ComponentReanchorResult estimateOrientations(
+        const std::vector<ai::Detection>& detections,
+        const ibom::IBomProject& project,
+        const std::vector<cv::Point2f>& imageCorners,
+        ibom::Layer activeLayer,
+        const Params& params);
 };
 
 } // namespace ibom::overlay

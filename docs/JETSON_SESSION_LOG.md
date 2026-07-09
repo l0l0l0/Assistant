@@ -29,6 +29,14 @@
 
 ---
 
+## État actuel — au 2026-07-09 (Fusion contour + pads : vote d'orientation — idée utilisateur)
+
+> **2026-07-09 (suite 142)** : l'utilisateur propose l'architecture juste — « une fois qu'on est sûr d'avoir détecté la carte, on connaît la surface à utiliser (+1-2 cm) ; il faut être sûr de l'orientation de l'iBOM par rapport à la carte ». Ses logs la valident : **le contour verrouille à chaque essai** (scores 0.59-0.72) mais son edge-agreement choisit mal l'orientation (« weakly discriminative on a busy PCB », commentaire du code). **Fusion implémentée** :
+> - **`ComponentReanchor::estimateOrientations`** (nouveau, unit-testé) : sur le quad localisé (`BoardLocateResult::imageCorners`, convention {TL,TR,BR,BL}), essaie les **4 assignations de coins** (0/90/180/270°) comme priors d'`estimate()` et garde celle au meilleur ratio de support. 4 hypothèses discrètes à surface connue ≫ bootstrap prior-free ouvert. Sur carte non-carrée, les assignations 90/270 donnent un prior distordu qui ne lock pas — inoffensif.
+> - **`autoAlignBoard` fallback contour** : quand BoardLocator trouve le quad (sans modèle), détection de pads → masque au quad+20 % (`filterToBoardRegion` — la « surface +1-2 cm » de l'utilisateur) → vote → si lock, la pose votée **remplace** l'assignation du contour, `method = "contour+pads"`, score = ratio de pads (honnête), dump écrit. Sinon comportement contour inchangé.
+> - **Test** (`test_component_reanchor`, +1 cas) : quad exact mais assignation décalée d'un cran (comme si l'edge-agreement s'était trompé), carte tournée 90°, 10 % dropouts → le vote choisit rot 270° et lock à **54/54 pads (100 %), médiane 0,59 px**. **9/9 cibles PASS.**
+> - Attendu terrain : le chemin `Auto-Align succeeded via contour (score 0.6-0.7)` devient `via contour+pads` avec un score-ratio élevé et **la bonne orientation garantie par les pads** — le cas « overlay tourné à 90/180° » ne doit plus exister quand le contour a trouvé la carte. Fichiers : `src/overlay/ComponentReanchor.{h,cpp}`, `src/app/Application.cpp`, `tests/test_component_reanchor.cpp`, docs. ⚠️ Application.cpp non compilé ici (item 8).
+
 ## État actuel — au 2026-07-09 (Masque région-carte + dump visible — premières vraies images terrain)
 
 > **2026-07-09 (suite 141)** : **premières images de debug reçues** (le dump marchait, l'utilisateur regardait `/data` au lieu de `~/Assistant-git/data`). Verdict sur faits : le vert (overlay iBOM projeté) tombe **sur la carte** — la pose n'est plus délirante, le détecteur de pads magenta contribue. MAIS la carte n'occupe que ~40 % du cadre et les 60 % de fond (bois, tapis, **gros reflet en bas-gauche**) génèrent une masse de fausses détections (rouges MSER géantes + magenta) qui plafonnent le ratio à ~0.6.
