@@ -89,16 +89,19 @@ namespace {
 /// constellation projected under the RESULT pose in GREEN, result message on
 /// top — so a field misalignment is diagnosed from what the algorithm actually
 /// saw instead of guesses over screenshots. Rolling window of 10 files under
-/// dataDir()/debug/, written only at debug log verbosity (the config's
-/// verbose-logging switch the user already runs with). Called from the
-/// QtConcurrent worker threads — touches only its arguments and the disk.
+/// dataDir()/debug/. Written UNCONDITIONALLY: it's bounded (10 files) and only
+/// fires on an alignment action (user click or the slow periodic re-anchor),
+/// so the cost is negligible — and gating it on log verbosity proved too
+/// fragile to rely on when a field bug needs the evidence (an earlier version
+/// keyed off default_logger()->level(), which the verbose switch doesn't
+/// necessarily move). Called from the QtConcurrent worker threads — touches
+/// only its arguments and the disk.
 void dumpReanchorDebug(const cv::Mat& frame,
                        const std::vector<ai::Detection>& detections,
                        const IBomProject& project,
                        Layer layer,
                        const overlay::ComponentReanchorResult& res)
 {
-    if (spdlog::default_logger()->level() > spdlog::level::debug) return;
     try {
         cv::Mat vis = frame.clone();
         for (const auto& d : detections) {
@@ -220,6 +223,12 @@ bool Application::initialize()
                      utils::Logger::logFilePath());
     }
     m_mainWindow->setVerboseLoggingChecked(m_config->verboseLogging());
+
+    // Announce the re-anchor debug-dump path (ERREUR #59): every Auto-Align /
+    // periodic re-anchor drops an annotated frame here, so a field
+    // misalignment is diagnosed from what the detector saw, not screenshots.
+    spdlog::info("Re-anchor debug frames: {}",
+                 (utils::dataDir() / "debug").string());
 
     // Reflect persisted AI settings in the control panel (before initializeAI
     // so the spinner already shows the threshold the detector will use).
