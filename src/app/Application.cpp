@@ -142,12 +142,21 @@ void dumpReanchorDebug(const cv::Mat& frame,
         namespace fs = std::filesystem;
         const fs::path dir = utils::dataDir() / "debug";
         fs::create_directories(dir);
+        const int n = counter++;
         const fs::path file =
-            dir / ("reanchor_" + std::to_string(counter++ % 10) + ".jpg");
-        cv::imwrite(file.string(), vis);
-        spdlog::debug("[comp-reanchor] debug frame written: {}", file.string());
+            dir / ("reanchor_" + std::to_string(n % 10) + ".jpg");
+        if (!cv::imwrite(file.string(), vis))
+            throw std::runtime_error("cv::imwrite returned false for " + file.string());
+        // First write logged at INFO so the exact path is visible in the
+        // console without verbose mode — the field diagnostic needs it.
+        if (n == 0)
+            spdlog::info("[comp-reanchor] debug frames writing to {}", dir.string());
+        else
+            spdlog::debug("[comp-reanchor] debug frame written: {}", file.string());
     } catch (const std::exception& e) {
-        spdlog::debug("[comp-reanchor] debug dump failed: {}", e.what());
+        // WARNING, not debug: a silently-failing dump is exactly what wasted a
+        // field session looking for images that were never written.
+        spdlog::warn("[comp-reanchor] debug dump FAILED: {}", e.what());
     }
 }
 
