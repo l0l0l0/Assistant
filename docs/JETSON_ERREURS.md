@@ -15,6 +15,7 @@
 
 | # | Date | Composant | Statut | Titre court |
 |---|------|-----------|--------|-------------|
+| 59 | 2026-07-09 | BlobComponentDetector / Application — scène sombre | ✅ RÉSOLU (à valider terrain) | [2e retour terrain : pose fausse « cohérente » à 200/292 pads — en scène sombre les blobs MSER sont du **bruit taille-de-pad** et les vrais pads ratent la détection ; fix : détecteur de pads dédié (top-hat brillant-sur-masque) + dump de debug annoté](#erreur-59--scene-sombre--blobs-mser--bruit--detecteur-de-pads-dedie) |
 | 58 | 2026-07-08 | ComponentReanchor / ReanchorGate — alias de réseau | ✅ RÉSOLU (à valider terrain) | [Retour terrain du fix #57 : le réseau de pads répétitif **aliase** — locks pads à 44-65 % de ratio sur des poses décalées, et le « clack » (un alias **répétable** passe la confirmation 2-ticks et éjecte une pose parfaite de 185 px) ; fix : seeding déterministe par ancres + marge d'ambiguïté + cap de correction silencieuse + filtre 6 mm](#erreur-58--alias-de-reseau-de-pads--seeding-deterministe--cap-anti-clack) |
 | 57 | 2026-07-08 | ComponentReanchor / Application — Auto-Align blobs | ✅ RÉSOLU (à valider terrain) | [Auto-Align verrouille une pose fausse sur **carte nue** avec « score 1.00 » — les blobs sont des PADS, pas des corps de composants ; le score `0.4+inliers/30` sature à 1.00 et les gates absolus laissent passer 40/117 = 34 % d'inliers ; fix : constellation de pads + gate de ratio + score honnête + gate de matching en mm](#erreur-57--auto-align-carte-nue--pose-aliasee-acceptee-a-score-100) |
 | 56 | 2026-07-02 | ComponentReanchor / IBomParser — Component::position | ✅ RÉSOLU | [`bootstrap: degenerate component layout` — `Component::position` reste (0,0) quand l'iBOM n'a pas de champ `center` → tout le re-anchor composant (bootstrap ET estimate, modèle compris) cassé ; fix : utiliser le centre de la bbox](#erreur-56--componentposition-non-remplie--re-anchor-composant-degenere) |
@@ -1389,6 +1390,28 @@ Renommé les deux variables en `cornerTL`/`cornerTR` dans `autoAlignBoard()`.
 
 ### Leçon
 Ne jamais nommer une variable locale `tr` (ou tout identifiant Qt courant comme `tr`/`qDebug`/etc.) dans une méthode `QObject`, même si elle semble hors de portée du prochain appel `tr(...)` — un refactor ultérieur peut facilement élargir la portée sans qu'on s'en rende compte. Préférer un nom descriptif (`cornerTL`, `topRight`, …) systématiquement.
+
+## ERREUR 59 — Scène sombre : blobs MSER = bruit → détecteur de pads dédié
+
+**Date :** 2026-07-09 (3e itération de la série #57/#58, même carte)
+**Composant :** `src/overlay/BlobComponentDetector.{h,cpp}` + `src/app/Application.cpp`
+**Statut :** ✅ RÉSOLU (unit-testé ici ; terrain à valider avec les dumps)
+
+### Symptôme
+Après les fixes #57/#58, en scène **sombre** : locks pads à 44-65 % de ratio sur des poses fausses (`200/292 pads, median 1,82px` — overlay « mal tourné, ne correspond à aucun pad »), refus `ambiguous` fréquents, et comportement en loterie d'une frame à l'autre. Cap de 300 détections systématiquement saturé.
+
+### Cause
+**200 « inliers » cohérents à 1,8 px sur une pose fausse = les détections ne sont pas les pads.** MSER + CLAHE sur une image sombre et bruitée fabrique des centaines de blobs de bruit **taille-de-pad** (qui passent tous les filtres géométriques), pendant que les vrais pads — peu contrastés en MSER — ratent la détection. Le consensus mesure alors des coïncidences de densité entre du bruit et un réseau de pads dense, pas des correspondances. Aucun raffinement de la registration (gates #57, seeding/ambiguïté/cap #58) ne peut compenser des points d'entrée qui n'existent pas physiquement. Diagnostiqué après **deux mauvaises lectures de captures d'écran** — d'où le dump de debug, pour ne plus jamais deviner.
+
+### Solution appliquée ✅
+1. **`detectPadBlobs`** (nouveau, `BlobComponentDetector`) : détecteur **physiquement fondé** pour carte nue — les pads étamés sont *brillants sur masque plus sombre*. White top-hat (réponse relative au **fond local** → tient en scène sombre, aplatit masque/table/gradients) → Otsu avec plancher de contraste absolu (une frame vide bruitée ne rend rien — Otsu seul splitte le bruit) → composantes connexes filtrées taille pad (0,3-6 mm via prior d'échelle), aspect ≤ 5, solidité ≥ 0,35. Limites connues documentées : glyphes de sérigraphie et vias passent (FP tolérés par le consensus), pads à ~kernel/2 du bord peuvent fusionner avec la bande de contour.
+2. **Chemins pads branchés dessus** (`Application`, les 2 workers) : la tentative constellation-pads utilise `detectPadBlobs` au lieu du MSER filtré 6 mm ; MSER reste pour la tentative corps-de-composants (carte peuplée).
+3. **Dump de debug enrichi** : détections MSER en rouge, détections pad en **magenta**, pads projetés en vert — les deux mondes visibles sur la même image.
+
+Tests (`test_blob_detector`, +3 cas) : carte nue **sombre** synthétique (pads à 110 sur masque ~50) → ≥ 80 % des pads détectés, ≤ 3 FP ; frame vide bruitée → ≤ 8 détections ; bout-en-bout pads → lock à ratio ≥ 0,75 et médiane < 3 px vs pads dessinés. 9/9 cibles PASS.
+
+### Leçon
+Quand les statistiques d'un fit sont excellentes et le résultat visiblement faux, ce ne sont pas les maths qu'il faut retoucher : ce sont les **données d'entrée** qu'il faut aller regarder (garbage in, consensus out). Et un détecteur générique « features stables » (MSER) n'est pas un détecteur de l'objet qu'on cherche — exploiter la propriété physique discriminante (pads = brillants) bat l'accumulation de garde-fous géométriques en aval. Enfin : instrumenter (dump annoté) avant de théoriser — deux captures d'écran mal lues ont coûté une itération complète.
 
 ## ERREUR 58 — Alias de réseau de pads : seeding déterministe + cap anti-« clack »
 

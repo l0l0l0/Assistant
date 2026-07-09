@@ -23,9 +23,17 @@ jamais regarder le contour de la carte**. Il met en correspondance :
 Les détections viennent :
 
 - d'un **modèle YOLO** si `models/` en contient un (`detector->detect()`), ou
-- de **blobs CV classiques** sinon (`overlay::detectComponentBlobs()`,
-  `Application.cpp:1628`) — l'alignement par composants fonctionne donc avec un
-  dossier `models/` vide.
+- sans modèle, de **deux détecteurs CV classiques** complémentaires
+  (`BlobComponentDetector`) : `detectComponentBlobs()` (MSER — corps de
+  composants, carte peuplée) pour la tentative constellation-composants, et
+  `detectPadBlobs()` (top-hat brillant-sur-masque, ERREUR #59 — pads étamés,
+  carte nue, tient en scène sombre) pour la tentative constellation-pads.
+  L'alignement fonctionne donc avec un dossier `models/` vide.
+
+Chaque bootstrap écrit une image annotée sous `$IBOM_DATA_DIR/debug/`
+(`dumpReanchorDebug`) : détections MSER en rouge, détections pad en magenta,
+pads projetés sous la pose résultat en vert — le diagnostic terrain se fait
+sur ces images, pas sur des captures d'écran.
 
 C'est le pendant de `BoardLocator` : il marche **précisément là où celui-ci
 échoue** — carte en gros plan qui remplit tout le cadre (microscope / D405), où

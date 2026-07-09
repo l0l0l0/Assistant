@@ -98,6 +98,7 @@ namespace {
 /// only its arguments and the disk.
 void dumpReanchorDebug(const cv::Mat& frame,
                        const std::vector<ai::Detection>& detections,
+                       const std::vector<ai::Detection>& padDetections,
                        const IBomProject& project,
                        Layer layer,
                        const overlay::ComponentReanchorResult& res)
@@ -109,6 +110,14 @@ void dumpReanchorDebug(const cv::Mat& frame,
                               static_cast<int>(d.bbox.y + d.bbox.height * 0.5f));
             const int r = std::max(3, static_cast<int>(d.bbox.width * 0.5f));
             cv::circle(vis, c, r, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
+        }
+        // Dedicated pad detections (bare-board path) in MAGENTA, so the dump
+        // shows both what MSER saw and what the pad detector saw.
+        for (const auto& d : padDetections) {
+            const cv::Point c(static_cast<int>(d.bbox.x + d.bbox.width * 0.5f),
+                              static_cast<int>(d.bbox.y + d.bbox.height * 0.5f));
+            const int r = std::max(2, static_cast<int>(d.bbox.width * 0.5f));
+            cv::circle(vis, c, r, cv::Scalar(255, 0, 255), 1, cv::LINE_AA);
         }
         if (res.found && !res.homography.empty()) {
             std::vector<cv::Point2f> pcb;
@@ -1443,25 +1452,16 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
             if (!detector && compDets.size() > 300) compDets.resize(300);
             auto boot = overlay::ComponentReanchor::bootstrap(
                 compDets, *project, activeLayer, expectedPixelsPerMm, rp);
+            std::vector<ai::Detection> padDets;
             if (detector == nullptr) {
                 // Model-free blobs on a bare/partially populated board are
                 // the shiny PADS, not component bodies — matching them against
                 // component centers is a constellation coincidence that
                 // aliases (ERREUR #57: 40/117 inliers applied as score 1.00).
-                // Try the pad constellation too, keep the better-supported
-                // fit. Pads are small: drop anything over 6 mm (wood grain,
-                // shadows, shields — junk that both pollutes the matching and
-                // evicts real pads at the cap, ERREUR #58).
-                std::vector<ai::Detection> padDets;
-                padDets.reserve(detections.size());
-                for (const auto& d : detections) {
-                    if (expectedPixelsPerMm > 0.0 &&
-                        std::max(d.bbox.width, d.bbox.height) >
-                            6.0 * expectedPixelsPerMm)
-                        continue;
-                    padDets.push_back(d);
-                }
-                if (padDets.size() > 400) padDets.resize(400);
+                // The pad attempt uses the DEDICATED pad detector (bright-on-
+                // mask top-hat, ERREUR #59) — MSER in a dim scene yields
+                // pad-sized noise blobs while the actual pads go undetected.
+                padDets = overlay::detectPadBlobs(colorCopy, expectedPixelsPerMm);
                 overlay::ComponentReanchor::Params rpPads = rp;
                 rpPads.constellation =
                     overlay::ComponentReanchor::Constellation::Pads;
@@ -1474,8 +1474,9 @@ void Application::autoAlignBoard(bool silent, bool isRetry)
                 if (bootPads.found && (!boot.found || ratio(bootPads) > ratio(boot)))
                     boot = bootPads;
             }
-            // Full 600-blob set on purpose: junk must be VISIBLE in the dump.
-            dumpReanchorDebug(colorCopy, detections, *project, activeLayer, boot);
+            // Full detection sets on purpose: junk must be VISIBLE in the dump.
+            dumpReanchorDebug(colorCopy, detections, padDets, *project,
+                              activeLayer, boot);
             if (boot.found) {
                 overlay::BoardLocateResult blr;
                 blr.found  = true;
@@ -1733,16 +1734,10 @@ void Application::componentReanchor(bool silent)
         if (!detector && compDets.size() > 300) compDets.resize(300);
         std::vector<ai::Detection> padDets;
         if (!detector) {
-            // Pad attempt: pads are small — drop blobs over 6 mm (wood grain,
-            // shadows, shields) before the cap (ERREUR #58).
-            padDets.reserve(detections.size());
-            for (const auto& d : detections) {
-                if (scalePrior > 0.0 &&
-                    std::max(d.bbox.width, d.bbox.height) > 6.0 * scalePrior)
-                    continue;
-                padDets.push_back(d);
-            }
-            if (padDets.size() > 400) padDets.resize(400);
+            // Pad attempt: DEDICATED bright-on-mask pad detector (ERREUR #59)
+            // — physically grounded, holds up in dim scenes where MSER yields
+            // pad-sized noise blobs while the actual pads go undetected.
+            padDets = overlay::detectPadBlobs(colorCopy, scalePrior);
         }
         // Blob centers are noisier than model detections: fit a 4-DOF
         // similarity so the pose is repeatable at the board corners — the
@@ -1786,8 +1781,9 @@ void Application::componentReanchor(bool silent)
                     res = bootPads;
             }
         }
-        // Full 600-blob set on purpose: junk must be VISIBLE in the dump.
-        dumpReanchorDebug(colorCopy, detections, *project, activeLayer, res);
+        // Full detection sets on purpose: junk must be VISIBLE in the dump.
+        dumpReanchorDebug(colorCopy, detections, padDets, *project,
+                          activeLayer, res);
         return res;
     }));
 }
