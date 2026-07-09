@@ -29,6 +29,15 @@
 
 ---
 
+## État actuel — au 2026-07-09 (Masque région-carte + dump visible — premières vraies images terrain)
+
+> **2026-07-09 (suite 141)** : **premières images de debug reçues** (le dump marchait, l'utilisateur regardait `/data` au lieu de `~/Assistant-git/data`). Verdict sur faits : le vert (overlay iBOM projeté) tombe **sur la carte** — la pose n'est plus délirante, le détecteur de pads magenta contribue. MAIS la carte n'occupe que ~40 % du cadre et les 60 % de fond (bois, tapis, **gros reflet en bas-gauche**) génèrent une masse de fausses détections (rouges MSER géantes + magenta) qui plafonnent le ratio à ~0.6.
+> - **Fix : `filterToBoardRegion`** (`Application.cpp`) — le re-anchor périodique a toujours une pose ; on projette le bbox carte (+25 % marge) et on jette toute détection hors-quad avant estimate/bootstrap. `estimate()` gate déjà par-pad à 5 mm (le junk hors-carte y était déjà exclu), mais ça **nettoie le fallback bootstrap** (prior-free, sinon pollué) → moins d'alias, moins de refus `ambiguous`. Marge projetée en mm→image donc suit rotation/perspective.
+> - **Dump rendu visible** (déjà poussé `f854851`) : 1re écriture en INFO (`debug frames writing to <path>`), échec en WARNING, `imwrite` false lève.
+> - Diagnostic visible dans les 2 images : `re-anchored on 71/114` / `67/114` **sans** préfixe `bootstrap(` → ce sont des résultats `estimate()` (pose OK, ratio 0.62). Le masque cible surtout les frames où estimate échoue → bootstrap.
+> - **Levier physique n°1 signalé à l'utilisateur** : tuer le reflet bas-gauche (aimant à détections) + cadrer la carte plus serrée (moins de fond). Gratuit, plus efficace que tout tuning.
+> - Tests : 9/9 PASS (Application.cpp non couvert CI). Fichiers : `src/app/Application.cpp`, docs.
+
 ## État actuel — au 2026-07-09 (Détecteur de pads dédié — ERREUR #59)
 
 > **2026-07-09 (suite 140)** : implémentation validée par l'utilisateur (« go ») du **détecteur de pads dédié** — voir [ERREUR #59](JETSON_ERREURS.md) pour le diagnostic complet (scène sombre → blobs MSER = bruit taille-de-pad, vrais pads non détectés → poses fausses « cohérentes » à 200/292).

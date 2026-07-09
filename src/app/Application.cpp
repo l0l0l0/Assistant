@@ -160,6 +160,41 @@ void dumpReanchorDebug(const cv::Mat& frame,
     }
 }
 
+/// Keep only detections that fall inside the board region — the board quad
+/// projected under a KNOWN pose, expanded by a margin (ERREUR #59): the field
+/// scene is ~60 % background (wood, mat, and a large glare reflection), a
+/// detection magnet that pollutes the prior-free bootstrap fallback and breeds
+/// aliases. Only usable when a pose exists (the periodic re-anchor always has
+/// one); the initial Auto-Align has no pose to mask by.
+std::vector<ai::Detection> filterToBoardRegion(
+    const std::vector<ai::Detection>& dets,
+    const IBomProject& project,
+    const overlay::Homography& pose,
+    double marginFrac)
+{
+    if (!pose.isValid()) return dets;
+    const auto& bb = project.boardInfo.boardBBox;
+    // Corners expanded outward by the margin, in PCB mm, then projected to
+    // image — so the polygon follows any rotation/perspective of the pose.
+    const double mx = (bb.maxX - bb.minX) * marginFrac;
+    const double my = (bb.maxY - bb.minY) * marginFrac;
+    std::vector<cv::Point2f> quad;
+    for (const auto& c : { cv::Point2f(bb.minX - mx, bb.minY - my),
+                           cv::Point2f(bb.maxX + mx, bb.minY - my),
+                           cv::Point2f(bb.maxX + mx, bb.maxY + my),
+                           cv::Point2f(bb.minX - mx, bb.maxY + my) })
+        quad.push_back(pose.pcbToImage(c));
+    std::vector<ai::Detection> kept;
+    kept.reserve(dets.size());
+    for (const auto& d : dets) {
+        const cv::Point2f ctr(d.bbox.x + d.bbox.width * 0.5f,
+                              d.bbox.y + d.bbox.height * 0.5f);
+        if (cv::pointPolygonTest(quad, ctr, false) >= 0)
+            kept.push_back(d);
+    }
+    return kept;
+}
+
 } // namespace
 
 Application::Application(QApplication& qapp)
@@ -1740,7 +1775,6 @@ void Application::componentReanchor(bool silent)
                      : overlay::detectComponentBlobs(colorCopy, scalePrior,
                                                      /*maxDetections=*/600);
         std::vector<ai::Detection> compDets = detections;
-        if (!detector && compDets.size() > 300) compDets.resize(300);
         std::vector<ai::Detection> padDets;
         if (!detector) {
             // Pad attempt: DEDICATED bright-on-mask pad detector (ERREUR #59)
@@ -1748,6 +1782,16 @@ void Application::componentReanchor(bool silent)
             // pad-sized noise blobs while the actual pads go undetected.
             padDets = overlay::detectPadBlobs(colorCopy, scalePrior);
         }
+        // Board-region mask (ERREUR #59): the periodic re-anchor always has a
+        // prior pose — drop every detection outside the projected board (+25 %
+        // margin) so the wood/mat/glare junk that fills ~60 % of the frame
+        // can't feed the bootstrap fallback or breed aliases. estimate() gates
+        // per-pad anyway; this is what cleans the prior-free fallback.
+        if (priorPose.isValid()) {
+            compDets = filterToBoardRegion(compDets, *project, priorPose, 0.25);
+            padDets  = filterToBoardRegion(padDets,  *project, priorPose, 0.25);
+        }
+        if (!detector && compDets.size() > 300) compDets.resize(300);
         // Blob centers are noisier than model detections: fit a 4-DOF
         // similarity so the pose is repeatable at the board corners — the
         // periodic drift gate measures there, and the 8-DOF fit's noise-fitted
