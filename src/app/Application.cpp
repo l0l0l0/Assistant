@@ -245,6 +245,10 @@ void Application::setActiveLayer(ibom::Layer layer)
     if (auto* bp = m_mainWindow ? m_mainWindow->bomPanel() : nullptr)
         bp->setLayerFilterIndex(back ? 2 : 1);
 
+    // The PCB Map draws only the active side's components.
+    if (m_mainWindow && m_mainWindow->boardMinimap())
+        m_mainWindow->boardMinimap()->setActiveLayer(layer);
+
     // Dataset capture labels the active side's components.
     if (m_datasetCreator && m_ibomProject) {
         QMetaObject::invokeMethod(m_datasetCreator, "setProject", Qt::QueuedConnection,
@@ -1858,6 +1862,11 @@ void Application::connectSignals()
                 m_lastScaleUpdateMs = scaleNowMs;
                 updateDynamicScale();
             }
+            // FOV colour (tracking health) + inspection-coverage trail, then
+            // repaint. accumulateCoverage() is throttled internally and works
+            // even while the map is hidden behind another dock tab.
+            m_mainWindow->boardMinimap()->setTrackingQuality(inliers, reprojErr);
+            m_mainWindow->boardMinimap()->accumulateCoverage();
             m_mainWindow->boardMinimap()->update();
             // Tracking-quality stream (visible only with verbose logging on).
             spdlog::debug("[track] homography applied: inliers={} reprojErr={:.2f}px scale={:.3f}px/mm",
@@ -1875,6 +1884,9 @@ void Application::connectSignals()
             m_lastTrackingState = state;  // read by the loss-recovery poll
             if (!m_liveMode) return;
             using S = overlay::TrackingWorker::State;
+            // FOV rectangle turns red on the PCB Map while tracking is lost.
+            m_mainWindow->boardMinimap()->setTrackingLost(
+                static_cast<S>(state) == S::Lost);
             switch (static_cast<S>(state)) {
                 case S::Locked:
                     m_mainWindow->updateStatusMessage(tr("Tracking: locked"));
@@ -2451,8 +2463,10 @@ void Application::connectControlSignals()
             this, calibHandler);
 
     // ── BOM panel component selection → overlay highlight + 2-comp align ─
-    connect(m_mainWindow->bomPanel(), &gui::BomPanel::componentSelected,
-            this, [this](const std::string& ref) {
+    // Named so the minimap's Ctrl+click (componentPicked) can share it:
+    // BomPanel only emits componentSelected on a real cell click, so a
+    // programmatic highlightComponent() would not re-enter this handler.
+    auto onComponentSelected = [this](const std::string& ref) {
         m_selectedRef = ref;
         m_mainWindow->boardMinimap()->setSelectedRef(ref);
 
@@ -2503,6 +2517,16 @@ void Application::connectControlSignals()
         }
 
         spdlog::info("Component selected: {}", ref);
+    };
+    connect(m_mainWindow->bomPanel(), &gui::BomPanel::componentSelected,
+            this, onComponentSelected);
+
+    // Ctrl+click on the PCB Map picks the component under the cursor — same
+    // behaviour as clicking its BOM row, plus the row scrolls into view.
+    connect(m_mainWindow->boardMinimap(), &gui::BoardMinimap::componentPicked,
+            this, [this, onComponentSelected](const std::string& ref) {
+        if (auto* bp = m_mainWindow->bomPanel()) bp->highlightComponent(ref);
+        onComponentSelected(ref);
     });
 
     // ── FPS tracking timer ──────────────────────────────────────

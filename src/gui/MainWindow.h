@@ -13,6 +13,7 @@
 
 class QStackedWidget;
 class QComboBox;
+class QDialog;
 
 namespace ibom {
 class Application;
@@ -51,6 +52,10 @@ public:
     /// Raise the BOM dock to the front (e.g. when starting a component-based
     /// alignment flow, so the user doesn't have to find the tab manually).
     void showBomPanel();
+
+    /// Open (or raise) the resizable large-map dialog mirroring the PCB Map
+    /// dock. Bound to the M shortcut and the minimap's ⛶ button/double-click.
+    void showLargeMap();
 
     void setDarkMode(bool dark);
     /// Reflect the persisted verbose-logging state in the Dev menu checkmark
@@ -152,6 +157,12 @@ private:
     StatsPanel*       m_statsPanel       = nullptr;
     DatasetPanel*     m_datasetPanel     = nullptr;
     BoardMinimap*     m_boardMinimap     = nullptr;
+    QDockWidget*      m_minimapDock      = nullptr;
+
+    // Large-map view (lazy, mirrors the dock minimap via attachPeer)
+    QDialog*          m_largeMapDialog   = nullptr;
+    BoardMinimap*     m_largeMinimap     = nullptr;
+    QTimer*           m_largeMapTimer    = nullptr;
 
     // Menus
     QMenu* m_recentMenu = nullptr;
@@ -171,6 +182,7 @@ private:
     QAction*  m_actDarkMode   = nullptr;
     QAction*  m_actDepthView  = nullptr;
     QAction*  m_actPointCloud = nullptr;
+    QAction*  m_actLargeMap   = nullptr;
     QComboBox* m_profileCombo = nullptr;
 
     // Status bar widgets

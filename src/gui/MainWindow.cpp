@@ -18,6 +18,8 @@
 
 #include <QComboBox>
 #include <QSignalBlocker>
+#include <QDialog>
+#include <QVBoxLayout>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QApplication>
@@ -282,6 +284,13 @@ void MainWindow::createActions()
         if (on && m_pointCloudView) m_pointCloudView->resetView();
         emit pointCloudToggled(on);
     });
+
+    m_actLargeMap = new QAction(tr("Large PCB Map…"), this);
+    m_actLargeMap->setShortcut(Qt::Key_M);
+    m_actLargeMap->setToolTip(tr("Open the PCB map in a large resizable window "
+                                 "(zoom with the wheel, click to anchor)."));
+    connect(m_actLargeMap, &QAction::triggered, this, &MainWindow::showLargeMap);
+    addAction(m_actLargeMap);  // keep the M shortcut active even if not in a menu
 }
 
 void MainWindow::createMenuBar()
@@ -316,6 +325,7 @@ void MainWindow::createMenuBar()
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(m_actFullscreen);
     viewMenu->addAction(m_actDarkMode);
+    viewMenu->addAction(m_actLargeMap);
 
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
 
@@ -524,15 +534,39 @@ void MainWindow::createDockWidgets()
     tabifyDockWidget(inspDock, datasetDock);
     inspDock->raise();  // inspection remains the default left tab
 
-    // PCB minimap (left, tabified with Inspection/Dataset)
+    // PCB minimap (left, tabified with Inspection/Dataset). No maximum width:
+    // large boards deserve a large map — the dock can be widened, floated
+    // (context menu → detach) or opened as the resizable large view (M).
     m_boardMinimap = new BoardMinimap(this);
-    auto* minimapDock = new QDockWidget(tr("PCB Map"), this);
-    minimapDock->setObjectName("MinimapDock");
-    minimapDock->setWidget(m_boardMinimap);
-    minimapDock->setMinimumWidth(160);
-    minimapDock->setMaximumWidth(360);
-    addDockWidget(Qt::LeftDockWidgetArea, minimapDock);
-    tabifyDockWidget(datasetDock, minimapDock);
+    m_minimapDock = new QDockWidget(tr("PCB Map"), this);
+    m_minimapDock->setObjectName("MinimapDock");
+    m_minimapDock->setWidget(m_boardMinimap);
+    m_minimapDock->setMinimumWidth(160);
+    addDockWidget(Qt::LeftDockWidgetArea, m_minimapDock);
+    tabifyDockWidget(datasetDock, m_minimapDock);
+
+    connect(m_boardMinimap, &BoardMinimap::expandRequested,
+            this, &MainWindow::showLargeMap);
+    connect(m_boardMinimap, &BoardMinimap::floatRequested, this, [this]() {
+        const bool willFloat = !m_minimapDock->isFloating();
+        m_minimapDock->setFloating(willFloat);
+        if (willFloat) {
+            // Size the floating panel to the board's shape, ~55% of the window.
+            int w = int(width() * 0.55);
+            int h = int(height() * 0.55);
+            const double ar = m_boardMinimap->boardAspectRatio();
+            if (ar > 0.05) {
+                h = int(w / ar) + 24;   // +title bar
+                if (h > int(height() * 0.8)) {
+                    h = int(height() * 0.8);
+                    w = int((h - 24) * ar);
+                }
+            }
+            m_minimapDock->resize(w, h);
+        }
+        m_minimapDock->show();
+        m_minimapDock->raise();
+    });
 
     // Inspection wizard (floating, hidden by default)
     m_inspectionWizard = new InspectionWizard(this);
@@ -546,7 +580,61 @@ void MainWindow::createDockWidgets()
         viewMenu->addAction(statsDock->toggleViewAction());
         viewMenu->addAction(inspDock->toggleViewAction());
         viewMenu->addAction(datasetDock->toggleViewAction());
+        viewMenu->addAction(m_minimapDock->toggleViewAction());
     }
+}
+
+void MainWindow::showLargeMap()
+{
+    if (!m_largeMapDialog) {
+        m_largeMapDialog = new QDialog(this);
+        m_largeMapDialog->setWindowTitle(tr("PCB Map — Large View"));
+        m_largeMapDialog->setModal(false);
+        auto* lay = new QVBoxLayout(m_largeMapDialog);
+        lay->setContentsMargins(4, 4, 4, 4);
+
+        m_largeMinimap = new BoardMinimap(m_largeMapDialog);
+        m_largeMinimap->setExpandedMode(true);
+        lay->addWidget(m_largeMinimap);
+
+        // The dock instance mirrors every data update into the large view;
+        // Application keeps talking to the dock instance only.
+        m_boardMinimap->attachPeer(m_largeMinimap);
+
+        // Route interactions through the dock minimap's signals so the
+        // existing Application connections cover the large view too.
+        connect(m_largeMinimap, &BoardMinimap::anchorRequested,
+                m_boardMinimap, &BoardMinimap::anchorRequested);
+        connect(m_largeMinimap, &BoardMinimap::componentPicked,
+                m_boardMinimap, &BoardMinimap::componentPicked);
+
+        // Live refresh while visible: Application pokes update() on the dock
+        // instance only (FOV moves at camera rate), so the large view repaints
+        // on its own clock instead.
+        m_largeMapTimer = new QTimer(m_largeMapDialog);
+        m_largeMapTimer->setInterval(100);
+        connect(m_largeMapTimer, &QTimer::timeout,
+                m_largeMinimap, qOverload<>(&QWidget::update));
+        connect(m_largeMapDialog, &QDialog::finished,
+                this, [this](int) { m_largeMapTimer->stop(); });
+    }
+
+    if (!m_largeMapDialog->isVisible()) {
+        // ~80% of the main window, shaped like the board when known.
+        int w = int(width() * 0.8);
+        int h = int(height() * 0.8);
+        const double ar = m_boardMinimap->boardAspectRatio();
+        if (ar > 0.05) {
+            int hh = int(w / ar) + 40;
+            if (hh <= h) h = hh;
+            else         w = int((h - 40) * ar);
+        }
+        m_largeMapDialog->resize(std::max(w, 400), std::max(h, 300));
+    }
+    m_largeMapDialog->show();
+    m_largeMapDialog->raise();
+    m_largeMapDialog->activateWindow();
+    m_largeMapTimer->start();
 }
 
 // ── Slots ────────────────────────────────────────────────────────
