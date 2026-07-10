@@ -29,6 +29,13 @@
 
 ---
 
+## État actuel — au 2026-07-09 (Menu Dev : vue de debug re-anchor en direct)
+
+> **2026-07-09 (suite 143)** : demande utilisateur — pouvoir activer, depuis le menu Dev, une **vue live** comme les images de debug (au lieu d'aller chercher les JPG sur disque). Approche low-risk : le dump écrit déjà `dataDir()/debug/reanchor_0..9.jpg` en rotation ; la vue affiche simplement la **plus récente**.
+> - **`MainWindow`** : nouvelle action cochable `Dev → Show re-anchor debug view`. Ouvre un `QDialog` (QLabel) qui, via un `QTimer` 400 ms, charge le `reanchor_*.jpg` au mtime le plus récent (`QDir::Time`, early-return si inchangé). Se décoche quand l'utilisateur ferme la fenêtre ; se cache/arrête le timer au untick. Zéro plomberie cross-thread — réutilise les images que le worker écrit déjà (rouge=MSER, magenta=pads, vert=pads projetés sous la pose).
+> - Rafraîchit à la cadence des re-anchor (chaque Auto-Align + chaque tick périodique en live tracking) — exactement quand il y a du nouveau à voir, y compris les tentatives qui échouent/`ambiguous` (le dump est inconditionnel depuis 138b).
+> - ⚠️ **GUI non compilable ici** (pas de Qt dans le conteneur CI) — `MainWindow.{h,cpp}` à valider au build Jetson (item 8). Le reste de la suite : 9/9 PASS. Fichiers : `src/gui/MainWindow.{h,cpp}`, docs.
+
 ## État actuel — au 2026-07-09 (Fusion contour + pads : vote d'orientation — idée utilisateur)
 
 > **2026-07-09 (suite 142)** : l'utilisateur propose l'architecture juste — « une fois qu'on est sûr d'avoir détecté la carte, on connaît la surface à utiliser (+1-2 cm) ; il faut être sûr de l'orientation de l'iBOM par rapport à la carte ». Ses logs la valident : **le contour verrouille à chaque essai** (scores 0.59-0.72) mais son edge-agreement choisit mal l'orientation (« weakly discriminative on a busy PCB », commentaire du code). **Fusion implémentée** :
