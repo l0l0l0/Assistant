@@ -20,6 +20,7 @@
 #include "ibom/IBomData.h"         // ibom::Layer (m_activeLayer — an enum
                                    // class can't be forward-declared here)
 #include "overlay/ReanchorGate.h"  // silent re-anchor decision logic (member)
+#include "features/BoardMosaic.h"  // MosaicGeometry (last-scan metadata member)
 
 namespace ibom {
 
@@ -61,6 +62,7 @@ class Measurement;
 class SnapshotHistory;
 class DatasetCreator;
 class RemoteView;
+class BoardScanner;
 }
 
 namespace exports {
@@ -227,6 +229,22 @@ private:
     void startInspection();
     void onExport(const QString& format);
     void onSnapshot();
+
+    // ── Board scan / golden diff / depth check (FEATURE_PROPOSALS A1-A3) ──
+    /// Start/stop the mosaic scan (Inspection menu). Refuses (and unchecks
+    /// the menu entry) without a loaded iBOM + valid alignment.
+    void onBoardScanToggled(bool on);
+    /// Worker finished a scan: cache the mosaic for golden save/compare.
+    void onScanFinished(QString pngPath, cv::Mat mosaic, cv::Mat writtenMask,
+                        double coverageFrac, double pxPerMm,
+                        double minXmm, double minYmm, int layerInt);
+    void saveGolden();
+    void compareGolden();
+    /// One-shot depth presence check on the cached RealSense depth frame.
+    void runDepthInspection();
+    /// Content hash of the loaded iBOM file (12 hex chars) — the key under
+    /// which per-board data (golden scans) is stored. Empty if unreadable.
+    QString ibomContentHash() const;
 
     QApplication&                               m_qapp;
     std::unique_ptr<Config>                    m_config;
@@ -444,6 +462,28 @@ private:
     QThread* m_datasetThread = nullptr;
     features::DatasetCreator* m_datasetCreator = nullptr;  // lives on m_datasetThread
 
+    // Board-scan worker (A1) — warpPerspective accumulation on its own
+    // thread, same ownership pattern as the dataset creator.
+    QThread* m_scanThread = nullptr;
+    features::BoardScanner* m_boardScanner = nullptr;   // lives on m_scanThread
+    bool   m_scanActive = false;
+    qint64 m_lastScanForwardMs = 0;   // GUI-side frame-forward throttle
+    // Last tracking quality seen by the homographyUpdated handler — the scan
+    // frame gate (only feed the mosaic under a healthy pose).
+    int    m_lastTrackInliers   = 0;
+    double m_lastTrackReprojErr = 0.0;
+    // Last finished scan, cached on the GUI thread for golden save/compare.
+    cv::Mat m_lastScanMosaic, m_lastScanMask;
+    features::MosaicGeometry m_lastScanGeo;
+    ibom::Layer m_lastScanLayer = ibom::Layer::Front;
+
+    // Scene advisor (D1): streak counters so one bad frame never warns and
+    // one good frame never clears (analysis is throttled in frameReady).
+    qint64 m_lastSceneMs     = 0;
+    int    m_sceneBadStreak  = 0;
+    int    m_sceneGoodStreak = 0;
+    bool   m_sceneWarnActive = false;
+
     // ── iBOM overlay render cache (change-gated) ───────────────────────────
     // The overlay is rendered in BOARD space (OverlayRenderer::renderBoardSpace)
     // and only rebuilt when one of its content inputs changes: selection, placed
@@ -460,6 +500,11 @@ private:
     float       m_ovSigSelectedSilkW = -1.0f;
     const void* m_ovSigProject = nullptr;    // identity of the rendered IBomProject
     ibom::Layer m_ovSigLayer   = ibom::Layer::Front;
+    // Defect heatmap compositing (A2): part of the overlay signature so a
+    // toggle or a fresh golden comparison re-renders the board buffer.
+    bool        m_ovSigHeatmap = false;
+    int         m_ovSigHeatRev = -1;
+    int         m_heatmapRev   = 0;   // bumped whenever the heatmap content changes
     // buffer→PCB mapping of the current board buffer (inverse of the renderer's
     // pcbToBuffer), composed with the live homography into the per-frame warp.
     QTransform  m_boardBufferToPcb;

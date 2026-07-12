@@ -34,6 +34,10 @@
 #include "features/SnapshotHistory.h"
 #include "features/DatasetCreator.h"
 #include "features/RemoteView.h"
+#include "features/BoardScanner.h"
+#include "features/GoldenDiff.h"
+#include "features/DepthInspector.h"
+#include "utils/SceneQuality.h"
 #include "gui/DatasetPanel.h"
 #include "gui/BoardMinimap.h"
 #include "gui/FovMeasureDialog.h"
@@ -63,6 +67,11 @@
 #include <QUrl>
 #include <QDateTime>
 #include <QFile>
+#include <QCryptographicHash>
+#include <QDialog>
+#include <QVBoxLayout>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QtConcurrent/QtConcurrent>
 #include <QFutureWatcher>
 #include <nlohmann/json.hpp>
@@ -261,6 +270,11 @@ Application::~Application()
     if (m_datasetThread) {
         m_datasetThread->quit();
         m_datasetThread->wait();
+    }
+
+    if (m_scanThread) {
+        m_scanThread->quit();
+        m_scanThread->wait();
     }
 }
 
@@ -676,6 +690,16 @@ void Application::createSubsystems()
         QMetaObject::invokeMethod(m_datasetCreator, "setClassRulesPath", Qt::QueuedConnection,
             Q_ARG(QString, QString::fromStdString(rulesPath.string())));
     }
+
+    // Board-scan worker (A1) on its own thread — the per-frame
+    // warpPerspective into the mosaic canvas must not block the GUI.
+    m_scanThread = new QThread(this);
+    m_scanThread->setObjectName("BoardScan");
+    m_boardScanner = new features::BoardScanner();
+    m_boardScanner->moveToThread(m_scanThread);
+    connect(m_scanThread, &QThread::finished,
+            m_boardScanner, &QObject::deleteLater);
+    m_scanThread->start();
 
     // Periodic re-anchor timer (plan B): during live tracking, correct
     // accumulated drift via the component path — it matches detections
@@ -2166,6 +2190,10 @@ void Application::connectSignals()
                 m_lastScaleUpdateMs = scaleNowMs;
                 updateDynamicScale();
             }
+            // Latest quality, read by the board-scan frame gate (A1): only
+            // feed the mosaic while the pose is healthy.
+            m_lastTrackInliers   = inliers;
+            m_lastTrackReprojErr = reprojErr;
             // FOV colour (tracking health) + inspection-coverage trail, then
             // repaint. accumulateCoverage() is throttled internally and works
             // even while the map is hidden behind another dock tab.
@@ -2340,6 +2368,24 @@ void Application::wireCameraSignals()
                 Q_ARG(ibom::camera::FrameRef, frameRef));
         }
 
+        // ── Board scan (A1): feed the mosaic worker under a healthy pose ──
+        // Gate: valid homography, and when live tracking runs, decent quality
+        // (same thresholds as the minimap health colour) — a drifting pose
+        // must not get printed into the mosaic. Throttled to ~5 Hz; the
+        // worker warps on its own thread.
+        if (m_scanActive && m_boardScanner && m_homography && m_homography->isValid()) {
+            const bool healthy = !m_liveMode
+                || (m_lastTrackInliers >= 15 && m_lastTrackReprojErr <= 6.0);
+            const qint64 scanNowMs = QDateTime::currentMSecsSinceEpoch();
+            if (healthy && scanNowMs - m_lastScanForwardMs >= 200) {
+                m_lastScanForwardMs = scanNowMs;
+                QMetaObject::invokeMethod(m_boardScanner, "processFrame",
+                    Qt::QueuedConnection,
+                    Q_ARG(ibom::camera::FrameRef, frameRef),
+                    Q_ARG(cv::Mat, m_homography->matrix().clone()));
+            }
+        }
+
         // ── Focus assist: Laplacian variance, throttled (~1 ms at 0.25×) ──
         // Same downscale as the dataset capture gate so the displayed value
         // is directly comparable to the dataset.min_sharpness threshold.
@@ -2351,6 +2397,59 @@ void Application::wireCameraSignals()
             const double sharpness = utils::ImageUtils::computeSharpness(small);
             m_mainWindow->statsPanel()->setSharpness(
                 sharpness, sharpness >= m_config->datasetMinSharpness());
+
+            // ── Scene advisor (D1): exposure / glare / blur, ≤ ~1 Hz ──
+            // Reuses the 0.25× frame. Advisory only: a status-bar banner
+            // raised after 3 consecutive bad analyses, cleared after 3 good
+            // ones — one reflection glint or one shaky frame stays silent.
+            if (nowMs - m_lastSceneMs >= 700) {
+                m_lastSceneMs = nowMs;
+                std::vector<cv::Point> roi;
+                if (m_ibomProject && m_homography && m_homography->isValid()) {
+                    const auto& bb = m_ibomProject->boardInfo.boardBBox;
+                    const cv::Point2f pcbCorners[4] = {
+                        {static_cast<float>(bb.minX), static_cast<float>(bb.minY)},
+                        {static_cast<float>(bb.maxX), static_cast<float>(bb.minY)},
+                        {static_cast<float>(bb.maxX), static_cast<float>(bb.maxY)},
+                        {static_cast<float>(bb.minX), static_cast<float>(bb.maxY)}};
+                    for (const auto& c : pcbCorners) {
+                        const cv::Point2f ip = m_homography->pcbToImage(c);
+                        roi.emplace_back(static_cast<int>(ip.x * 0.25f),
+                                         static_cast<int>(ip.y * 0.25f));
+                    }
+                }
+                utils::SceneQualityParams sp;
+                // Half the dataset gate: warn on "clearly defocused", not on
+                // "not quite dataset-grade".
+                sp.blurSharpness = m_config->datasetMinSharpness() * 0.5;
+                const auto rep = utils::analyzeScene(small, roi, sp);
+
+                if (rep.anyIssue()) {
+                    m_sceneBadStreak++;
+                    m_sceneGoodStreak = 0;
+                } else {
+                    m_sceneGoodStreak++;
+                    m_sceneBadStreak = 0;
+                }
+                if (m_sceneBadStreak >= 3) {
+                    QStringList issues;
+                    if (rep.glare)
+                        issues << tr("glare on the board — move the light");
+                    if (rep.dark)
+                        issues << tr("scene too dark — Auto-Align degraded");
+                    if (rep.blurry)
+                        issues << tr("image out of focus");
+                    const QString msg = issues.join(QStringLiteral(" · "));
+                    if (!m_sceneWarnActive)
+                        spdlog::info("[scene] advisor raised: {}", msg.toStdString());
+                    m_sceneWarnActive = true;
+                    m_mainWindow->setSceneWarning(msg);
+                } else if (m_sceneWarnActive && m_sceneGoodStreak >= 3) {
+                    m_sceneWarnActive = false;
+                    m_mainWindow->setSceneWarning(QString());
+                    spdlog::info("[scene] advisor cleared");
+                }
+            }
         }
 
         // Display path — ZERO-COPY (INVESTIGATION_360 §3.1): QImage renders
@@ -2415,7 +2514,9 @@ void Application::wireCameraSignals()
                 || placedAlphaMul != m_ovSigPlacedOpacity
                 || selectedSilkW != m_ovSigSelectedSilkW
                 || m_ibomProject.get() != m_ovSigProject
-                || m_activeLayer != m_ovSigLayer;
+                || m_activeLayer != m_ovSigLayer
+                || m_showHeatmap != m_ovSigHeatmap
+                || m_heatmapRev != m_ovSigHeatRev;
 
             if (needsRender) {
                 overlay::OverlayInputs in;
@@ -2439,6 +2540,23 @@ void Application::wireCameraSignals()
                 overlay::BoardOverlay bo = overlay::OverlayRenderer::renderBoardSpace(in);
                 const double renderMs = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
+
+                // Defect heatmap (A2, golden diff): composited into the
+                // board-space buffer in PCB coords — pcbToBuffer carries the
+                // Back-face mirror, so it lands correctly on either side.
+                if (m_showHeatmap && m_heatmapRenderer
+                    && m_heatmapRenderer->totalDefects() > 0) {
+                    const QImage heat = m_heatmapRenderer->renderArgb(0.6f);
+                    if (!heat.isNull()) {
+                        const auto& bb = m_ibomProject->boardInfo.boardBBox;
+                        QPainter hp(&bo.image);
+                        hp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                        hp.setTransform(bo.pcbToBuffer);
+                        hp.drawImage(QRectF(bb.minX, bb.minY,
+                                            bb.width(), bb.height()), heat);
+                    }
+                }
+
                 m_boardBufferToPcb = bo.pcbToBuffer.inverted();
                 m_mainWindow->cameraView()->setBoardOverlayImage(bo.image);
                 spdlog::debug("[overlay] board buffer re-rendered {}x{} in {:.1f}ms (pads={} silk={} sel='{}' placed={} comps={})",
@@ -2456,6 +2574,8 @@ void Application::wireCameraSignals()
                 m_ovSigSelectedSilkW = selectedSilkW;
                 m_ovSigProject       = m_ibomProject.get();
                 m_ovSigLayer         = m_activeLayer;
+                m_ovSigHeatmap       = m_showHeatmap;
+                m_ovSigHeatRev       = m_heatmapRev;
             }
 
             // Per-frame: compose buffer→PCB with the freshest PCB→image pose.
@@ -2981,6 +3101,7 @@ void Application::connectControlSignals()
     connect(m_mainWindow->controlPanel(), &gui::ControlPanel::showHeatmapChanged,
             this, [this](bool show) {
         m_showHeatmap = show;
+        m_overlayValid = false;   // re-render the board buffer ± heatmap layer
         spdlog::info("Heatmap overlay {}", show ? "enabled" : "disabled");
     });
 
@@ -2989,6 +3110,34 @@ void Application::connectControlSignals()
             this, [this](bool back) {
         setActiveLayer(back ? ibom::Layer::Back : ibom::Layer::Front);
     });
+
+    // ── Board scan / golden diff / depth check (Inspection menu) ──
+    connect(m_mainWindow.get(), &gui::MainWindow::boardScanToggled,
+            this, &Application::onBoardScanToggled);
+    connect(m_mainWindow.get(), &gui::MainWindow::goldenSaveRequested,
+            this, &Application::saveGolden);
+    connect(m_mainWindow.get(), &gui::MainWindow::goldenCompareRequested,
+            this, &Application::compareGolden);
+    connect(m_mainWindow.get(), &gui::MainWindow::depthInspectRequested,
+            this, &Application::runDepthInspection);
+    if (m_boardScanner) {
+        connect(m_boardScanner, &features::BoardScanner::scanProgress,
+                this, [this](double coverage, int frames) {
+            m_mainWindow->updateStatusMessage(
+                tr("Scanning board… %1% coverage (%2 frames) — uncheck "
+                   "Inspection → Scan Board to finish")
+                    .arg(static_cast<int>(coverage * 100)).arg(frames));
+        }, Qt::QueuedConnection);
+        connect(m_boardScanner, &features::BoardScanner::scanFinished,
+                this, &Application::onScanFinished, Qt::QueuedConnection);
+        connect(m_boardScanner, &features::BoardScanner::scanError,
+                this, [this](const QString& msg) {
+            m_scanActive = false;
+            m_mainWindow->setBoardScanChecked(false);
+            m_mainWindow->updateStatusMessage(msg);
+            spdlog::warn("[scan] {}", msg.toStdString());
+        }, Qt::QueuedConnection);
+    }
 
     // ── InspectionWizard wiring ─────────────────────────────────
     auto* wizard = m_mainWindow->inspectionWizard();
@@ -4430,6 +4579,345 @@ void Application::takeScreenshot()
     } else {
         m_mainWindow->updateStatusMessage(tr("Failed to save screenshot"));
     }
+}
+
+// ── Board scan / golden diff / depth check (FEATURE_PROPOSALS A1-A3) ──────
+
+namespace {
+
+/// Small non-modal results table (golden diff, depth check). The dialog
+/// deletes itself on close; rows are plain strings — the caller formats.
+void showResultsDialog(QWidget* parent, const QString& title,
+                       const QStringList& headers,
+                       const std::vector<QStringList>& rows)
+{
+    auto* dlg = new QDialog(parent);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(title);
+    dlg->resize(460, 520);
+    auto* lay = new QVBoxLayout(dlg);
+
+    auto* table = new QTableWidget(static_cast<int>(rows.size()),
+                                   static_cast<int>(headers.size()), dlg);
+    table->setHorizontalHeaderLabels(headers);
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->horizontalHeader()->setStretchLastSection(true);
+    for (int r = 0; r < static_cast<int>(rows.size()); ++r)
+        for (int c = 0; c < rows[r].size() && c < headers.size(); ++c)
+            table->setItem(r, c, new QTableWidgetItem(rows[r][c]));
+    table->resizeColumnsToContents();
+    lay->addWidget(table);
+
+    dlg->show();
+    dlg->raise();
+}
+
+} // namespace
+
+QString Application::ibomContentHash() const
+{
+    const QString path = QString::fromStdString(m_config->ibomFilePath());
+    if (path.isEmpty()) return {};
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    QCryptographicHash h(QCryptographicHash::Sha1);
+    if (!h.addData(&f)) return {};
+    return QString::fromLatin1(h.result().toHex().left(12));
+}
+
+void Application::onBoardScanToggled(bool on)
+{
+    if (!m_boardScanner) return;
+
+    if (!on) {
+        if (!m_scanActive) return;
+        m_scanActive = false;
+        QMetaObject::invokeMethod(m_boardScanner, "stopScan", Qt::QueuedConnection);
+        return;
+    }
+
+    if (!m_ibomProject) {
+        m_mainWindow->updateStatusMessage(tr("Board scan: load an iBOM first"));
+        m_mainWindow->setBoardScanChecked(false);
+        return;
+    }
+    if (!m_homography || !m_homography->isValid()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Board scan: align the overlay first (the scan follows the pose)"));
+        m_mainWindow->setBoardScanChecked(false);
+        return;
+    }
+
+    // Canvas resolution: follow the live optics where known (no point storing
+    // more than the camera resolves), inside a sane band. The RAM guard in
+    // BoardMosaic::initialize caps huge boards regardless.
+    const double pxPerMm = m_currentPixelsPerMm > 0.0
+        ? std::clamp(m_currentPixelsPerMm, 4.0, 12.0) : 8.0;
+    const auto& bb = m_ibomProject->boardInfo.boardBBox;
+    const QString exportDir =
+        QString::fromStdString((utils::dataDir() / "scans").string());
+
+    m_scanActive        = true;
+    m_lastScanForwardMs = 0;
+    QMetaObject::invokeMethod(m_boardScanner, "startScan", Qt::QueuedConnection,
+        Q_ARG(double, pxPerMm),
+        Q_ARG(double, bb.minX), Q_ARG(double, bb.minY),
+        Q_ARG(double, bb.maxX), Q_ARG(double, bb.maxY),
+        Q_ARG(int, m_activeLayer == Layer::Front ? 0 : 1),
+        Q_ARG(QString, exportDir));
+    m_mainWindow->updateStatusMessage(
+        tr("Board scan started — sweep the whole board, then uncheck "
+           "Inspection → Scan Board"));
+}
+
+void Application::onScanFinished(QString pngPath, cv::Mat mosaic, cv::Mat writtenMask,
+                                 double coverageFrac, double pxPerMm,
+                                 double minXmm, double minYmm, int layerInt)
+{
+    m_scanActive = false;
+    m_mainWindow->setBoardScanChecked(false);
+
+    if (mosaic.empty() || writtenMask.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Board scan finished with no frames — was tracking healthy?"));
+        return;
+    }
+
+    m_lastScanMosaic = mosaic;
+    m_lastScanMask   = writtenMask;
+    m_lastScanGeo    = {};
+    m_lastScanGeo.pxPerMm  = pxPerMm;
+    m_lastScanGeo.minXmm   = minXmm;
+    m_lastScanGeo.minYmm   = minYmm;
+    m_lastScanGeo.widthPx  = mosaic.cols;
+    m_lastScanGeo.heightPx = mosaic.rows;
+    m_lastScanLayer = layerInt == 0 ? Layer::Front : Layer::Back;
+
+    if (pngPath.isEmpty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Board scan finished (%1% coverage) — PNG export failed, see log")
+                .arg(static_cast<int>(coverageFrac * 100)));
+    } else {
+        m_mainWindow->updateStatusMessage(
+            tr("Board scan exported: %1 (%2% coverage)")
+                .arg(pngPath).arg(static_cast<int>(coverageFrac * 100)));
+    }
+}
+
+void Application::saveGolden()
+{
+    if (m_lastScanMosaic.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("No finished board scan — run Inspection → Scan Board first"));
+        return;
+    }
+    const QString hash = ibomContentHash();
+    if (hash.isEmpty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Cannot hash the iBOM file — golden not saved"));
+        return;
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path dir = utils::dataDir() / "golden" / hash.toStdString();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string base = m_lastScanLayer == Layer::Front ? "front" : "back";
+
+    if (!cv::imwrite((dir / (base + ".png")).string(), m_lastScanMosaic)
+        || !cv::imwrite((dir / (base + "_mask.png")).string(), m_lastScanMask)) {
+        m_mainWindow->updateStatusMessage(
+            tr("Failed to write the golden images under %1")
+                .arg(QString::fromStdString(dir.string())));
+        return;
+    }
+    nlohmann::json meta;
+    meta["px_per_mm"] = m_lastScanGeo.pxPerMm;
+    meta["min_x_mm"]  = m_lastScanGeo.minXmm;
+    meta["min_y_mm"]  = m_lastScanGeo.minYmm;
+    meta["layer"]     = base;
+    meta["ibom_path"] = m_config->ibomFilePath();   // hint only, hash is the key
+    std::ofstream ofs(dir / (base + ".json"));
+    ofs << meta.dump(2);
+
+    spdlog::info("[golden] saved {} face under {}", base, dir.string());
+    m_mainWindow->updateStatusMessage(
+        tr("Golden %1 face saved for this board")
+            .arg(m_lastScanLayer == Layer::Front ? tr("front") : tr("back")));
+}
+
+void Application::compareGolden()
+{
+    if (m_lastScanMosaic.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("No finished board scan — run Inspection → Scan Board first"));
+        return;
+    }
+    if (!m_ibomProject) return;
+    const QString hash = ibomContentHash();
+    if (hash.isEmpty()) {
+        m_mainWindow->updateStatusMessage(tr("Cannot hash the iBOM file"));
+        return;
+    }
+
+    namespace fs = std::filesystem;
+    const std::string base = m_lastScanLayer == Layer::Front ? "front" : "back";
+    const fs::path dir = utils::dataDir() / "golden" / hash.toStdString();
+    const fs::path goldenPath = dir / (base + ".png");
+    if (!fs::exists(goldenPath)) {
+        m_mainWindow->updateStatusMessage(
+            tr("No golden stored for this board/face — use "
+               "Inspection → Save Last Scan as Golden first"));
+        return;
+    }
+
+    cv::Mat golden = cv::imread(goldenPath.string(), cv::IMREAD_COLOR);
+    cv::Mat goldenMask = cv::imread((dir / (base + "_mask.png")).string(),
+                                    cv::IMREAD_GRAYSCALE);
+    if (golden.empty()) {
+        m_mainWindow->updateStatusMessage(tr("Failed to read the golden image"));
+        return;
+    }
+    if (goldenMask.empty())
+        goldenMask = cv::Mat(golden.size(), CV_8U, cv::Scalar(255));
+    // Different scan resolution than when the golden was taken → resample the
+    // golden onto the current canvas (same board rect + margin by
+    // construction, so a plain resize aligns them).
+    if (golden.size() != m_lastScanMosaic.size()) {
+        cv::resize(golden, golden, m_lastScanMosaic.size(), 0, 0, cv::INTER_AREA);
+        cv::resize(goldenMask, goldenMask, m_lastScanMosaic.size(), 0, 0,
+                   cv::INTER_NEAREST);
+    }
+
+    const cv::Mat diff = features::computeDiffMap(
+        golden, goldenMask, m_lastScanMosaic, m_lastScanMask);
+    const auto anomalies = features::scoreComponents(
+        diff, m_lastScanGeo, m_ibomProject->components, m_lastScanLayer);
+    if (anomalies.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Golden compare: no comparable components (coverage overlap "
+               "too small?)"));
+        return;
+    }
+
+    // Feed the defect heatmap (this is what HeatmapRenderer was born for) and
+    // invalidate the overlay cache so the composite refreshes.
+    constexpr double kSuspectThreshold = 0.30;
+    const auto& bb = m_ibomProject->boardInfo.boardBBox;
+    m_heatmapRenderer->initialize(static_cast<int>(std::ceil(bb.width())),
+                                  static_cast<int>(std::ceil(bb.height())), 1.0f);
+    int suspects = 0;
+    for (const auto& a : anomalies) {
+        if (a.score < kSuspectThreshold) continue;
+        ++suspects;
+        m_heatmapRenderer->addDefect(
+            static_cast<float>(a.pcbCenter.x - bb.minX),
+            static_cast<float>(a.pcbCenter.y - bb.minY),
+            static_cast<float>(a.score));
+    }
+    ++m_heatmapRev;
+    m_overlayValid = false;
+
+    std::vector<QStringList> rows;
+    for (const auto& a : anomalies) {
+        if (rows.size() >= 200) break;
+        rows.push_back({QString::fromStdString(a.ref),
+                        QString::number(a.score, 'f', 2),
+                        a.score >= kSuspectThreshold ? tr("⚠ check") : tr("ok")});
+    }
+    showResultsDialog(m_mainWindow.get(),
+                      tr("Golden comparison — %1 face")
+                          .arg(m_lastScanLayer == Layer::Front ? tr("front") : tr("back")),
+                      {tr("Ref"), tr("Anomaly"), tr("Verdict")}, rows);
+
+    spdlog::info("[golden] compared {} components, {} suspicious (threshold {})",
+                 anomalies.size(), suspects, kSuspectThreshold);
+    m_mainWindow->updateStatusMessage(
+        tr("Golden compare: %1 components, %2 suspicious — enable "
+           "'Show Defect Heatmap' to see them on the overlay")
+            .arg(anomalies.size()).arg(suspects));
+}
+
+void Application::runDepthInspection()
+{
+    if (!m_ibomProject) {
+        m_mainWindow->updateStatusMessage(tr("Depth check: load an iBOM first"));
+        return;
+    }
+    if (!m_homography || !m_homography->isValid()) {
+        m_mainWindow->updateStatusMessage(tr("Depth check: align the overlay first"));
+        return;
+    }
+    if (!m_lastDepthFrame || m_lastDepthFrame->empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Depth check: no depth frame — RealSense backend required"));
+        return;
+    }
+
+    // Snapshot the shared depth view (the capture thread keeps publishing).
+    const cv::Mat depth = m_lastDepthFrame->clone();
+
+    // Board quad under the current pose → the plane-fit region.
+    const auto& bb = m_ibomProject->boardInfo.boardBBox;
+    std::vector<cv::Point2f> quad;
+    for (const auto& c : {cv::Point2f(bb.minX, bb.minY), cv::Point2f(bb.maxX, bb.minY),
+                          cv::Point2f(bb.maxX, bb.maxY), cv::Point2f(bb.minX, bb.maxY)})
+        quad.push_back(m_homography->pcbToImage(c));
+
+    const features::BoardPlane plane = features::fitBoardPlane(depth, quad);
+    if (!plane.valid) {
+        m_mainWindow->updateStatusMessage(
+            tr("Depth check: board plane not found (too many dropouts?)"));
+        return;
+    }
+    spdlog::info("[depth-check] plane fit: z = {:.4f}x + {:.4f}y + {:.1f} "
+                 "(inliers {:.0f}%)",
+                 plane.a, plane.b, plane.c, plane.inlierFrac * 100.0);
+
+    const auto verdicts = features::inspectComponents(
+        depth, m_homography->matrix(), m_ibomProject->components,
+        m_activeLayer, plane);
+    if (verdicts.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Depth check: no component visible in the depth frame"));
+        return;
+    }
+
+    using S = features::DepthVerdictStatus;
+    int absent = 0, present = 0, uncertain = 0;
+    for (const auto& v : verdicts) {
+        if (v.status == S::Absent)       ++absent;
+        else if (v.status == S::Present) ++present;
+        else                             ++uncertain;
+    }
+
+    // Absent first (that's what the user is looking for), then uncertain.
+    auto rank = [](S s) { return s == S::Absent ? 0 : s == S::Uncertain ? 1 : 2; };
+    auto sorted = verdicts;
+    std::sort(sorted.begin(), sorted.end(),
+              [&](const features::DepthVerdict& a, const features::DepthVerdict& b) {
+                  return rank(a.status) < rank(b.status);
+              });
+    std::vector<QStringList> rows;
+    for (const auto& v : sorted) {
+        if (rows.size() >= 300) break;
+        const QString st = v.status == S::Absent  ? tr("ABSENT")
+                        : v.status == S::Present ? tr("present")
+                                                 : tr("uncertain");
+        rows.push_back({QString::fromStdString(v.ref), st,
+                        QString::number(v.heightMm, 'f', 2) + " mm",
+                        QString::number(v.validPx)});
+    }
+    showResultsDialog(m_mainWindow.get(), tr("Depth check (D405)"),
+                      {tr("Ref"), tr("Status"), tr("Height"), tr("Depth px")}, rows);
+
+    spdlog::info("[depth-check] {} components: {} present, {} ABSENT, {} uncertain",
+                 verdicts.size(), present, absent, uncertain);
+    m_mainWindow->updateStatusMessage(
+        tr("Depth check: %1 present, %2 absent, %3 uncertain")
+            .arg(present).arg(absent).arg(uncertain));
 }
 
 } // namespace ibom

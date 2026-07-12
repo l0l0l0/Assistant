@@ -1,6 +1,8 @@
 #include "CameraView.h"
 
 #include <QPainter>
+#include <QPainterPath>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <cmath>
@@ -250,6 +252,10 @@ void CameraView::paintEvent(QPaintEvent* /*event*/)
         painter.setOpacity(1.0);
     }
 
+    // Local magnifier (hold X) — drawn over frame + overlay, under the HUD.
+    if (m_magnifier)
+        drawMagnifier(painter, target);
+
     // Draw crosshair
     if (m_crosshairVisible)
         drawCrosshair(painter);
@@ -305,6 +311,57 @@ void CameraView::drawViewToggle(QPainter& painter)
 
     painter.setPen(QColor(235, 240, 250));
     painter.drawText(m_viewToggleRect, Qt::AlignCenter, label);
+    painter.restore();
+}
+
+void CameraView::drawMagnifier(QPainter& painter, const QRectF& target)
+{
+    // Everything inside the loupe is the normal widget-space composition
+    // (frame + warped board overlay) pushed through one extra widget-space
+    // zoom anchored at the cursor: p' = (p − c)·f + c. Because the source is
+    // the full-resolution frame, the loupe shows detail the fitted view
+    // cannot — that is the point (vs. zooming the whole view).
+    const qreal radius = std::clamp(std::min(width(), height()) / 5.0, 80.0, 170.0);
+    const QPointF c = m_magCursor;
+    const QTransform mag =
+        QTransform::fromTranslate(-c.x(), -c.y())
+        * QTransform::fromScale(m_magFactor, m_magFactor)
+        * QTransform::fromTranslate(c.x(), c.y());
+
+    painter.save();
+    QPainterPath clip;
+    clip.addEllipse(c, radius, radius);
+    painter.setClipPath(clip);
+    painter.fillRect(rect(), Qt::black);
+
+    painter.setTransform(mag);
+    painter.drawImage(target, m_frame);
+
+    if (!m_boardOverlay.isNull() && m_boardTransformValid) {
+        painter.setOpacity(m_overlayOpacity);
+        const QTransform imageToWidgetT =
+            QTransform::fromScale(m_scale, m_scale)
+            * QTransform::fromTranslate(target.x(), target.y());
+        painter.setTransform(m_boardToImage * imageToWidgetT * mag);
+        painter.drawPixmap(QPointF(0, 0), m_boardOverlay);
+        painter.setOpacity(1.0);
+    }
+    painter.restore();
+
+    // Ring + factor label.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(255, 255, 255, 200), 2));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(c, radius, radius);
+    painter.setFont(QFont("Segoe UI", 9, QFont::DemiBold));
+    const QString label = QString("×%1").arg(m_magFactor, 0, 'f', 1);
+    QRectF lr(c.x() - 24, c.y() + radius + 4, 48, 18);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 170));
+    painter.drawRoundedRect(lr, 4, 4);
+    painter.setPen(QColor(235, 240, 250));
+    painter.drawText(lr, Qt::AlignCenter, label);
     painter.restore();
 }
 
@@ -523,6 +580,11 @@ void CameraView::mouseMoveEvent(QMouseEvent* event)
         update();
     }
 
+    if (m_magnifier) {
+        m_magCursor = event->position();
+        update();
+    }
+
     QPointF imgPos = mapToImage(event->pos());
     emit hovered(imgPos);
 }
@@ -547,8 +609,49 @@ void CameraView::mouseReleaseEvent(QMouseEvent* event)
     }
 }
 
+void CameraView::keyPressEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_X && !event->isAutoRepeat() && !m_frame.isNull()) {
+        m_magnifier = true;
+        m_magCursor = mapFromGlobal(QCursor::pos());
+        update();
+        return;
+    }
+    QOpenGLWidget::keyPressEvent(event);
+}
+
+void CameraView::keyReleaseEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_X && !event->isAutoRepeat()) {
+        m_magnifier = false;
+        update();
+        return;
+    }
+    QOpenGLWidget::keyReleaseEvent(event);
+}
+
+void CameraView::leaveEvent(QEvent* event)
+{
+    // Key-release can be missed once the cursor leaves the widget — don't
+    // leave a stale loupe on screen.
+    if (m_magnifier) {
+        m_magnifier = false;
+        update();
+    }
+    QOpenGLWidget::leaveEvent(event);
+}
+
 void CameraView::wheelEvent(QWheelEvent* event)
 {
+    // While the loupe is held, the wheel adjusts its factor instead of the
+    // view zoom.
+    if (m_magnifier) {
+        const float f = event->angleDelta().y() > 0 ? 1.15f : 1.0f / 1.15f;
+        m_magFactor = std::clamp(m_magFactor * f, 1.5f, 6.0f);
+        update();
+        return;
+    }
+
     float factor = event->angleDelta().y() > 0 ? 1.15f : 1.0f / 1.15f;
     float newZoom = std::clamp(m_zoom * factor, 0.1f, 20.0f);
 

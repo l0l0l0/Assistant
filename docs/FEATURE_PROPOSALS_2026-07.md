@@ -10,6 +10,14 @@
 > face arrière (suite 131), depth D405, `HeatmapRenderer` instancié mais dormant.
 >
 > Aucun code modifié — document de propositions uniquement. Matrice de priorisation en §5.
+>
+> **Statut 2026-07-12 (même jour, suite 147)** : sur demande utilisateur (« Tout A et D »),
+> **A1, A2, A3, D1 et D2 sont implémentés** — cœurs purs OpenCV unit-testés en CI
+> (`test_board_mosaic`, `test_golden_diff`, `test_depth_inspector`, `test_scene_quality`),
+> plomberie GUI dans le menu Inspection / status bar / CameraView (touche X). Détails et
+> protocole de validation Jetson : [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 147.
+> Restent proposés : thème B (B1 tour guidé, B2 annotations, B3 undo/audit) et thème C
+> (C1 diff de révisions, C2 bibliothèque de cartes).
 
 ---
 

@@ -78,6 +78,14 @@ public:
     /// Update the profile combo without triggering the change signal.
     void setActiveProfile(int idx);
 
+    /// Reflect the scan state on the Inspection menu checkbox without
+    /// re-emitting boardScanToggled (e.g. refused start, worker-side stop).
+    void setBoardScanChecked(bool on);
+
+    /// Scene-advisor banner in the status bar (D1). Empty text hides it;
+    /// advisory only — never blocks anything.
+    void setSceneWarning(const QString& text);
+
 signals:
     void ibomFileRequested(const QString& path);
     void cameraToggled(bool start);
@@ -106,6 +114,14 @@ signals:
     void dumpStateRequested();
     /// Dev menu: trigger an on-demand AI component-level re-anchor.
     void componentReanchorRequested();
+    /// Inspection menu: start/stop the board-scan mosaic accumulation (A1).
+    void boardScanToggled(bool on);
+    /// Inspection menu: store the last finished scan as this board's golden.
+    void goldenSaveRequested();
+    /// Inspection menu: compare the last finished scan to the stored golden.
+    void goldenCompareRequested();
+    /// Inspection menu: one-shot depth presence check (RealSense D405).
+    void depthInspectRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -190,6 +206,13 @@ private:
     QLabel* m_statusLabel = nullptr;
     QLabel* m_gpuLabel    = nullptr;
     QLabel* m_aiLabel     = nullptr;
+    QLabel* m_sceneLabel  = nullptr;   // scene-advisor banner (hidden when clear)
+
+    // Inspection menu: board scan / golden diff / depth check
+    QAction* m_actBoardScan     = nullptr;
+    QAction* m_actGoldenSave    = nullptr;
+    QAction* m_actGoldenCompare = nullptr;
+    QAction* m_actDepthCheck    = nullptr;
 
     bool m_darkMode = true;
     bool m_cameraFullscreen = false;

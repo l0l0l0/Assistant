@@ -83,6 +83,35 @@ add_ibom_test(test_letterbox
     LIBS    opencv_core opencv_imgproc
 )
 
+# Board mosaic test — the board-scan accumulation core (A1). Pure OpenCV.
+add_ibom_test(test_board_mosaic
+    SOURCES test_board_mosaic.cpp
+            ${CMAKE_SOURCE_DIR}/src/features/BoardMosaic.cpp
+    LIBS    opencv_core opencv_imgproc
+)
+
+# Golden diff test — tile dissimilarity + per-component scoring (A2).
+add_ibom_test(test_golden_diff
+    SOURCES test_golden_diff.cpp
+            ${CMAKE_SOURCE_DIR}/src/features/GoldenDiff.cpp
+            ${CMAKE_SOURCE_DIR}/src/features/BoardMosaic.cpp
+    LIBS    opencv_core opencv_imgproc
+)
+
+# Depth inspector test — plane fit + presence verdicts (A3). Pure OpenCV.
+add_ibom_test(test_depth_inspector
+    SOURCES test_depth_inspector.cpp
+            ${CMAKE_SOURCE_DIR}/src/features/DepthInspector.cpp
+    LIBS    opencv_core opencv_imgproc opencv_calib3d
+)
+
+# Scene quality test — the scene advisor's analysis core (D1). Pure OpenCV.
+add_ibom_test(test_scene_quality
+    SOURCES test_scene_quality.cpp
+            ${CMAKE_SOURCE_DIR}/src/utils/SceneQuality.cpp
+    LIBS    opencv_core opencv_imgproc
+)
+
 # Component matching test — needs ComponentMap.cpp (no extra libs)
 add_ibom_test(test_component_matching
     SOURCES test_component_matching.cpp

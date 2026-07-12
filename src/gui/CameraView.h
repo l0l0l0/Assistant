@@ -78,6 +78,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     void updateTransform();
@@ -85,6 +88,7 @@ private:
     void drawMeasurement(QPainter& painter);
     void drawZoomIndicator(QPainter& painter);
     void drawViewToggle(QPainter& painter);
+    void drawMagnifier(QPainter& painter, const QRectF& target);
 
     QPointF imageToWidget(QPointF imagePos) const;
 
@@ -122,6 +126,14 @@ private:
     bool   m_viewToggleVisible = false;
     bool   m_depthViewActive   = false;
     QRectF m_viewToggleRect;
+
+    // Local magnifier (FEATURE_PROPOSALS D2): hold X → a circular loupe under
+    // the cursor, rendered from the full-resolution frame (not the fitted
+    // widget pixels) with the board overlay re-warped inside. Wheel while
+    // held adjusts the factor.
+    bool    m_magnifier    = false;
+    float   m_magFactor    = 2.5f;
+    QPointF m_magCursor;
 
     // Measurement (image-space coords)
     int     m_measureModeKind   = -1;     // -1=off, 0=Dist, 1=Angle, 2=Area, 3=Pitch

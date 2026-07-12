@@ -91,6 +91,23 @@ build_and_run test_component_matching \
     "$T/test_component_matching.cpp" "$S/ibom/ComponentMap.cpp" \
     $CATCH_LIBS
 
+build_and_run test_board_mosaic \
+    "$T/test_board_mosaic.cpp" "$S/features/BoardMosaic.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_golden_diff \
+    "$T/test_golden_diff.cpp" "$S/features/GoldenDiff.cpp" \
+    "$S/features/BoardMosaic.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_depth_inspector \
+    "$T/test_depth_inspector.cpp" "$S/features/DepthInspector.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_scene_quality \
+    "$T/test_scene_quality.cpp" "$S/utils/SceneQuality.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
 build_and_run test_component_reanchor \
     "$T/test_component_reanchor.cpp" "$S/overlay/ComponentReanchor.cpp" \
     "$S/overlay/Homography.cpp" \

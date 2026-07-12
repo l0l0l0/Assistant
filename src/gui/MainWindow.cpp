@@ -319,7 +319,40 @@ void MainWindow::createMenuBar()
     // via m_actCalibrate, which is added to the window in createActions().
 
     auto* inspectMenu = menuBar()->addMenu(tr("&Inspection"));
+    inspectMenu->setToolTipsVisible(true);
     inspectMenu->addAction(m_actInspect);
+
+    // ── Board scan (mosaic) + golden comparison + depth check ────
+    inspectMenu->addSeparator();
+    m_actBoardScan = inspectMenu->addAction(tr("Scan Board (Mosaic)"));
+    m_actBoardScan->setCheckable(true);
+    m_actBoardScan->setToolTip(tr(
+        "Accumulate tracked camera frames into a full orthorectified image of "
+        "the board. Sweep the board like for the coverage map, then uncheck to "
+        "finish — the mosaic is exported as PNG."));
+    connect(m_actBoardScan, &QAction::toggled,
+            this, &MainWindow::boardScanToggled);
+
+    m_actGoldenSave = inspectMenu->addAction(tr("Save Last Scan as Golden"));
+    m_actGoldenSave->setToolTip(tr(
+        "Store the last finished board scan as the reference (golden) image "
+        "for this iBOM + face."));
+    connect(m_actGoldenSave, &QAction::triggered,
+            this, &MainWindow::goldenSaveRequested);
+
+    m_actGoldenCompare = inspectMenu->addAction(tr("Compare Last Scan to Golden…"));
+    m_actGoldenCompare->setToolTip(tr(
+        "Compare the last finished scan against the stored golden board: "
+        "per-component anomaly scores + defect heatmap."));
+    connect(m_actGoldenCompare, &QAction::triggered,
+            this, &MainWindow::goldenCompareRequested);
+
+    m_actDepthCheck = inspectMenu->addAction(tr("Depth-Check Components (D405)"));
+    m_actDepthCheck->setToolTip(tr(
+        "Fit the board plane in the aligned depth frame and check each "
+        "component's height above it: present / absent / uncertain."));
+    connect(m_actDepthCheck, &QAction::triggered,
+            this, &MainWindow::depthInspectRequested);
 
     // Depth/3D view switching is done via the in-image ViewModeBar overlay;
     // keep the actions alive for keyboard shortcuts (D / 3) but don't add them
@@ -481,10 +514,38 @@ void MainWindow::createStatusBar()
     m_gpuLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
     m_aiLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
 
+    // Scene-advisor banner (D1): orange, hidden until a persistent issue is
+    // reported. Sits next to the status message so it survives transient
+    // status updates.
+    m_sceneLabel = new QLabel();
+    m_sceneLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
+    m_sceneLabel->setStyleSheet("color: #fab387; font-weight: 600;");
+    m_sceneLabel->hide();
+
     statusBar()->addWidget(m_statusLabel, 1);
+    statusBar()->addWidget(m_sceneLabel);
     statusBar()->addPermanentWidget(m_aiLabel);
     statusBar()->addPermanentWidget(m_gpuLabel);
     statusBar()->addPermanentWidget(m_fpsLabel);
+}
+
+void MainWindow::setBoardScanChecked(bool on)
+{
+    if (!m_actBoardScan || m_actBoardScan->isChecked() == on) return;
+    const QSignalBlocker blocker(m_actBoardScan);
+    m_actBoardScan->setChecked(on);
+}
+
+void MainWindow::setSceneWarning(const QString& text)
+{
+    if (!m_sceneLabel) return;
+    if (text.isEmpty()) {
+        m_sceneLabel->hide();
+        m_sceneLabel->clear();
+    } else {
+        m_sceneLabel->setText(QStringLiteral("⚠ ") + text);
+        m_sceneLabel->show();
+    }
 }
 
 void MainWindow::createDockWidgets()
