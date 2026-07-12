@@ -36,6 +36,15 @@
 
 ---
 
+## État actuel — au 2026-07-12 (Help exhaustif appelable — recherche + 10 onglets)
+
+> **2026-07-12 (suite 148)** : demande utilisateur « il me faudrait un help exhaustif qu'on peut appeler ». `HelpDialog` réécrit :
+> - **Recherche plein-texte cross-onglets** : champ en tête du dialog (Ctrl+F le focus, Entrée = occurrence suivante, Shift+Entrée = précédente, wrap d'onglet en onglet), surlignage de **toutes** les occurrences dans chaque page (ExtraSelections jaunes), compteur « N matches in M tab(s) », bascule automatique sur le premier onglet qui matche.
+> - **10 onglets exhaustifs** (contenu réécrit et mis à jour — l'ancien help disait encore « P » pour le screenshot alors que c'est Ctrl+S, ignorait la minimap, le back side, l'Auto-Align, le RealSense et toutes les features récentes) : Getting Started · **Shortcuts** (nouveau — tables complètes clavier global / vue caméra / PCB Map / BOM, y c. loupe X et Dev Ctrl+Shift+M/C) · Calibration (+ note intrinsics D405, monitor live) · Alignment (réécrit : Auto-Align avec refus honnête + workflow « de loin puis approcher », 4 coins, 2 comps, Multi-Comp, ancre A, live tracking états/récupération/re-anchor périodique, back side, restore) · Lens Adapters · Inspection (BOM, progression persistée, couverture minimap, wizard, dataset, statut IA) · **Inspection Tools** (nouveau — les 5 features suite 147 : scan mosaïque pas-à-pas, golden save/compare + heatmap, depth check avec seuils, conseiller de scène, loupe ; + mesures et snapshots) · Overlay (+ heatmap de défauts alimentée par le golden compare) · Export (+ rapport HTML/PDF, scans/, snapshots/) · Troubleshooting (réécrit : échecs Auto-Align → conseiller de scène + vue debug Dev, tracking LOST, golden qui flagge tout, depth uncertain, IA « stuck loading » = compilation engine TRT, logs via Dev → Copy log path).
+> - **Enum `HelpDialog::Tab`** : indices nommés, câblage du menu Help refait dessus (les ints bruts 0-7 se décalaient à chaque insertion d'onglet) + 2 nouvelles entrées de menu (« Keyboard && Mouse Shortcuts », « Inspection Tools (scan, golden, depth…) »). F1 reste le point d'entrée global ; le dialog est un singleton lazy dans `onShowHelp`.
+> - **Vérifié ici** : `HelpDialog.o` + moc compilés propres (-Wall), `MainWindow.cpp` en `-fsyntax-only`. ⚠️ Non exécuté (pas de GUI) — à valider au build Jetson : F1 → dialog, recherche « golden » → surlignages + navigation Entrée, chaque entrée du menu Help ouvre le bon onglet.
+> - Fichiers : `src/gui/HelpDialog.{h,cpp}` (réécrits), `src/gui/MainWindow.cpp`, docs.
+
 ## État actuel — au 2026-07-12 (Implémentation thèmes A + D des propositions — 5 features)
 
 > **2026-07-12 (suite 147)** : demande utilisateur « Tout A et D » sur [FEATURE_PROPOSALS_2026-07.md](FEATURE_PROPOSALS_2026-07.md) → implémentation des 5 features en une passe. Architecture : cœurs **purs OpenCV** (unit-testés CI) séparés de la plomberie Qt.

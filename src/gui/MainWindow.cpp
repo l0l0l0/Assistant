@@ -436,30 +436,49 @@ void MainWindow::createMenuBar()
         emit fovMeasureRequested();  // opens the same dialog (shows script instructions)
     });
 
+    // One Help-menu entry per reference tab, indices via HelpDialog::Tab so
+    // inserting a tab can never silently shift the mapping again.
+    using HT = HelpDialog::Tab;
     auto* actGettingStarted = helpMenu->addAction(tr("Getting Started"));
     actGettingStarted->setShortcut(Qt::Key_F1);
-    connect(actGettingStarted, &QAction::triggered, this, [this]() { onShowHelp(0); });
+    connect(actGettingStarted, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::GettingStarted); });
+
+    auto* actHelpKeys = helpMenu->addAction(tr("Keyboard && Mouse Shortcuts"));
+    connect(actHelpKeys, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Shortcuts); });
 
     auto* actHelpCalib = helpMenu->addAction(tr("Calibration Guide"));
-    connect(actHelpCalib, &QAction::triggered, this, [this]() { onShowHelp(1); });
+    connect(actHelpCalib, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Calibration); });
 
     auto* actHelpAlign = helpMenu->addAction(tr("Alignment Guide"));
-    connect(actHelpAlign, &QAction::triggered, this, [this]() { onShowHelp(2); });
+    connect(actHelpAlign, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Alignment); });
 
     auto* actHelpLens = helpMenu->addAction(tr("Lens Adapters"));
-    connect(actHelpLens, &QAction::triggered, this, [this]() { onShowHelp(3); });
+    connect(actHelpLens, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::LensAdapters); });
 
-    auto* actHelpInspect = helpMenu->addAction(tr("Inspection"));
-    connect(actHelpInspect, &QAction::triggered, this, [this]() { onShowHelp(4); });
+    auto* actHelpInspect = helpMenu->addAction(tr("Inspection Workflow"));
+    connect(actHelpInspect, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Inspection); });
+
+    auto* actHelpTools = helpMenu->addAction(tr("Inspection Tools (scan, golden, depth…)"));
+    connect(actHelpTools, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::InspectionTools); });
 
     auto* actHelpOverlay = helpMenu->addAction(tr("Overlay Settings"));
-    connect(actHelpOverlay, &QAction::triggered, this, [this]() { onShowHelp(5); });
+    connect(actHelpOverlay, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Overlay); });
 
     auto* actHelpExport = helpMenu->addAction(tr("Export & Reports"));
-    connect(actHelpExport, &QAction::triggered, this, [this]() { onShowHelp(6); });
+    connect(actHelpExport, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Export); });
 
     auto* actHelpTrouble = helpMenu->addAction(tr("Troubleshooting"));
-    connect(actHelpTrouble, &QAction::triggered, this, [this]() { onShowHelp(7); });
+    connect(actHelpTrouble, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Troubleshooting); });
 
     helpMenu->addSeparator();
     auto* about = helpMenu->addAction(tr("About..."));
