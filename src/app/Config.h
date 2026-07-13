@@ -25,7 +25,8 @@ enum class SortMethod {
     ValueCount       = 0,  // Most numerous value group first — minimizes SMD reel changes
     ValueAlphabetic  = 1,  // Alphabetic by value, group together
     Position         = 2,  // Original iBOM load order (often matches PCB layout)
-    FootprintSize    = 3   // Smallest footprint first
+    FootprintSize    = 3,  // Smallest footprint first
+    NearestNeighbor  = 4   // Shortest-travel route across the board (guided tour)
 };
 
 /// Per-camera configuration bundle.

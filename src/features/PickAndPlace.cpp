@@ -24,6 +24,7 @@ void PickAndPlace::loadComponents(const std::vector<Component>& components)
         step.value      = comp.value;
         step.footprint  = comp.footprint;
         step.layer      = comp.layer;
+        step.position   = comp.position;
         step.placed     = false;
         step.order      = order++;
         m_steps.push_back(std::move(step));
@@ -91,6 +92,66 @@ void PickAndPlace::sortByFootprintSize()
     for (int i = 0; i < static_cast<int>(m_steps.size()); ++i) {
         m_steps[i].order = i;
     }
+}
+
+void PickAndPlace::sortByNearestNeighbor()
+{
+    const int n = static_cast<int>(m_steps.size());
+    if (n < 3) return;
+
+    // Greedy nearest-neighbor walk. O(n²) — fine for BOM sizes (even 5000
+    // parts is ~25M cheap distance evaluations, done once per inspection).
+    auto dist2 = [](const PlacementStep& a, const PlacementStep& b) {
+        const double dx = a.position.x - b.position.x;
+        const double dy = a.position.y - b.position.y;
+        return dx * dx + dy * dy;
+    };
+
+    // Start at the top-left-most component (min x+y) — a stable, intuitive
+    // route entry point.
+    int start = 0;
+    for (int i = 1; i < n; ++i)
+        if (m_steps[i].position.x + m_steps[i].position.y
+            < m_steps[start].position.x + m_steps[start].position.y)
+            start = i;
+
+    std::vector<PlacementStep> route;
+    route.reserve(n);
+    std::vector<bool> used(n, false);
+    int cur = start;
+    used[cur] = true;
+    route.push_back(m_steps[cur]);
+    for (int k = 1; k < n; ++k) {
+        int best = -1;
+        double bestD = 0.0;
+        for (int i = 0; i < n; ++i) {
+            if (used[i]) continue;
+            const double d = dist2(m_steps[cur], m_steps[i]);
+            if (best < 0 || d < bestD) { best = i; bestD = d; }
+        }
+        used[best] = true;
+        route.push_back(m_steps[best]);
+        cur = best;
+    }
+    m_steps = std::move(route);
+
+    for (int i = 0; i < n; ++i)
+        m_steps[i].order = i;
+}
+
+bool PickAndPlace::unplace(const std::string& reference)
+{
+    for (int i = 0; i < static_cast<int>(m_steps.size()); ++i) {
+        if (m_steps[i].reference != reference) continue;
+        if (!m_steps[i].placed) return false;
+        m_steps[i].placed = false;
+        m_currentIndex = i;
+        spdlog::info("PickAndPlace: unplaced {} (undo)", reference);
+        emit currentStepChanged(m_steps[i]);
+        emitProgress();
+        return true;
+    }
+    return false;
 }
 
 const PickAndPlace::PlacementStep& PickAndPlace::currentStep() const

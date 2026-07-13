@@ -91,6 +91,27 @@ build_and_run test_component_matching \
     "$T/test_component_matching.cpp" "$S/ibom/ComponentMap.cpp" \
     $CATCH_LIBS
 
+build_and_run test_project_diff \
+    "$T/test_project_diff.cpp" "$S/ibom/ProjectDiff.cpp" \
+    $CATCH_LIBS
+
+build_and_run test_board_mosaic \
+    "$T/test_board_mosaic.cpp" "$S/features/BoardMosaic.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_golden_diff \
+    "$T/test_golden_diff.cpp" "$S/features/GoldenDiff.cpp" \
+    "$S/features/BoardMosaic.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_depth_inspector \
+    "$T/test_depth_inspector.cpp" "$S/features/DepthInspector.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
+build_and_run test_scene_quality \
+    "$T/test_scene_quality.cpp" "$S/utils/SceneQuality.cpp" \
+    $OPENCV_LIBS $CATCH_LIBS
+
 build_and_run test_component_reanchor \
     "$T/test_component_reanchor.cpp" "$S/overlay/ComponentReanchor.cpp" \
     "$S/overlay/Homography.cpp" \
@@ -132,6 +153,13 @@ if [ -n "$MOC" ] && pkg-config --exists Qt6Core 2>/dev/null; then
         "$T/test_tracking_worker.cpp" "$S/overlay/TrackingWorker.cpp" \
         "$BUILD/moc_TrackingWorker.cpp" \
         $QT_CFLAGS $QT_LIBS $OPENCV_LIBS $LOG_LIBS $CATCH_LIBS
+
+    "$MOC" "$S/features/PickAndPlace.h" -o "$BUILD/moc_PickAndPlace.cpp" \
+        -I"$S" $QT_CFLAGS
+    build_and_run test_pickandplace \
+        "$T/test_pickandplace.cpp" "$S/features/PickAndPlace.cpp" \
+        "$BUILD/moc_PickAndPlace.cpp" \
+        $QT_CFLAGS $QT_LIBS $LOG_LIBS $CATCH_LIBS
 
     "$MOC" "$S/features/DatasetCreator.h" -o "$BUILD/moc_DatasetCreator.cpp" \
         -I"$S" $QT_CFLAGS

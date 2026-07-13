@@ -319,7 +319,73 @@ void MainWindow::createMenuBar()
     // via m_actCalibrate, which is added to the window in createActions().
 
     auto* inspectMenu = menuBar()->addMenu(tr("&Inspection"));
+    inspectMenu->setToolTipsVisible(true);
     inspectMenu->addAction(m_actInspect);
+
+    // ── Board scan (mosaic) + golden comparison + depth check ────
+    inspectMenu->addSeparator();
+    m_actBoardScan = inspectMenu->addAction(tr("Scan Board (Mosaic)"));
+    m_actBoardScan->setCheckable(true);
+    m_actBoardScan->setToolTip(tr(
+        "Accumulate tracked camera frames into a full orthorectified image of "
+        "the board. Sweep the board like for the coverage map, then uncheck to "
+        "finish — the mosaic is exported as PNG."));
+    connect(m_actBoardScan, &QAction::toggled,
+            this, &MainWindow::boardScanToggled);
+
+    m_actGoldenSave = inspectMenu->addAction(tr("Save Last Scan as Golden"));
+    m_actGoldenSave->setToolTip(tr(
+        "Store the last finished board scan as the reference (golden) image "
+        "for this iBOM + face."));
+    connect(m_actGoldenSave, &QAction::triggered,
+            this, &MainWindow::goldenSaveRequested);
+
+    m_actGoldenCompare = inspectMenu->addAction(tr("Compare Last Scan to Golden…"));
+    m_actGoldenCompare->setToolTip(tr(
+        "Compare the last finished scan against the stored golden board: "
+        "per-component anomaly scores + defect heatmap."));
+    connect(m_actGoldenCompare, &QAction::triggered,
+            this, &MainWindow::goldenCompareRequested);
+
+    m_actDepthCheck = inspectMenu->addAction(tr("Depth-Check Components (D405)"));
+    m_actDepthCheck->setToolTip(tr(
+        "Fit the board plane in the aligned depth frame and check each "
+        "component's height above it: present / absent / uncertain."));
+    connect(m_actDepthCheck, &QAction::triggered,
+            this, &MainWindow::depthInspectRequested);
+
+    // ── Guided tour: hands-free stepping through the inspection ──
+    inspectMenu->addSeparator();
+    auto* actTourPlaced = inspectMenu->addAction(tr("Mark Placed && Next"));
+    actTourPlaced->setShortcut(Qt::Key_P);
+    actTourPlaced->setToolTip(tr(
+        "Mark the current inspection component as placed and jump to the "
+        "next one on the route — hands stay on the board."));
+    connect(actTourPlaced, &QAction::triggered, this, &MainWindow::tourMarkPlaced);
+    addAction(actTourPlaced);
+
+    auto* actTourNext = inspectMenu->addAction(tr("Next Component (skip)"));
+    actTourNext->setShortcut(Qt::Key_N);
+    connect(actTourNext, &QAction::triggered, this, &MainWindow::tourNext);
+    addAction(actTourNext);
+
+    auto* actTourPrev = inspectMenu->addAction(tr("Previous Component"));
+    actTourPrev->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_N));
+    connect(actTourPrev, &QAction::triggered, this, &MainWindow::tourPrev);
+    addAction(actTourPrev);
+
+    auto* actTourUndo = inspectMenu->addAction(tr("Undo Last Placed"));
+    actTourUndo->setShortcut(QKeySequence::Undo);
+    connect(actTourUndo, &QAction::triggered, this, &MainWindow::tourUndo);
+    addAction(actTourUndo);
+
+    inspectMenu->addSeparator();
+    auto* actRevDiff = inspectMenu->addAction(tr("Compare with Another Revision…"));
+    actRevDiff->setToolTip(tr(
+        "Diff the loaded iBOM against another revision's iBOM file: "
+        "components to remove, add, or exchange for an update rework."));
+    connect(actRevDiff, &QAction::triggered,
+            this, &MainWindow::revisionCompareRequested);
 
     // Depth/3D view switching is done via the in-image ViewModeBar overlay;
     // keep the actions alive for keyboard shortcuts (D / 3) but don't add them
@@ -403,30 +469,49 @@ void MainWindow::createMenuBar()
         emit fovMeasureRequested();  // opens the same dialog (shows script instructions)
     });
 
+    // One Help-menu entry per reference tab, indices via HelpDialog::Tab so
+    // inserting a tab can never silently shift the mapping again.
+    using HT = HelpDialog::Tab;
     auto* actGettingStarted = helpMenu->addAction(tr("Getting Started"));
     actGettingStarted->setShortcut(Qt::Key_F1);
-    connect(actGettingStarted, &QAction::triggered, this, [this]() { onShowHelp(0); });
+    connect(actGettingStarted, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::GettingStarted); });
+
+    auto* actHelpKeys = helpMenu->addAction(tr("Keyboard && Mouse Shortcuts"));
+    connect(actHelpKeys, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Shortcuts); });
 
     auto* actHelpCalib = helpMenu->addAction(tr("Calibration Guide"));
-    connect(actHelpCalib, &QAction::triggered, this, [this]() { onShowHelp(1); });
+    connect(actHelpCalib, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Calibration); });
 
     auto* actHelpAlign = helpMenu->addAction(tr("Alignment Guide"));
-    connect(actHelpAlign, &QAction::triggered, this, [this]() { onShowHelp(2); });
+    connect(actHelpAlign, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Alignment); });
 
     auto* actHelpLens = helpMenu->addAction(tr("Lens Adapters"));
-    connect(actHelpLens, &QAction::triggered, this, [this]() { onShowHelp(3); });
+    connect(actHelpLens, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::LensAdapters); });
 
-    auto* actHelpInspect = helpMenu->addAction(tr("Inspection"));
-    connect(actHelpInspect, &QAction::triggered, this, [this]() { onShowHelp(4); });
+    auto* actHelpInspect = helpMenu->addAction(tr("Inspection Workflow"));
+    connect(actHelpInspect, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Inspection); });
+
+    auto* actHelpTools = helpMenu->addAction(tr("Inspection Tools (scan, golden, depth…)"));
+    connect(actHelpTools, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::InspectionTools); });
 
     auto* actHelpOverlay = helpMenu->addAction(tr("Overlay Settings"));
-    connect(actHelpOverlay, &QAction::triggered, this, [this]() { onShowHelp(5); });
+    connect(actHelpOverlay, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Overlay); });
 
     auto* actHelpExport = helpMenu->addAction(tr("Export & Reports"));
-    connect(actHelpExport, &QAction::triggered, this, [this]() { onShowHelp(6); });
+    connect(actHelpExport, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Export); });
 
     auto* actHelpTrouble = helpMenu->addAction(tr("Troubleshooting"));
-    connect(actHelpTrouble, &QAction::triggered, this, [this]() { onShowHelp(7); });
+    connect(actHelpTrouble, &QAction::triggered,
+            this, [this]() { onShowHelp(HT::Troubleshooting); });
 
     helpMenu->addSeparator();
     auto* about = helpMenu->addAction(tr("About..."));
@@ -481,10 +566,38 @@ void MainWindow::createStatusBar()
     m_gpuLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
     m_aiLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
 
+    // Scene-advisor banner (D1): orange, hidden until a persistent issue is
+    // reported. Sits next to the status message so it survives transient
+    // status updates.
+    m_sceneLabel = new QLabel();
+    m_sceneLabel->setContentsMargins(theme::StatusPadding, 0, theme::StatusPadding, 0);
+    m_sceneLabel->setStyleSheet("color: #fab387; font-weight: 600;");
+    m_sceneLabel->hide();
+
     statusBar()->addWidget(m_statusLabel, 1);
+    statusBar()->addWidget(m_sceneLabel);
     statusBar()->addPermanentWidget(m_aiLabel);
     statusBar()->addPermanentWidget(m_gpuLabel);
     statusBar()->addPermanentWidget(m_fpsLabel);
+}
+
+void MainWindow::setBoardScanChecked(bool on)
+{
+    if (!m_actBoardScan || m_actBoardScan->isChecked() == on) return;
+    const QSignalBlocker blocker(m_actBoardScan);
+    m_actBoardScan->setChecked(on);
+}
+
+void MainWindow::setSceneWarning(const QString& text)
+{
+    if (!m_sceneLabel) return;
+    if (text.isEmpty()) {
+        m_sceneLabel->hide();
+        m_sceneLabel->clear();
+    } else {
+        m_sceneLabel->setText(QStringLiteral("⚠ ") + text);
+        m_sceneLabel->show();
+    }
 }
 
 void MainWindow::createDockWidgets()

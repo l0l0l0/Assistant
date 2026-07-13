@@ -30,6 +30,12 @@ public:
     /// @param opacity Overlay opacity (0.0 - 1.0).
     QImage render(float opacity = 0.5f) const;
 
+    /// Render as ARGB with per-pixel alpha proportional to the accumulated
+    /// intensity (empty cells fully transparent) — for compositing onto the
+    /// board-space overlay buffer without hiding the board underneath.
+    /// @param maxAlpha Alpha of the hottest cell (0.0 - 1.0).
+    QImage renderArgb(float maxAlpha = 0.6f) const;
+
     /// Render the heatmap onto an existing OpenCV mat.
     cv::Mat renderOnMat(const cv::Mat& background, float opacity = 0.5f) const;
 

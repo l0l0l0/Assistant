@@ -145,6 +145,7 @@ set(SOURCES
     src/ibom/IBomParser.cpp
     src/ibom/IBomData.cpp
     src/ibom/ComponentMap.cpp
+    src/ibom/ProjectDiff.cpp
 
     # AI
     src/ai/InferenceEngine.cpp
@@ -193,6 +194,10 @@ set(SOURCES
     src/features/SnapshotHistory.cpp
     src/features/RemoteView.cpp
     src/features/DatasetCreator.cpp
+    src/features/BoardMosaic.cpp
+    src/features/BoardScanner.cpp
+    src/features/GoldenDiff.cpp
+    src/features/DepthInspector.cpp
 
     # Export
     src/export/ReportGenerator.cpp
@@ -204,6 +209,7 @@ set(SOURCES
     src/utils/GpuUtils.cpp
     src/utils/ImageUtils.cpp
     src/utils/Paths.cpp
+    src/utils/SceneQuality.cpp
 )
 
 set(HEADERS
@@ -222,6 +228,7 @@ set(HEADERS
     src/ibom/IBomParser.h
     src/ibom/IBomData.h
     src/ibom/ComponentMap.h
+    src/ibom/ProjectDiff.h
 
     # AI
     src/ai/InferenceEngine.h
@@ -271,6 +278,10 @@ set(HEADERS
     src/features/SnapshotHistory.h
     src/features/RemoteView.h
     src/features/DatasetCreator.h
+    src/features/BoardMosaic.h
+    src/features/BoardScanner.h
+    src/features/GoldenDiff.h
+    src/features/DepthInspector.h
 
     # Export
     src/export/ReportGenerator.h
@@ -282,6 +293,7 @@ set(HEADERS
     src/utils/GpuUtils.h
     src/utils/ImageUtils.h
     src/utils/Paths.h
+    src/utils/SceneQuality.h
 )
 
 # RealSense backend — only compiled (and moc'd) when librealsense2 is present,

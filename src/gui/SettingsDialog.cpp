@@ -374,6 +374,7 @@ void SettingsDialog::createInspectionTab(QTabWidget* tabs)
     m_sortMethod->addItem(tr("Alphabetic by value"),                     1);
     m_sortMethod->addItem(tr("Load order (matches PCB layout)"),         2);
     m_sortMethod->addItem(tr("Smallest footprint first"),                3);
+    m_sortMethod->addItem(tr("Nearest neighbor (shortest travel)"),      4);
     m_sortMethod->setToolTip(tr(
         "Order in which components are presented during inspection.\n"
         "Grouping by quantity minimizes SMD reel changes."));

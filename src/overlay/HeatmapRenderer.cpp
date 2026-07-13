@@ -69,6 +69,40 @@ QImage HeatmapRenderer::render(float opacity) const
                   static_cast<int>(rgb.step), QImage::Format_RGB888).copy();
 }
 
+QImage HeatmapRenderer::renderArgb(float maxAlpha) const
+{
+    if (m_accumulator.empty()) return {};
+
+    cv::Mat normalized;
+    const double maxVal = maxValue();
+    if (maxVal > 0) {
+        m_accumulator.convertTo(normalized, CV_8UC1, 255.0 / maxVal);
+    } else {
+        normalized = cv::Mat::zeros(m_accumulator.size(), CV_8UC1);
+    }
+    cv::GaussianBlur(normalized, normalized, cv::Size(5, 5), 0);
+
+    cv::Mat colored;
+    cv::applyColorMap(normalized, colored, cv::COLORMAP_JET);
+
+    const float a = std::clamp(maxAlpha, 0.0f, 1.0f);
+    QImage out(colored.cols, colored.rows, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < colored.rows; ++y) {
+        const cv::Vec3b* src  = colored.ptr<cv::Vec3b>(y);
+        const uint8_t*   heat = normalized.ptr<uint8_t>(y);
+        QRgb* dst = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < colored.cols; ++x) {
+            const int alpha = static_cast<int>(heat[x] * a);
+            // Premultiplied: scale the JET color (BGR) by the alpha.
+            dst[x] = qRgba(src[x][2] * alpha / 255,
+                           src[x][1] * alpha / 255,
+                           src[x][0] * alpha / 255,
+                           alpha);
+        }
+    }
+    return out;
+}
+
 cv::Mat HeatmapRenderer::renderOnMat(const cv::Mat& background, float opacity) const
 {
     if (m_accumulator.empty() || background.empty()) return background.clone();
