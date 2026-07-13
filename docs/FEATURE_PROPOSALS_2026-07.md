@@ -18,6 +18,11 @@
 > protocole de validation Jetson : [JETSON_SESSION_LOG.md](JETSON_SESSION_LOG.md) suite 147.
 > Restent proposés : thème B (B1 tour guidé, B2 annotations, B3 undo/audit) et thème C
 > (C1 diff de révisions, C2 bibliothèque de cartes).
+>
+> **Statut 2026-07-13 (suite 149)** : **B1, B3 et C1 implémentés** (route plus-proche-voisin +
+> raccourcis P/N/Shift+N + recentrage minimap ; Ctrl+Z + `inspection_log.csv` ;
+> `ProjectDiff` + dialog rework). Restent proposés : **B2 annotations** et **C2 bibliothèque
+> de cartes** (socle commun de persistance hash-keyée à concevoir ensemble).
 
 ---
 

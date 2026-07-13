@@ -145,6 +145,7 @@ set(SOURCES
     src/ibom/IBomParser.cpp
     src/ibom/IBomData.cpp
     src/ibom/ComponentMap.cpp
+    src/ibom/ProjectDiff.cpp
 
     # AI
     src/ai/InferenceEngine.cpp
@@ -227,6 +228,7 @@ set(HEADERS
     src/ibom/IBomParser.h
     src/ibom/IBomData.h
     src/ibom/ComponentMap.h
+    src/ibom/ProjectDiff.h
 
     # AI
     src/ai/InferenceEngine.h

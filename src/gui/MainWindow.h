@@ -122,6 +122,14 @@ signals:
     void goldenCompareRequested();
     /// Inspection menu: one-shot depth presence check (RealSense D405).
     void depthInspectRequested();
+    /// Guided tour (hands-free at the microscope): P = mark placed & advance,
+    /// N = next (skip), Shift+N = previous, Ctrl+Z = undo last placed.
+    void tourMarkPlaced();
+    void tourNext();
+    void tourPrev();
+    void tourUndo();
+    /// Inspection menu: diff the loaded iBOM against another revision file.
+    void revisionCompareRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;

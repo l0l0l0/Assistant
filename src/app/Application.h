@@ -246,6 +246,18 @@ private:
     /// which per-board data (golden scans) is stored. Empty if unreadable.
     QString ibomContentHash() const;
 
+    // ── Guided tour / audit / revision diff (FEATURE_PROPOSALS B1/B3/C1) ──
+    /// Skip the current inspection step (N shortcut and the panel button
+    /// share this path so both mark the BOM row and journal the action).
+    void tourSkip();
+    /// Ctrl+Z: revert the most recent placement of this session.
+    void undoLastPlacement();
+    /// Append one line to the per-board inspection audit trail
+    /// (dataDir()/inspection_log.csv — timestamp, board hash, face, action, ref).
+    void appendInspectionLog(const QString& action, const std::string& ref);
+    /// Diff the loaded iBOM against another revision file (dialog + table).
+    void compareRevision();
+
     QApplication&                               m_qapp;
     std::unique_ptr<Config>                    m_config;
     std::unique_ptr<gui::MainWindow>           m_mainWindow;
@@ -366,6 +378,12 @@ private:
     // Components already placed during the current inspection — used to render
     // them in a faded "done" color in the overlay.
     std::unordered_set<std::string> m_placedRefs;
+    // This session's placements in order — the Ctrl+Z undo stack (restored
+    // sessions are deliberately not undoable, only live actions are).
+    std::vector<std::string> m_placedOrder;
+    // Content hash of the loaded iBOM, cached at load (the audit log appends
+    // on every placement — re-hashing the HTML each click would be wasteful).
+    QString m_ibomHash;
 
     // Heatmap visibility
     bool m_showHeatmap = false;

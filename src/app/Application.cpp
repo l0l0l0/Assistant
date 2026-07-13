@@ -22,6 +22,7 @@
 #include "ai/ComponentDetector.h"
 #include "ibom/IBomParser.h"
 #include "ibom/IBomData.h"
+#include "ibom/ProjectDiff.h"
 #include "overlay/OverlayRenderer.h"
 #include "overlay/Homography.h"
 #include "overlay/HeatmapRenderer.h"
@@ -3693,6 +3694,9 @@ void Application::connectControlSignals()
         m_selectedRef = step.reference;
         if (bomPanel)
             bomPanel->highlightComponent(step.reference);
+        // Guided tour (B1): the PCB Map follows the route — setSelectedRef
+        // recenters the view on the target when zoomed (suite 145 behavior).
+        m_mainWindow->boardMinimap()->setSelectedRef(step.reference);
         inspPanel->onStepChanged(
             QString::fromStdString(step.reference),
             QString::fromStdString(step.value),
@@ -3710,6 +3714,8 @@ void Application::connectControlSignals()
     connect(m_pickAndPlace.get(), &features::PickAndPlace::stepPlaced,
             this, [this, bomPanel](const std::string& ref) {
         m_placedRefs.insert(ref);
+        m_placedOrder.push_back(ref);            // Ctrl+Z stack (B3)
+        appendInspectionLog(QStringLiteral("placed"), ref);
         if (bomPanel) bomPanel->setComponentState(ref, tr("Placed"));
         m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
         refreshInspectionStats();
@@ -3725,21 +3731,43 @@ void Application::connectControlSignals()
     connect(inspPanel, &gui::InspectionPanel::placedClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::markPlaced);
     connect(inspPanel, &gui::InspectionPanel::skipClicked,
-            this, [this, bomPanel]() {
-        if (bomPanel && m_pickAndPlace->currentIndex() < m_pickAndPlace->totalSteps()) {
-            const auto& step = m_pickAndPlace->currentStep();
-            bomPanel->setComponentState(step.reference, tr("Skipped"));
-        }
-        m_pickAndPlace->skip();
-    });
+            this, &Application::tourSkip);
     connect(inspPanel, &gui::InspectionPanel::backClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::goBack);
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             this, [this]() {
         m_placedRefs.clear();
+        m_placedOrder.clear();
+        appendInspectionLog(QStringLiteral("reset"), "*");
         refreshInspectionStats();
         saveInspectionState();  // empty set removes the saved entry
     });
+
+    // ── Guided tour: hands-free shortcuts (B1/B3) ───────────────
+    // P / N / Shift+N / Ctrl+Z go through the exact same paths as the
+    // InspectionPanel buttons, so state, journal and persistence stay single.
+    auto requireTour = [this]() {
+        if (m_pickAndPlace->totalSteps() > 0) return true;
+        m_mainWindow->updateStatusMessage(
+            tr("Guided tour: start an inspection first (I)"));
+        return false;
+    };
+    connect(m_mainWindow.get(), &gui::MainWindow::tourMarkPlaced,
+            this, [this, requireTour]() {
+        if (requireTour()) m_pickAndPlace->markPlaced();
+    });
+    connect(m_mainWindow.get(), &gui::MainWindow::tourNext,
+            this, [this, requireTour]() {
+        if (requireTour()) tourSkip();
+    });
+    connect(m_mainWindow.get(), &gui::MainWindow::tourPrev,
+            this, [this, requireTour]() {
+        if (requireTour()) m_pickAndPlace->goBack();
+    });
+    connect(m_mainWindow.get(), &gui::MainWindow::tourUndo,
+            this, &Application::undoLastPlacement);
+    connect(m_mainWindow.get(), &gui::MainWindow::revisionCompareRequested,
+            this, &Application::compareRevision);
     connect(inspPanel, &gui::InspectionPanel::resetClicked,
             m_pickAndPlace.get(), &features::PickAndPlace::reset);
 
@@ -4043,6 +4071,10 @@ void Application::loadIBomFile(const QString& path)
     m_ibomProject = std::make_shared<IBomProject>(std::move(*result));
     spdlog::info("iBOM loaded: {} components, {} BOM groups",
                  m_ibomProject->components.size(), m_ibomProject->bomGroups.size());
+    // Cache the board hash (audit log key) and reset the session undo stack —
+    // it must never cross board boundaries.
+    m_ibomHash = ibomContentHash();
+    m_placedOrder.clear();
 
 
     // Feed to BOM panel
@@ -4173,11 +4205,15 @@ void Application::startInspection()
 
     // Apply user-configured sort method (overrides the default sort done in loadComponents)
     switch (m_config->sortMethod()) {
-    case SortMethod::ValueCount:      m_pickAndPlace->sortByValueGroupCount(); break;
-    case SortMethod::ValueAlphabetic: m_pickAndPlace->sortByValueGroup();      break;
-    case SortMethod::Position:        m_pickAndPlace->sortByPosition();        break;
-    case SortMethod::FootprintSize:   m_pickAndPlace->sortByFootprintSize();   break;
+    case SortMethod::ValueCount:      m_pickAndPlace->sortByValueGroupCount();  break;
+    case SortMethod::ValueAlphabetic: m_pickAndPlace->sortByValueGroup();       break;
+    case SortMethod::Position:        m_pickAndPlace->sortByPosition();         break;
+    case SortMethod::FootprintSize:   m_pickAndPlace->sortByFootprintSize();    break;
+    case SortMethod::NearestNeighbor: m_pickAndPlace->sortByNearestNeighbor();  break;
     }
+
+    m_placedOrder.clear();   // fresh session = fresh undo stack
+    appendInspectionLog(QStringLiteral("start"), "*");
 
     // Resume a previous session of this board, if one was saved (state is
     // written on every "Placed" click). The Reset button starts over.
@@ -4579,6 +4615,135 @@ void Application::takeScreenshot()
     } else {
         m_mainWindow->updateStatusMessage(tr("Failed to save screenshot"));
     }
+}
+
+// ── Guided tour / audit / revision diff (FEATURE_PROPOSALS B1/B3/C1) ──────
+
+namespace {
+// Defined below with the golden-diff/depth-check section.
+void showResultsDialog(QWidget* parent, const QString& title,
+                       const QStringList& headers,
+                       const std::vector<QStringList>& rows);
+} // namespace
+
+void Application::tourSkip()
+{
+    if (m_pickAndPlace->currentIndex() < m_pickAndPlace->totalSteps()) {
+        const auto& step = m_pickAndPlace->currentStep();
+        if (auto* bomPanel = m_mainWindow->bomPanel())
+            bomPanel->setComponentState(step.reference, tr("Skipped"));
+        appendInspectionLog(QStringLiteral("skipped"), step.reference);
+    }
+    m_pickAndPlace->skip();
+}
+
+void Application::undoLastPlacement()
+{
+    if (m_placedOrder.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Nothing to undo (only this session's placements are undoable)"));
+        return;
+    }
+    const std::string ref = m_placedOrder.back();
+    m_placedOrder.pop_back();
+
+    if (!m_pickAndPlace->unplace(ref)) {
+        // Steps were reloaded/reset since — the stack entry is stale.
+        m_mainWindow->updateStatusMessage(
+            tr("Cannot undo %1 — inspection was reset since")
+                .arg(QString::fromStdString(ref)));
+        return;
+    }
+    m_placedRefs.erase(ref);
+    if (auto* bomPanel = m_mainWindow->bomPanel())
+        bomPanel->setComponentState(ref, QString());
+    m_mainWindow->boardMinimap()->setPlacedRefs(m_placedRefs);
+    refreshInspectionStats();
+    saveInspectionState();
+    appendInspectionLog(QStringLiteral("undo"), ref);
+    m_mainWindow->updateStatusMessage(
+        tr("Undid placement of %1").arg(QString::fromStdString(ref)));
+}
+
+void Application::appendInspectionLog(const QString& action, const std::string& ref)
+{
+    const auto path = utils::dataDir() / "inspection_log.csv";
+    const bool fresh = !std::filesystem::exists(path);
+    std::ofstream ofs(path, std::ios::app);
+    if (!ofs) return;   // audit is best-effort, never blocks the workflow
+    if (fresh) ofs << "timestamp,board,face,action,ref\n";
+    ofs << QDateTime::currentDateTime().toString(Qt::ISODate).toStdString() << ','
+        << m_ibomHash.toStdString() << ','
+        << (m_activeLayer == Layer::Front ? "front" : "back") << ','
+        << action.toStdString() << ',' << ref << '\n';
+}
+
+void Application::compareRevision()
+{
+    if (!m_ibomProject) {
+        m_mainWindow->updateStatusMessage(tr("Revision diff: load an iBOM first"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        m_mainWindow.get(), tr("Select the target revision's iBOM file"),
+        QString(), tr("iBOM HTML files (*.html *.htm)"));
+    if (path.isEmpty()) return;
+
+    IBomParser parser;
+    auto other = parser.parseFile(path.toStdString());
+    if (!other) {
+        m_mainWindow->updateStatusMessage(
+            tr("Revision diff: failed to parse %1").arg(path));
+        return;
+    }
+
+    const RevisionDiff diff = diffProjects(*m_ibomProject, *other);
+    if (diff.empty()) {
+        m_mainWindow->updateStatusMessage(
+            tr("Revision diff: identical BOMs (%1 components)")
+                .arg(diff.unchanged));
+        return;
+    }
+
+    // Rework order: desolder first, then place, then exchanges.
+    std::vector<QStringList> rows;
+    for (const auto& ref : diff.removed)
+        rows.push_back({QString::fromStdString(ref), tr("REMOVE"),
+                        tr("not in the target revision")});
+    for (const auto& ref : diff.added)
+        rows.push_back({QString::fromStdString(ref), tr("ADD"),
+                        tr("new in the target revision")});
+    for (const auto& ch : diff.changed) {
+        QStringList what;
+        if (ch.valueChanged)
+            what << tr("value %1 → %2")
+                        .arg(QString::fromStdString(ch.oldValue),
+                             QString::fromStdString(ch.newValue));
+        if (ch.footprintChanged)
+            what << tr("footprint %1 → %2")
+                        .arg(QString::fromStdString(ch.oldFootprint),
+                             QString::fromStdString(ch.newFootprint));
+        if (ch.layerChanged) what << tr("changes side");
+        if (ch.moved)
+            what << tr("moves %1 mm").arg(ch.moveDistMm, 0, 'f', 1);
+        rows.push_back({QString::fromStdString(ch.ref), tr("CHANGE"),
+                        what.join(QStringLiteral(" · "))});
+    }
+
+    showResultsDialog(m_mainWindow.get(),
+                      tr("Revision diff — %1 vs %2")
+                          .arg(QFileInfo(QString::fromStdString(
+                                   m_config->ibomFilePath())).fileName(),
+                               QFileInfo(path).fileName()),
+                      {tr("Ref"), tr("Action"), tr("Detail")}, rows);
+
+    spdlog::info("[revdiff] {} removed, {} added, {} changed, {} unchanged",
+                 diff.removed.size(), diff.added.size(), diff.changed.size(),
+                 diff.unchanged);
+    m_mainWindow->updateStatusMessage(
+        tr("Revision diff: %1 to remove, %2 to add, %3 to change (%4 unchanged)")
+            .arg(diff.removed.size()).arg(diff.added.size())
+            .arg(diff.changed.size()).arg(diff.unchanged));
 }
 
 // ── Board scan / golden diff / depth check (FEATURE_PROPOSALS A1-A3) ──────

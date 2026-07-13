@@ -27,6 +27,7 @@ public:
         std::string value;
         std::string footprint;
         Layer       layer = Layer::Front;
+        Point2D     position;          ///< PCB mm (route ordering, navigation)
         bool        placed = false;
         int         order  = 0;
     };
@@ -47,6 +48,12 @@ public:
     /// Custom sort by footprint size (smallest first)
     void sortByFootprintSize();
 
+    /// Shortest-travel route: greedy nearest-neighbor walk over component
+    /// positions, starting from the top-left-most part — the guided-tour
+    /// order (FEATURE_PROPOSALS B1). At the microscope this minimizes stage
+    /// travel between consecutive components.
+    void sortByNearestNeighbor();
+
     /// Get current step
     const PlacementStep& currentStep() const;
 
@@ -61,6 +68,11 @@ public:
 
     /// Reset all placements
     void reset();
+
+    /// Undo support (FEATURE_PROPOSALS B3): un-mark a placed component and
+    /// make it the current step again. Emits currentStepChanged and
+    /// progressChanged. @return false if the ref is unknown or not placed.
+    bool unplace(const std::string& reference);
 
     /// Restore a previous session: mark the given references as placed and
     /// position on the first unplaced step. Emits progressChanged and

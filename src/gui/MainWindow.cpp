@@ -354,6 +354,39 @@ void MainWindow::createMenuBar()
     connect(m_actDepthCheck, &QAction::triggered,
             this, &MainWindow::depthInspectRequested);
 
+    // ── Guided tour: hands-free stepping through the inspection ──
+    inspectMenu->addSeparator();
+    auto* actTourPlaced = inspectMenu->addAction(tr("Mark Placed && Next"));
+    actTourPlaced->setShortcut(Qt::Key_P);
+    actTourPlaced->setToolTip(tr(
+        "Mark the current inspection component as placed and jump to the "
+        "next one on the route — hands stay on the board."));
+    connect(actTourPlaced, &QAction::triggered, this, &MainWindow::tourMarkPlaced);
+    addAction(actTourPlaced);
+
+    auto* actTourNext = inspectMenu->addAction(tr("Next Component (skip)"));
+    actTourNext->setShortcut(Qt::Key_N);
+    connect(actTourNext, &QAction::triggered, this, &MainWindow::tourNext);
+    addAction(actTourNext);
+
+    auto* actTourPrev = inspectMenu->addAction(tr("Previous Component"));
+    actTourPrev->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_N));
+    connect(actTourPrev, &QAction::triggered, this, &MainWindow::tourPrev);
+    addAction(actTourPrev);
+
+    auto* actTourUndo = inspectMenu->addAction(tr("Undo Last Placed"));
+    actTourUndo->setShortcut(QKeySequence::Undo);
+    connect(actTourUndo, &QAction::triggered, this, &MainWindow::tourUndo);
+    addAction(actTourUndo);
+
+    inspectMenu->addSeparator();
+    auto* actRevDiff = inspectMenu->addAction(tr("Compare with Another Revision…"));
+    actRevDiff->setToolTip(tr(
+        "Diff the loaded iBOM against another revision's iBOM file: "
+        "components to remove, add, or exchange for an update rework."));
+    connect(actRevDiff, &QAction::triggered,
+            this, &MainWindow::revisionCompareRequested);
+
     // Depth/3D view switching is done via the in-image ViewModeBar overlay;
     // keep the actions alive for keyboard shortcuts (D / 3) but don't add them
     // to the View menu — that menu is for GUI panels, not view modes.

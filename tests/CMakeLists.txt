@@ -112,6 +112,14 @@ add_ibom_test(test_scene_quality
     LIBS    opencv_core opencv_imgproc
 )
 
+# Revision diff test — update-rework classification (C1). Pure std logic;
+# nlohmann_json only because IBomData.h includes it.
+add_ibom_test(test_project_diff
+    SOURCES test_project_diff.cpp
+            ${CMAKE_SOURCE_DIR}/src/ibom/ProjectDiff.cpp
+    LIBS    nlohmann_json::nlohmann_json
+)
+
 # Component matching test — needs ComponentMap.cpp (no extra libs)
 add_ibom_test(test_component_matching
     SOURCES test_component_matching.cpp
@@ -180,6 +188,24 @@ if(Qt6_FOUND)
     add_test(NAME test_tracking_worker COMMAND test_tracking_worker)
 else()
     message(STATUS "Qt6 Core not found — skipping test_tracking_worker")
+endif()
+
+# PickAndPlace test — nearest-neighbor route + unplace (B1/B3). QObject
+# (AUTOMOC), Qt6::Core is enough.
+if(Qt6_FOUND)
+    add_executable(test_pickandplace
+        test_pickandplace.cpp
+        ${CMAKE_SOURCE_DIR}/src/features/PickAndPlace.cpp
+    )
+    set_target_properties(test_pickandplace PROPERTIES AUTOMOC ON)
+    target_include_directories(test_pickandplace PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(test_pickandplace PRIVATE cxx_std_20)
+    target_link_libraries(test_pickandplace PRIVATE
+        Catch2::Catch2WithMain
+        Qt6::Core
+        spdlog::spdlog
+    )
+    add_test(NAME test_pickandplace COMMAND test_pickandplace)
 endif()
 
 # Dataset creator test — class mapping + YOLO label projection. DatasetCreator
